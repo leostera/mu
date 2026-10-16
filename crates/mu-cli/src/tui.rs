@@ -119,6 +119,13 @@ impl TranscriptScroll {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComposerAction {
+    OpenCommandMenu,
+    ExecuteCommand,
+    Submit,
+}
+
 #[derive(Default)]
 struct Composer {
     input: Vec<char>,
@@ -130,6 +137,92 @@ struct Composer {
 impl Composer {
     fn input_text(&self) -> String {
         self.input.iter().collect()
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Option<ComposerAction> {
+        match key.code {
+            KeyCode::Char('/') if self.input.is_empty() => {
+                self.insert_char('/');
+                Some(ComposerAction::OpenCommandMenu)
+            }
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+            {
+                self.insert_char('\n');
+                None
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_char('\n');
+                None
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_to_line_start();
+                None
+            }
+            KeyCode::Enter if self.input_text().starts_with('/') => {
+                Some(ComposerAction::ExecuteCommand)
+            }
+            KeyCode::Enter => Some(ComposerAction::Submit),
+            KeyCode::Esc => {
+                self.input.clear();
+                self.cursor = 0;
+                None
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.insert_char(ch);
+                None
+            }
+            KeyCode::Backspace if self.cursor > 0 => {
+                self.cursor -= 1;
+                self.input.remove(self.cursor);
+                None
+            }
+            KeyCode::Delete if self.cursor < self.input.len() => {
+                self.input.remove(self.cursor);
+                None
+            }
+            KeyCode::Left if self.cursor > 0 => {
+                self.cursor -= 1;
+                None
+            }
+            KeyCode::Right if self.cursor < self.input.len() => {
+                self.cursor += 1;
+                None
+            }
+            KeyCode::Home => {
+                self.cursor = self
+                    .input
+                    .iter()
+                    .rposition(|ch| *ch == '\n')
+                    .map_or(0, |i| i + 1);
+                None
+            }
+            KeyCode::End => {
+                self.cursor = self
+                    .input
+                    .iter()
+                    .enumerate()
+                    .skip(self.cursor)
+                    .find(|(_, ch)| **ch == '\n')
+                    .map_or(self.input.len(), |(i, _)| i);
+                None
+            }
+            KeyCode::Up => {
+                self.history_up();
+                None
+            }
+            KeyCode::Down => {
+                self.history_down();
+                None
+            }
+            _ => None,
+        }
     }
 
     fn insert_char(&mut self, ch: char) {
@@ -454,90 +547,52 @@ fn handle_key(
         cycle_model(app, &agent);
         return;
     }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.quit = true;
+        return;
+    }
+    if key.code == KeyCode::Char('d')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && app.input.is_empty()
+    {
+        app.quit = true;
+        return;
+    }
     match key.code {
-        KeyCode::Char('/') if app.input.is_empty() => {
-            insert_char(app, '/');
+        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.transcript_scroll.scroll_to_start();
+            return;
+        }
+        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.transcript_scroll.scroll_to_end();
+            return;
+        }
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.transcript_scroll.scroll_by(-8);
+            return;
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.transcript_scroll.scroll_by(8);
+            return;
+        }
+        KeyCode::PageUp => {
+            app.transcript_scroll.scroll_by(-12);
+            return;
+        }
+        KeyCode::PageDown => {
+            app.transcript_scroll.scroll_by(12);
+            return;
+        }
+        _ => {}
+    }
+    match app.composer.handle_key(key) {
+        Some(ComposerAction::OpenCommandMenu) => {
             app.command_menu_open = true;
             app.command_selection = 0;
         }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => app.quit = true,
-        KeyCode::Char('d')
-            if key.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() =>
-        {
-            app.quit = true
-        }
-        KeyCode::Esc => {
-            app.input.clear();
-            app.cursor = 0;
-        }
-        KeyCode::Enter
-            if key
-                .modifiers
-                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
-        {
-            insert_char(app, '\n')
-        }
-        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            insert_char(app, '\n')
-        }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            delete_to_line_start(app)
-        }
-        KeyCode::Enter if app.input_text().starts_with('/') => {
-            execute_command(app, &agent);
-        }
-        KeyCode::Enter => app.submit(agent, tx),
-        KeyCode::Char(ch)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            insert_char(app, ch)
-        }
-        KeyCode::Backspace if app.cursor > 0 => {
-            app.cursor -= 1;
-            let cursor = app.cursor;
-            app.input.remove(cursor);
-        }
-        KeyCode::Delete if app.cursor < app.input.len() => {
-            let cursor = app.cursor;
-            app.input.remove(cursor);
-        }
-        KeyCode::Left if app.cursor > 0 => app.cursor -= 1,
-        KeyCode::Right if app.cursor < app.input.len() => app.cursor += 1,
-        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.transcript_scroll.scroll_to_start()
-        }
-        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.transcript_scroll.scroll_to_end()
-        }
-        KeyCode::Home => {
-            app.cursor = app
-                .input
-                .iter()
-                .rposition(|ch| *ch == '\n')
-                .map_or(0, |i| i + 1)
-        }
-        KeyCode::End => {
-            app.cursor = app
-                .input
-                .iter()
-                .enumerate()
-                .skip(app.cursor)
-                .find(|(_, ch)| **ch == '\n')
-                .map_or(app.input.len(), |(i, _)| i)
-        }
-        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.transcript_scroll.scroll_by(-8)
-        }
-        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.transcript_scroll.scroll_by(8)
-        }
-        KeyCode::PageUp => app.transcript_scroll.scroll_by(-12),
-        KeyCode::PageDown => app.transcript_scroll.scroll_by(12),
-        KeyCode::Up => history_up(app),
-        KeyCode::Down => history_down(app),
-        _ => {}
+        Some(ComposerAction::ExecuteCommand) => execute_command(app, &agent),
+        Some(ComposerAction::Submit) => app.submit(agent, tx),
+        None => {}
     }
 }
 
@@ -705,20 +760,8 @@ fn handle_mouse(kind: MouseEventKind, app: &mut App) {
     }
 }
 
-fn delete_to_line_start(app: &mut App) {
-    app.composer.delete_to_line_start();
-}
-
 fn insert_char(app: &mut App, ch: char) {
     app.composer.insert_char(ch);
-}
-
-fn history_up(app: &mut App) {
-    app.composer.history_up();
-}
-
-fn history_down(app: &mut App) {
-    app.composer.history_down();
 }
 
 fn render(frame: &mut Frame, app: &mut App) {
@@ -1196,10 +1239,10 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentEvent, App, Message, Role, UiEvent, delete_to_line_start, handle_mouse, history_down,
-        history_up, insert_char, render,
+        AgentEvent, App, Composer, ComposerAction, Message, Role, UiEvent, handle_mouse,
+        insert_char, render,
     };
-    use crossterm::event::MouseEventKind;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
@@ -1300,6 +1343,31 @@ mod tests {
     }
 
     #[test]
+    fn composer_owns_key_to_action_mapping() {
+        let mut composer = Composer::default();
+        assert_eq!(
+            composer.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)),
+            Some(ComposerAction::OpenCommandMenu)
+        );
+        assert_eq!(
+            composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(ComposerAction::ExecuteCommand)
+        );
+
+        composer.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        composer.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(
+            composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+            None
+        );
+        assert_eq!(composer.input_text(), "x\n");
+        assert_eq!(
+            composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(ComposerAction::Submit)
+        );
+    }
+
+    #[test]
     fn pasted_text_is_inserted_at_the_cursor_with_normalized_newlines() {
         let mut composer = super::Composer::default();
         composer.insert_text("ab\r\ncd\ref");
@@ -1319,9 +1387,9 @@ mod tests {
         assert_eq!(app.input_text(), "a\nb");
 
         app.prompt_history.push("previous prompt".into());
-        history_up(&mut app);
+        app.composer.history_up();
         assert_eq!(app.input_text(), "previous prompt");
-        history_down(&mut app);
+        app.composer.history_down();
         assert_eq!(app.input_text(), "");
     }
 
@@ -1356,7 +1424,7 @@ mod tests {
         assert!(screen.contains("first row"));
         assert!(screen.contains("second row"));
 
-        delete_to_line_start(&mut app);
+        app.composer.delete_to_line_start();
         let cursor = app.cursor - 1;
         app.input.remove(cursor);
         app.cursor -= 1;
