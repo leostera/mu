@@ -1,0 +1,10 @@
+[package]
+name = "mu-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mu-core = { path = "../mu-core" }
+mu-runtime-deno = { path = "../mu-runtime-deno" }

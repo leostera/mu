@@ -1,0 +1,10 @@
+[package]
+name = "mu-runtime-deno"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+deno_core = "0.412.0"
+thiserror.workspace = true
