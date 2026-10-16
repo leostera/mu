@@ -1,0 +1,610 @@
+{
+  "environment": "isolated HOME/settings, PI_OFFLINE=1, --offline, no extensions or skills, no model requests",
+  "oracle": "Pi interactive TUI",
+  "oracleVersion": "1.3.0",
+  "sessionCount": 100,
+  "sessions": [
+    {
+      "category": "model-cycle",
+      "file": "001-model-cycle-01.json",
+      "id": "pi-ui-001",
+      "intent": "model-cycle-01"
+    },
+    {
+      "category": "model-cycle",
+      "file": "002-model-cycle-02.json",
+      "id": "pi-ui-002",
+      "intent": "model-cycle-02"
+    },
+    {
+      "category": "model-cycle",
+      "file": "003-model-cycle-03.json",
+      "id": "pi-ui-003",
+      "intent": "model-cycle-03"
+    },
+    {
+      "category": "model-cycle",
+      "file": "004-model-cycle-04.json",
+      "id": "pi-ui-004",
+      "intent": "model-cycle-04"
+    },
+    {
+      "category": "model-cycle",
+      "file": "005-model-cycle-05.json",
+      "id": "pi-ui-005",
+      "intent": "model-cycle-05"
+    },
+    {
+      "category": "model-cycle",
+      "file": "006-model-cycle-06.json",
+      "id": "pi-ui-006",
+      "intent": "model-cycle-06"
+    },
+    {
+      "category": "model-cycle",
+      "file": "007-model-cycle-07.json",
+      "id": "pi-ui-007",
+      "intent": "model-cycle-07"
+    },
+    {
+      "category": "model-cycle",
+      "file": "008-model-cycle-08.json",
+      "id": "pi-ui-008",
+      "intent": "model-cycle-08"
+    },
+    {
+      "category": "model-cycle",
+      "file": "009-model-cycle-09.json",
+      "id": "pi-ui-009",
+      "intent": "model-cycle-09"
+    },
+    {
+      "category": "model-cycle",
+      "file": "010-model-cycle-10.json",
+      "id": "pi-ui-010",
+      "intent": "model-cycle-10"
+    },
+    {
+      "category": "model-cycle",
+      "file": "011-model-cycle-11.json",
+      "id": "pi-ui-011",
+      "intent": "model-cycle-11"
+    },
+    {
+      "category": "model-cycle",
+      "file": "012-model-cycle-12.json",
+      "id": "pi-ui-012",
+      "intent": "model-cycle-12"
+    },
+    {
+      "category": "model-cycle",
+      "file": "013-model-cycle-13.json",
+      "id": "pi-ui-013",
+      "intent": "model-cycle-13"
+    },
+    {
+      "category": "model-cycle",
+      "file": "014-model-cycle-14.json",
+      "id": "pi-ui-014",
+      "intent": "model-cycle-14"
+    },
+    {
+      "category": "model-cycle",
+      "file": "015-model-cycle-15.json",
+      "id": "pi-ui-015",
+      "intent": "model-cycle-15"
+    },
+    {
+      "category": "model-cycle",
+      "file": "016-model-cycle-16.json",
+      "id": "pi-ui-016",
+      "intent": "model-cycle-16"
+    },
+    {
+      "category": "model-cycle",
+      "file": "017-model-cycle-17.json",
+      "id": "pi-ui-017",
+      "intent": "model-cycle-17"
+    },
+    {
+      "category": "model-cycle",
+      "file": "018-model-cycle-18.json",
+      "id": "pi-ui-018",
+      "intent": "model-cycle-18"
+    },
+    {
+      "category": "model-cycle",
+      "file": "019-model-cycle-19.json",
+      "id": "pi-ui-019",
+      "intent": "model-cycle-19"
+    },
+    {
+      "category": "model-cycle",
+      "file": "020-model-cycle-20.json",
+      "id": "pi-ui-020",
+      "intent": "model-cycle-20"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "021-slash-menu-01-empty.json",
+      "id": "pi-ui-021",
+      "intent": "slash-menu-01-empty"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "022-slash-menu-02-m.json",
+      "id": "pi-ui-022",
+      "intent": "slash-menu-02-m"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "023-slash-menu-03-mo.json",
+      "id": "pi-ui-023",
+      "intent": "slash-menu-03-mo"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "024-slash-menu-04-model.json",
+      "id": "pi-ui-024",
+      "intent": "slash-menu-04-model"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "025-slash-menu-05-s.json",
+      "id": "pi-ui-025",
+      "intent": "slash-menu-05-s"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "026-slash-menu-06-se.json",
+      "id": "pi-ui-026",
+      "intent": "slash-menu-06-se"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "027-slash-menu-07-set.json",
+      "id": "pi-ui-027",
+      "intent": "slash-menu-07-set"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "028-slash-menu-08-t.json",
+      "id": "pi-ui-028",
+      "intent": "slash-menu-08-t"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "029-slash-menu-09-th.json",
+      "id": "pi-ui-029",
+      "intent": "slash-menu-09-th"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "030-slash-menu-10-think.json",
+      "id": "pi-ui-030",
+      "intent": "slash-menu-10-think"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "031-slash-menu-11-h.json",
+      "id": "pi-ui-031",
+      "intent": "slash-menu-11-h"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "032-slash-menu-12-he.json",
+      "id": "pi-ui-032",
+      "intent": "slash-menu-12-he"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "033-slash-menu-13-help.json",
+      "id": "pi-ui-033",
+      "intent": "slash-menu-13-help"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "034-slash-menu-14-n.json",
+      "id": "pi-ui-034",
+      "intent": "slash-menu-14-n"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "035-slash-menu-15-new.json",
+      "id": "pi-ui-035",
+      "intent": "slash-menu-15-new"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "036-slash-menu-16-r.json",
+      "id": "pi-ui-036",
+      "intent": "slash-menu-16-r"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "037-slash-menu-17-res.json",
+      "id": "pi-ui-037",
+      "intent": "slash-menu-17-res"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "038-slash-menu-18-tools.json",
+      "id": "pi-ui-038",
+      "intent": "slash-menu-18-tools"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "039-slash-menu-19-scoped.json",
+      "id": "pi-ui-039",
+      "intent": "slash-menu-19-scoped"
+    },
+    {
+      "category": "slash-command-menu",
+      "file": "040-slash-menu-20-unknown.json",
+      "id": "pi-ui-040",
+      "intent": "slash-menu-20-unknown"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "041-composer-01.json",
+      "id": "pi-ui-041",
+      "intent": "composer-01"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "042-composer-02.json",
+      "id": "pi-ui-042",
+      "intent": "composer-02"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "043-composer-03.json",
+      "id": "pi-ui-043",
+      "intent": "composer-03"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "044-composer-04.json",
+      "id": "pi-ui-044",
+      "intent": "composer-04"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "045-composer-05.json",
+      "id": "pi-ui-045",
+      "intent": "composer-05"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "046-composer-06.json",
+      "id": "pi-ui-046",
+      "intent": "composer-06"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "047-composer-07.json",
+      "id": "pi-ui-047",
+      "intent": "composer-07"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "048-composer-08.json",
+      "id": "pi-ui-048",
+      "intent": "composer-08"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "049-composer-09.json",
+      "id": "pi-ui-049",
+      "intent": "composer-09"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "050-composer-10.json",
+      "id": "pi-ui-050",
+      "intent": "composer-10"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "051-composer-11.json",
+      "id": "pi-ui-051",
+      "intent": "composer-11"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "052-composer-12.json",
+      "id": "pi-ui-052",
+      "intent": "composer-12"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "053-composer-13.json",
+      "id": "pi-ui-053",
+      "intent": "composer-13"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "054-composer-14.json",
+      "id": "pi-ui-054",
+      "intent": "composer-14"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "055-composer-15.json",
+      "id": "pi-ui-055",
+      "intent": "composer-15"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "056-composer-16.json",
+      "id": "pi-ui-056",
+      "intent": "composer-16"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "057-composer-17.json",
+      "id": "pi-ui-057",
+      "intent": "composer-17"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "058-composer-18.json",
+      "id": "pi-ui-058",
+      "intent": "composer-18"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "059-composer-19.json",
+      "id": "pi-ui-059",
+      "intent": "composer-19"
+    },
+    {
+      "category": "composer-sizing-and-editing",
+      "file": "060-composer-20.json",
+      "id": "pi-ui-060",
+      "intent": "composer-20"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "061-resize-01-80x24.json",
+      "id": "pi-ui-061",
+      "intent": "resize-01-80x24"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "062-resize-02-120x40.json",
+      "id": "pi-ui-062",
+      "intent": "resize-02-120x40"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "063-resize-03-60x24.json",
+      "id": "pi-ui-063",
+      "intent": "resize-03-60x24"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "064-resize-04-140x40.json",
+      "id": "pi-ui-064",
+      "intent": "resize-04-140x40"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "065-resize-05-90x20.json",
+      "id": "pi-ui-065",
+      "intent": "resize-05-90x20"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "066-resize-06-110x32.json",
+      "id": "pi-ui-066",
+      "intent": "resize-06-110x32"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "067-resize-07-72x28.json",
+      "id": "pi-ui-067",
+      "intent": "resize-07-72x28"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "068-resize-08-160x45.json",
+      "id": "pi-ui-068",
+      "intent": "resize-08-160x45"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "069-resize-09-50x18.json",
+      "id": "pi-ui-069",
+      "intent": "resize-09-50x18"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "070-resize-10-100x24.json",
+      "id": "pi-ui-070",
+      "intent": "resize-10-100x24"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "071-resize-11-132x36.json",
+      "id": "pi-ui-071",
+      "intent": "resize-11-132x36"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "072-resize-12-84x30.json",
+      "id": "pi-ui-072",
+      "intent": "resize-12-84x30"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "073-resize-13-118x26.json",
+      "id": "pi-ui-073",
+      "intent": "resize-13-118x26"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "074-resize-14-96x42.json",
+      "id": "pi-ui-074",
+      "intent": "resize-14-96x42"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "075-resize-15-64x22.json",
+      "id": "pi-ui-075",
+      "intent": "resize-15-64x22"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "076-resize-16-150x34.json",
+      "id": "pi-ui-076",
+      "intent": "resize-16-150x34"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "077-resize-17-105x28.json",
+      "id": "pi-ui-077",
+      "intent": "resize-17-105x28"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "078-resize-18-78x36.json",
+      "id": "pi-ui-078",
+      "intent": "resize-18-78x36"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "079-resize-19-128x20.json",
+      "id": "pi-ui-079",
+      "intent": "resize-19-128x20"
+    },
+    {
+      "category": "terminal-resize",
+      "file": "080-resize-20-88x44.json",
+      "id": "pi-ui-080",
+      "intent": "resize-20-88x44"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "081-scroll-01.json",
+      "id": "pi-ui-081",
+      "intent": "scroll-01"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "082-scroll-02.json",
+      "id": "pi-ui-082",
+      "intent": "scroll-02"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "083-scroll-03.json",
+      "id": "pi-ui-083",
+      "intent": "scroll-03"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "084-scroll-04.json",
+      "id": "pi-ui-084",
+      "intent": "scroll-04"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "085-scroll-05.json",
+      "id": "pi-ui-085",
+      "intent": "scroll-05"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "086-scroll-06.json",
+      "id": "pi-ui-086",
+      "intent": "scroll-06"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "087-scroll-07.json",
+      "id": "pi-ui-087",
+      "intent": "scroll-07"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "088-scroll-08.json",
+      "id": "pi-ui-088",
+      "intent": "scroll-08"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "089-scroll-09.json",
+      "id": "pi-ui-089",
+      "intent": "scroll-09"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "090-scroll-10.json",
+      "id": "pi-ui-090",
+      "intent": "scroll-10"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "091-scroll-11.json",
+      "id": "pi-ui-091",
+      "intent": "scroll-11"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "092-scroll-12.json",
+      "id": "pi-ui-092",
+      "intent": "scroll-12"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "093-scroll-13.json",
+      "id": "pi-ui-093",
+      "intent": "scroll-13"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "094-scroll-14.json",
+      "id": "pi-ui-094",
+      "intent": "scroll-14"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "095-scroll-15.json",
+      "id": "pi-ui-095",
+      "intent": "scroll-15"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "096-scroll-16.json",
+      "id": "pi-ui-096",
+      "intent": "scroll-16"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "097-scroll-17.json",
+      "id": "pi-ui-097",
+      "intent": "scroll-17"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "098-scroll-18.json",
+      "id": "pi-ui-098",
+      "intent": "scroll-18"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "099-scroll-19.json",
+      "id": "pi-ui-099",
+      "intent": "scroll-19"
+    },
+    {
+      "category": "conversation-scrolling",
+      "file": "100-scroll-20.json",
+      "id": "pi-ui-100",
+      "intent": "scroll-20"
+    }
+  ],
+  "pinnedReferenceRevision": "698a2d23b86a5045dd54554354a5e0cb7e466795",
+  "binarySource": "selected by PI_ORACLE_BIN; version verified, source revision not independently established"
+}

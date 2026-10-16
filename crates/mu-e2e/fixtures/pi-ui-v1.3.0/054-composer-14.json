@@ -1,0 +1,84 @@
+{
+  "actions": [
+    {
+      "bytes": [
+        116,
+        97,
+        98,
+        9,
+        115,
+        101,
+        112,
+        97,
+        114,
+        97,
+        116,
+        101,
+        100,
+        9,
+        116,
+        101,
+        120,
+        116
+      ],
+      "kind": "keys",
+      "label": "type composer content: \"tab\\tseparated\\ttext\""
+    },
+    {
+      "bytes": [
+        21
+      ],
+      "kind": "keys",
+      "label": "shrink composer by clearing the active line with Ctrl+U"
+    },
+    {
+      "bytes": [
+        127
+      ],
+      "kind": "keys",
+      "label": "remove the empty line break with Backspace"
+    }
+  ],
+  "category": "composer-sizing-and-editing",
+  "checkpoints": [
+    {
+      "label": "startup",
+      "screen": "\n ▀▀█  v1.3.0\n █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more\n Press ctrl+o to show full startup help and loaded resources.\n\n Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n<PROJECT>\n0.0%/33k (auto)                                                                                alpha"
+    },
+    {
+      "label": "type composer content: \"tab\\tseparated\\ttext\"",
+      "screen": "\n ▀▀█  v1.3.0\n █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more\n Press ctrl+o to show full startup help and loaded resources.\n\n Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\ntabseparatedtext\n────────────────────────────────────────────────────────────────────────────────────────────────────\n<PROJECT>\n0.0%/33k (auto)                                                                                alpha",
+      "terminalSize": {
+        "columns": 100,
+        "rows": 30
+      }
+    },
+    {
+      "label": "shrink composer by clearing the active line with Ctrl+U",
+      "screen": "\n ▀▀█  v1.3.0\n █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more\n Press ctrl+o to show full startup help and loaded resources.\n\n Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n<PROJECT>\n0.0%/33k (auto)                                                                                alpha",
+      "terminalSize": {
+        "columns": 100,
+        "rows": 30
+      }
+    },
+    {
+      "label": "remove the empty line break with Backspace",
+      "screen": "\n ▀▀█  v1.3.0\n █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more\n Press ctrl+o to show full startup help and loaded resources.\n\n Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n<PROJECT>\n0.0%/33k (auto)                                                                                alpha",
+      "terminalSize": {
+        "columns": 100,
+        "rows": 30
+      }
+    }
+  ],
+  "cleanup": "PTY closed after checkpoint capture; no prompt was submitted",
+  "name": "composer-14",
+  "oracleProcessExit": {
+    "code": 0,
+    "success": true
+  },
+  "oracleVersion": "1.3.0",
+  "terminalSize": {
+    "columns": 100,
+    "rows": 30
+  }
+}

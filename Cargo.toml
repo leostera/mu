@@ -24,5 +24,5 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "io-std", "process", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "io-std", "process", "signal", "sync", "time"] }
 url = "2"

@@ -4,6 +4,8 @@
 //! runtime can evolve without changing the on-disk compatibility contract.
 
 mod agent;
+pub mod skills;
+pub mod tools;
 
-pub use agent::{AgentError, run_cli};
+pub use agent::{AgentError, AgentEvent, MuAgent, run_cli, run_prompt};
 pub use mu_session as session;

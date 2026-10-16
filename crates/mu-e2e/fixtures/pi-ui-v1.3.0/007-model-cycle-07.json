@@ -1,0 +1,43 @@
+{
+  "actions": [
+    {
+      "bytes": [
+        16,
+        16,
+        16,
+        16,
+        16,
+        16,
+        16
+      ],
+      "kind": "keys",
+      "label": "press Ctrl+P 7 times"
+    }
+  ],
+  "category": "model-cycle",
+  "checkpoints": [
+    {
+      "label": "startup",
+      "screen": "\n ▀▀█  v1.3.0\n █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more\n Press ctrl+o to show full startup help and loaded resources.\n\n Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n<PROJECT>\n0.0%/33k (auto)                                                                                alpha"
+    },
+    {
+      "label": "press Ctrl+P 7 times",
+      "screen": "\n ▀▀█  v1.3.0\n █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more\n Press ctrl+o to show full startup help and loaded resources.\n\n Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.\n\n\n Switched to Beta Model\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n<PROJECT>\n0.0%/33k (auto)                                                                                 beta",
+      "terminalSize": {
+        "columns": 100,
+        "rows": 30
+      }
+    }
+  ],
+  "cleanup": "PTY closed after checkpoint capture; no prompt was submitted",
+  "name": "model-cycle-07",
+  "oracleProcessExit": {
+    "code": 0,
+    "success": true
+  },
+  "oracleVersion": "1.3.0",
+  "terminalSize": {
+    "columns": 100,
+    "rows": 30
+  }
+}

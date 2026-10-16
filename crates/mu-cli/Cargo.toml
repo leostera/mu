@@ -10,5 +10,16 @@ name = "mu"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
 mu-core = { path = "../mu-core" }
+ratatui = { version = "0.29", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
+serde_json.workspace = true
 tokio.workspace = true
+unicode-width = "0.2"
+
+[dev-dependencies]
+portable-pty = "0.9"
+serde_json.workspace = true
+tempfile = "3"
+vt100 = "=0.15.0"

@@ -1,0 +1,8 @@
+{
+  "oracle": "@earendil-works/pi-coding-agent",
+  "version": "1.3.0",
+  "pinnedReferenceRevision": "698a2d23b86a5045dd54554354a5e0cb7e466795",
+  "binarySource": "selected by PI_ORACLE_BIN (or pi on PATH); verified by --version only",
+  "environment": "isolated HOME and PI_CODING_AGENT_DIR; inherited environment cleared; PI_OFFLINE=1",
+  "cases": ["--version", "-v", "--help", "--definitely-not-a-pi-flag", "--mode unsupported", "--print with empty stdin"]
+}

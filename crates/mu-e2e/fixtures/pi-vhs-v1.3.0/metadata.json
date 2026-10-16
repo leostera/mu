@@ -1,0 +1,9 @@
+{
+  "oracle": "Pi interactive TUI captured by VHS",
+  "piVersion": "1.3.0",
+  "binarySource": "PI_ORACLE_BIN (version checked; source revision not independently established)",
+  "vhsVersion": "vhs version 0.12.1",
+  "scenario": "startup, slash-menu model filter, composer typing and clearing; no prompt submitted",
+  "environment": "isolated HOME and PI_CODING_AGENT_DIR; PI_OFFLINE=1; provider points to localhost:9; no live model or network calls",
+  "artifacts": ["pi-session.gif", "pi-session.ascii"]
+}

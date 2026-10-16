@@ -1,0 +1,40 @@
+{
+  "actions": [
+    {
+      "bytes": [
+        27,
+        91,
+        54,
+        126
+      ],
+      "kind": "keys",
+      "label": "scroll the populated conversation viewport"
+    }
+  ],
+  "category": "conversation-scrolling",
+  "checkpoints": [
+    {
+      "label": "startup",
+      "screen": "\n\n USER-MARKER-26: scroll oracle prompt\n\n\n ASSISTANT-MARKER-26: a long transcript line for viewport scrolling\n\n\n USER-MARKER-27: scroll oracle prompt\n\n\n ASSISTANT-MARKER-27: a long transcript line for viewport scrolling\n\n\n USER-MARKER-28: scroll oracle prompt\n\n\n ASSISTANT-MARKER-28: a long transcript line for viewport scrolling\n\n\n USER-MARKER-29: scroll oracle prompt\n\n\n ASSISTANT-MARKER-29: a long transcript line for viewport scrolling\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n<PROJECT>\n↑30 ↓30 0.0%/33k (auto)                                                                        alpha"
+    },
+    {
+      "label": "scroll the populated conversation viewport",
+      "screen": "\n\n USER-MARKER-26: scroll oracle prompt\n\n\n ASSISTANT-MARKER-26: a long transcript line for viewport scrolling\n\n\n USER-MARKER-27: scroll oracle prompt\n\n\n ASSISTANT-MARKER-27: a long transcript line for viewport scrolling\n\n\n USER-MARKER-28: scroll oracle prompt\n\n\n ASSISTANT-MARKER-28: a long transcript line for viewport scrolling\n\n\n USER-MARKER-29: scroll oracle prompt\n\n\n ASSISTANT-MARKER-29: a long transcript line for viewport scrolling\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n\n────────────────────────────────────────────────────────────────────────────────────────────────────\n<PROJECT>\n↑30 ↓30 0.0%/33k (auto)                                                                        alpha",
+      "terminalSize": {
+        "columns": 100,
+        "rows": 30
+      }
+    }
+  ],
+  "cleanup": "PTY closed after checkpoint capture; no prompt was submitted",
+  "name": "scroll-07",
+  "oracleProcessExit": {
+    "code": 0,
+    "success": true
+  },
+  "oracleVersion": "1.3.0",
+  "terminalSize": {
+    "columns": 100,
+    "rows": 30
+  }
+}

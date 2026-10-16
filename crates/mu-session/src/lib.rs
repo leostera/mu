@@ -300,16 +300,164 @@ impl SessionDocument {
         text: impl Into<String>,
         usage: MessageUsage,
     ) {
+        self.append_assistant_turn(api, provider, model, "", text, usage);
+    }
+
+    /// Append a Pi assistant message with optional reasoning and visible text blocks.
+    pub fn append_assistant_turn(
+        &mut self,
+        api: &str,
+        provider: &str,
+        model: &str,
+        thinking: &str,
+        text: impl Into<String>,
+        usage: MessageUsage,
+    ) {
+        self.append_assistant_response(
+            api,
+            provider,
+            model,
+            AssistantTurnResponse {
+                thinking: thinking.to_owned(),
+                thinking_signature: None,
+                text: text.into(),
+                usage,
+            },
+        );
+    }
+
+    pub fn append_assistant_response(
+        &mut self,
+        api: &str,
+        provider: &str,
+        model: &str,
+        response: AssistantTurnResponse,
+    ) {
+        let mut content = Vec::new();
+        if !response.thinking.is_empty() {
+            let mut block = serde_json::json!({"type":"thinking","thinking":response.thinking});
+            if let Some(signature) = response.thinking_signature {
+                block["thinkingSignature"] = Value::String(signature);
+            }
+            content.push(block);
+        }
+        content.push(serde_json::json!({"type":"text","text":response.text}));
         let message_timestamp = chrono::Utc::now().timestamp_millis();
         self.append_message(serde_json::json!({
             "role": "assistant",
-            "content": [{ "type": "text", "text": text.into() }],
+            "content": content,
             "api": api,
             "provider": provider,
             "model": model,
-            "usage": usage,
+            "usage": response.usage,
             "stopReason": "stop",
             "timestamp": message_timestamp,
+        }));
+    }
+
+    /// Append a Pi assistant response that requested one or more tools.
+    pub fn append_assistant_tool_calls(
+        &mut self,
+        api: &str,
+        provider: &str,
+        model: &str,
+        response: AssistantToolResponse,
+    ) {
+        let mut content = Vec::new();
+        if !response.thinking.is_empty() {
+            let mut block = serde_json::json!({"type":"thinking","thinking":response.thinking});
+            if let Some(signature) = response.thinking_signature.clone() {
+                block["thinkingSignature"] = Value::String(signature);
+            }
+            content.push(block);
+        }
+        if !response.text.is_empty() {
+            content.push(serde_json::json!({"type":"text","text":response.text}));
+        }
+        content.extend(response.calls.iter().map(|call| {
+            serde_json::json!({
+                "type":"toolCall","id":call.id,"name":call.name,"arguments":call.arguments
+            })
+        }));
+        let message_timestamp = chrono::Utc::now().timestamp_millis();
+        self.append_message(serde_json::json!({
+            "role": "assistant",
+            "content": content,
+            "api": api,
+            "provider": provider,
+            "model": model,
+            "usage": response.usage,
+            "stopReason": "toolUse",
+            "timestamp": message_timestamp,
+        }));
+    }
+
+    /// Append Pi's assistant tool-call message shape.
+    pub fn append_tool_call(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        arguments: Value,
+        api: &str,
+        provider: &str,
+        model: &str,
+    ) {
+        self.append_assistant_tool_calls(
+            api,
+            provider,
+            model,
+            AssistantToolResponse {
+                thinking: String::new(),
+                thinking_signature: None,
+                text: String::new(),
+                calls: vec![ToolCallRecord {
+                    id: call_id.to_owned(),
+                    name: name.to_owned(),
+                    arguments,
+                }],
+                usage: MessageUsage::default(),
+            },
+        );
+    }
+
+    /// Append the corresponding Pi tool-result record.
+    pub fn append_tool_result(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        content: String,
+        is_error: bool,
+    ) {
+        let message_timestamp = chrono::Utc::now().timestamp_millis();
+        self.append_message(serde_json::json!({
+            "role": "toolResult",
+            "toolCallId": call_id,
+            "toolName": name,
+            "content": [{"type":"text","text":content}],
+            "isError": is_error,
+            "timestamp": message_timestamp,
+        }));
+    }
+
+    pub fn append_model_change(&mut self, provider: &str, model_id: &str) {
+        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let id = next_entry_id(
+            &mut self
+                .entries()
+                .filter_map(|entry| entry.id.as_ref().map(|id| id.as_str().to_owned()))
+                .collect(),
+        );
+        let mut extra = BTreeMap::new();
+        extra.insert("provider".into(), Value::String(provider.to_owned()));
+        extra.insert("modelId".into(), Value::String(model_id.to_owned()));
+        self.records.push(SessionRecord::Entry(SessionEntry {
+            entry_type: EntryType("model_change".into()),
+            id: Some(id),
+            parent_id: parent_id
+                .map(ParentReference::Entry)
+                .unwrap_or(ParentReference::Root),
+            timestamp: now_timestamp(),
+            extra,
         }));
     }
 
@@ -508,7 +656,31 @@ impl SessionDocument {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssistantToolResponse {
+    pub thinking: String,
+    pub thinking_signature: Option<String>,
+    pub text: String,
+    pub calls: Vec<ToolCallRecord>,
+    pub usage: MessageUsage,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AssistantTurnResponse {
+    pub thinking: String,
+    pub thinking_signature: Option<String>,
+    pub text: String,
+    pub usage: MessageUsage,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCallRecord {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageUsage {
     pub input: u64,
@@ -521,7 +693,7 @@ pub struct MessageUsage {
     pub cost: MessageCost,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageCost {
     pub input: f64,
@@ -633,8 +805,8 @@ pub enum SessionWriteError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CURRENT_SESSION_VERSION, MessageCost, MessageUsage, ParentReference, SessionDocument,
-        SessionRecord,
+        AssistantTurnResponse, CURRENT_SESSION_VERSION, MessageCost, MessageUsage, ParentReference,
+        SessionDocument, SessionRecord,
     };
 
     #[test]
@@ -684,6 +856,120 @@ mod tests {
         assert_eq!(
             entries[1].extra_fields()["message"]["usage"]["totalTokens"],
             5
+        );
+    }
+
+    #[test]
+    fn stores_assistant_thinking_as_a_pi_content_block_before_visible_text() {
+        let mut session = SessionDocument::new("/repo");
+        session.append_assistant_response(
+            "openai-responses",
+            "opencode-cf",
+            "gpt-6-luna",
+            AssistantTurnResponse {
+                thinking: "Inspect the requested change.".into(),
+                thinking_signature: Some("{\"id\":\"reason-1\"}".into()),
+                text: "Here is the result.".into(),
+                usage: MessageUsage::default(),
+            },
+        );
+        let parsed = SessionDocument::parse_jsonl(&session.to_jsonl().unwrap()).unwrap();
+        let message = &parsed.entries().next().unwrap().extra_fields()["message"];
+        assert_eq!(message["content"][0]["type"], "thinking");
+        assert_eq!(
+            message["content"][0]["thinking"],
+            "Inspect the requested change."
+        );
+        assert_eq!(
+            message["content"][0]["thinkingSignature"],
+            "{\"id\":\"reason-1\"}"
+        );
+        assert_eq!(message["content"][1]["type"], "text");
+        assert_eq!(message["content"][1]["text"], "Here is the result.");
+    }
+
+    #[test]
+    fn stores_multiple_tool_calls_in_one_assistant_turn() {
+        let mut session = SessionDocument::new("/repo");
+        session.append_assistant_tool_calls(
+            "openai-responses",
+            "opencode-cf",
+            "gpt-6-luna",
+            super::AssistantToolResponse {
+                thinking: "Inspect both files.".into(),
+                thinking_signature: Some("{\"id\":\"reason-1\"}".into()),
+                text: "I will read them.".into(),
+                calls: vec![
+                    super::ToolCallRecord {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path":"a.rs"}),
+                    },
+                    super::ToolCallRecord {
+                        id: "c2".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path":"b.rs"}),
+                    },
+                ],
+                usage: MessageUsage::default(),
+            },
+        );
+        let parsed = SessionDocument::parse_jsonl(&session.to_jsonl().unwrap()).unwrap();
+        let entries = parsed.entries().collect::<Vec<_>>();
+        let message = &entries[0].extra_fields()["message"];
+        assert_eq!(entries.len(), 1);
+        assert_eq!(message["stopReason"], "toolUse");
+        assert_eq!(message["content"].as_array().unwrap().len(), 4);
+        assert_eq!(message["content"][2]["id"], "c1");
+        assert_eq!(message["content"][3]["id"], "c2");
+    }
+
+    #[test]
+    fn writes_pi_compatible_tool_call_and_result_messages() {
+        let mut session = SessionDocument::new("/repo");
+        session.append_tool_call(
+            "call-1",
+            "read",
+            serde_json::json!({"path":"README.md"}),
+            "openai-responses",
+            "opencode-cf",
+            "gpt-6-luna",
+        );
+        session.append_tool_result("call-1", "read", "file contents".into(), false);
+        let parsed = SessionDocument::parse_jsonl(&session.to_jsonl().unwrap()).unwrap();
+        let entries = parsed.entries().collect::<Vec<_>>();
+        assert_eq!(
+            entries[0].extra_fields()["message"]["content"][0]["type"],
+            "toolCall"
+        );
+        assert_eq!(
+            entries[0].extra_fields()["message"]["stopReason"],
+            "toolUse"
+        );
+        assert_eq!(entries[1].extra_fields()["message"]["role"], "toolResult");
+        assert_eq!(entries[1].extra_fields()["message"]["toolCallId"], "call-1");
+        assert_eq!(
+            entries[1].parent_id,
+            ParentReference::Entry(entries[0].id.clone().unwrap())
+        );
+    }
+
+    #[test]
+    fn appends_pi_compatible_model_change_tree_entries() {
+        let mut session = SessionDocument::new("/repo");
+        session.append_model_change("oracle", "beta");
+        session.append_user_text("hello");
+
+        let serialized = session.to_jsonl().expect("serialize model change");
+        let parsed = SessionDocument::parse_jsonl(&serialized).expect("parse model change");
+        let entries = parsed.entries().collect::<Vec<_>>();
+        assert_eq!(entries[0].entry_type.as_str(), "model_change");
+        assert_eq!(entries[0].extra_fields()["provider"], "oracle");
+        assert_eq!(entries[0].extra_fields()["modelId"], "beta");
+        assert_eq!(entries[0].parent_id, ParentReference::Root);
+        assert_eq!(
+            entries[1].parent_id,
+            ParentReference::Entry(entries[0].id.clone().unwrap())
         );
     }
 
