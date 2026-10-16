@@ -278,6 +278,7 @@ impl Composer {
 #[derive(Default)]
 struct Transcript {
     messages: Vec<Message>,
+    scroll: TranscriptScroll,
 }
 
 impl Deref for Transcript {
@@ -301,7 +302,6 @@ struct App {
     provider: String,
     session_path: String,
     messages: Transcript,
-    transcript_scroll: TranscriptScroll,
     command_menu_open: bool,
     command_selection: usize,
     model_selector_open: bool,
@@ -352,7 +352,6 @@ impl App {
             composer: Composer::default(),
             session_path,
             messages: Transcript::default(),
-            transcript_scroll: TranscriptScroll::default(),
             command_menu_open: false,
             command_selection: 0,
             model_selector_open: false,
@@ -392,7 +391,7 @@ impl App {
             error: false,
         });
         self.loading = true;
-        self.transcript_scroll.scroll_to_end();
+        self.messages.scroll.scroll_to_end();
         let task = tokio::spawn(async move {
             let mut on_event = |event| {
                 let _ = tx.send(UiEvent::Agent(event));
@@ -560,27 +559,27 @@ fn handle_key(
     }
     match key.code {
         KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.transcript_scroll.scroll_to_start();
+            app.messages.scroll.scroll_to_start();
             return;
         }
         KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.transcript_scroll.scroll_to_end();
+            app.messages.scroll.scroll_to_end();
             return;
         }
         KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.transcript_scroll.scroll_by(-8);
+            app.messages.scroll.scroll_by(-8);
             return;
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.transcript_scroll.scroll_by(8);
+            app.messages.scroll.scroll_by(8);
             return;
         }
         KeyCode::PageUp => {
-            app.transcript_scroll.scroll_by(-12);
+            app.messages.scroll.scroll_by(-12);
             return;
         }
         KeyCode::PageDown => {
-            app.transcript_scroll.scroll_by(12);
+            app.messages.scroll.scroll_by(12);
             return;
         }
         _ => {}
@@ -749,13 +748,13 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
     if let Ok(agent) = agent.try_lock() {
         app.model = agent.model().to_owned();
     }
-    app.transcript_scroll.scroll_to_end();
+    app.messages.scroll.scroll_to_end();
 }
 
 fn handle_mouse(kind: MouseEventKind, app: &mut App) {
     match kind {
-        MouseEventKind::ScrollUp => app.transcript_scroll.scroll_by(-3),
-        MouseEventKind::ScrollDown => app.transcript_scroll.scroll_by(3),
+        MouseEventKind::ScrollUp => app.messages.scroll.scroll_by(-3),
+        MouseEventKind::ScrollDown => app.messages.scroll.scroll_by(3),
         _ => {}
     }
 }
@@ -847,7 +846,7 @@ fn header_lines(app: &App) -> Vec<Line<'static>> {
 
 fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
-        app.transcript_scroll.set_max_offset(0);
+        app.messages.scroll.set_max_offset(0);
         return;
     }
 
@@ -1006,10 +1005,10 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let content_lines = paragraph.line_count(area.width.max(1));
     let max_scroll =
         u16::try_from(content_lines.saturating_sub(usize::from(area.height))).unwrap_or(u16::MAX);
-    app.transcript_scroll.set_max_offset(max_scroll);
-    let scroll = app.transcript_scroll.offset();
+    app.messages.scroll.set_max_offset(max_scroll);
+    let scroll = app.messages.scroll.offset();
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
-    if !app.transcript_scroll.is_following_end() && area.height > 0 {
+    if !app.messages.scroll.is_following_end() && area.height > 0 {
         let hint_area = Rect {
             x: area.x,
             y: area.y + area.height - 1,
@@ -1456,19 +1455,19 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render conversation");
-        let bottom = app.transcript_scroll.offset();
+        let bottom = app.messages.scroll.offset();
         assert!(bottom > 0);
 
         handle_mouse(MouseEventKind::ScrollUp, &mut app);
-        assert!(app.transcript_scroll.offset() < bottom);
+        assert!(app.messages.scroll.offset() < bottom);
         handle_mouse(MouseEventKind::ScrollDown, &mut app);
-        assert_eq!(app.transcript_scroll.offset(), bottom);
-        assert!(app.transcript_scroll.is_following_end());
+        assert_eq!(app.messages.scroll.offset(), bottom);
+        assert!(app.messages.scroll.is_following_end());
         handle_mouse(MouseEventKind::ScrollDown, &mut app);
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render at bottom");
-        assert_eq!(app.transcript_scroll.offset(), bottom);
+        assert_eq!(app.messages.scroll.offset(), bottom);
     }
 
     #[test]
@@ -1503,7 +1502,7 @@ mod tests {
         );
         assert!(screen.contains("session session"), "footer remains docked");
 
-        app.transcript_scroll.scroll_to_start();
+        app.messages.scroll.scroll_to_start();
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render transcript start");
@@ -1542,16 +1541,16 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render scrolled transcript");
-        let position_before_update = app.transcript_scroll.offset();
-        assert!(!app.transcript_scroll.is_following_end());
+        let position_before_update = app.messages.scroll.offset();
+        assert!(!app.messages.scroll.is_following_end());
 
         app.apply(UiEvent::Agent(AgentEvent::TextDelta(" more text".into())));
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render streamed update");
 
-        assert_eq!(app.transcript_scroll.offset(), position_before_update);
-        assert!(!app.transcript_scroll.is_following_end());
+        assert_eq!(app.messages.scroll.offset(), position_before_update);
+        assert!(!app.messages.scroll.is_following_end());
     }
 
     #[test]
