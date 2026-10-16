@@ -137,6 +137,14 @@ impl Composer {
         self.cursor += 1;
     }
 
+    fn insert_text(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let pasted: Vec<char> = normalized.chars().collect();
+        let inserted = pasted.len();
+        self.input.splice(self.cursor..self.cursor, pasted);
+        self.cursor += inserted;
+    }
+
     fn delete_to_line_start(&mut self) {
         let start = self.input[..self.cursor]
             .iter()
@@ -392,6 +400,10 @@ pub async fn run(agent: MuAgent) -> Result<(), Box<dyn std::error::Error>> {
                 match event {
                     Event::Key(key) => handle_key(key, &mut app, Arc::clone(&agent), tx.clone()),
                     Event::Mouse(mouse) => handle_mouse(mouse.kind, &mut app),
+                    Event::Paste(text) if !app.loading && !app.model_selector_open => {
+                        app.composer.insert_text(&text);
+                        app.command_selection = 0;
+                    },
                     Event::Resize(_, _) => {},
                     _ => {},
                 }
@@ -1285,6 +1297,17 @@ mod tests {
         assert!(screen.contains("src/main.rs"));
         assert!(screen.contains("fn main()"));
         assert!(screen.contains("Done."));
+    }
+
+    #[test]
+    fn pasted_text_is_inserted_at_the_cursor_with_normalized_newlines() {
+        let mut composer = super::Composer::default();
+        composer.insert_text("ab\r\ncd\ref");
+        composer.cursor = 2;
+        composer.insert_text("界\n");
+
+        assert_eq!(composer.input_text(), "ab界\n\ncd\nef");
+        assert_eq!(composer.cursor, 4);
     }
 
     #[test]

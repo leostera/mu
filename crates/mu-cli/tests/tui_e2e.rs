@@ -103,6 +103,15 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
     writer.flush()?;
     wait_for(&screen, |text| !text.contains("temporary editor text"))?;
 
+    writer.write_all(b"\x1b[200~pasted first line\r\npasted second line\x1b[201~")?;
+    writer.flush()?;
+    wait_for(&screen, |text| {
+        text.contains("pasted first line") && text.contains("pasted second line")
+    })?;
+    writer.write_all(&[0x1b])?;
+    writer.flush()?;
+    wait_for(&screen, |text| !text.contains("pasted first line"))?;
+
     writer.write_all(b"hello from PTY\r")?;
     writer.flush()?;
     wait_for(&screen, |text| {

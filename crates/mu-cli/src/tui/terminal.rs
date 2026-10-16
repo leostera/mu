@@ -3,8 +3,8 @@ use std::io;
 use crossterm::{
     cursor::Show,
     event::{
-        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -14,6 +14,7 @@ use crossterm::{
 enum TerminalMode {
     AlternateScreen,
     MouseCapture,
+    BracketedPaste,
     KeyboardEnhancement,
 }
 
@@ -52,6 +53,7 @@ impl<C: TerminalControl> TerminalProtocol<C> {
         for mode in [
             TerminalMode::AlternateScreen,
             TerminalMode::MouseCapture,
+            TerminalMode::BracketedPaste,
             TerminalMode::KeyboardEnhancement,
         ] {
             session.control.set_mode(mode, true)?;
@@ -101,6 +103,8 @@ impl TerminalControl for CrosstermControl {
             (TerminalMode::AlternateScreen, false) => execute!(self.output, LeaveAlternateScreen),
             (TerminalMode::MouseCapture, true) => execute!(self.output, EnableMouseCapture),
             (TerminalMode::MouseCapture, false) => execute!(self.output, DisableMouseCapture),
+            (TerminalMode::BracketedPaste, true) => execute!(self.output, EnableBracketedPaste),
+            (TerminalMode::BracketedPaste, false) => execute!(self.output, DisableBracketedPaste),
             (TerminalMode::KeyboardEnhancement, true) => execute!(
                 self.output,
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -176,8 +180,10 @@ mod tests {
                 Operation::Raw(true),
                 Operation::Mode(TerminalMode::AlternateScreen, true),
                 Operation::Mode(TerminalMode::MouseCapture, true),
+                Operation::Mode(TerminalMode::BracketedPaste, true),
                 Operation::Mode(TerminalMode::KeyboardEnhancement, true),
                 Operation::Mode(TerminalMode::KeyboardEnhancement, false),
+                Operation::Mode(TerminalMode::BracketedPaste, false),
                 Operation::Mode(TerminalMode::MouseCapture, false),
                 Operation::Mode(TerminalMode::AlternateScreen, false),
                 Operation::Raw(false),
