@@ -5,7 +5,7 @@ use std::{
     io,
     ops::{Deref, DerefMut},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
@@ -22,7 +22,8 @@ use tokio::{
     sync::{Mutex, mpsc},
     task::AbortHandle,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use self::layout::ChatViewport;
 
@@ -126,12 +127,27 @@ enum ComposerAction {
     Submit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VisualLine {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Default)]
+struct ComposerDraft {
+    input: Vec<char>,
+    cursor: usize,
+}
+
 #[derive(Default)]
 struct Composer {
     input: Vec<char>,
     cursor: usize,
     prompt_history: Vec<String>,
     history_index: Option<usize>,
+    history_draft: Option<ComposerDraft>,
+    preferred_column: Option<usize>,
+    visual_width: usize,
 }
 
 impl Composer {
@@ -161,13 +177,40 @@ impl Composer {
                 self.delete_to_line_start();
                 None
             }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_to_line_end();
+                None
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_word_backward();
+                None
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_forward();
+                None
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_to_line_start();
+                None
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_to_line_end();
+                None
+            }
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_left();
+                None
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_right();
+                None
+            }
             KeyCode::Enter if self.input_text().starts_with('/') => {
                 Some(ComposerAction::ExecuteCommand)
             }
             KeyCode::Enter => Some(ComposerAction::Submit),
             KeyCode::Esc => {
-                self.input.clear();
-                self.cursor = 0;
+                self.clear();
                 None
             }
             KeyCode::Char(ch)
@@ -178,47 +221,52 @@ impl Composer {
                 self.insert_char(ch);
                 None
             }
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.delete_word_backward();
+                None
+            }
             KeyCode::Backspace if self.cursor > 0 => {
-                self.cursor -= 1;
-                self.input.remove(self.cursor);
+                self.delete_backward();
                 None
             }
             KeyCode::Delete if self.cursor < self.input.len() => {
-                self.input.remove(self.cursor);
+                self.delete_forward();
                 None
             }
-            KeyCode::Left if self.cursor > 0 => {
-                self.cursor -= 1;
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.delete_word_forward();
                 None
             }
-            KeyCode::Right if self.cursor < self.input.len() => {
-                self.cursor += 1;
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_word_left();
+                None
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_word_right();
+                None
+            }
+            KeyCode::Left => {
+                self.move_left();
+                None
+            }
+            KeyCode::Right => {
+                self.move_right();
                 None
             }
             KeyCode::Home => {
-                self.cursor = self
-                    .input
-                    .iter()
-                    .rposition(|ch| *ch == '\n')
-                    .map_or(0, |i| i + 1);
+                self.move_to_line_start();
                 None
             }
             KeyCode::End => {
-                self.cursor = self
-                    .input
-                    .iter()
-                    .enumerate()
-                    .skip(self.cursor)
-                    .find(|(_, ch)| **ch == '\n')
-                    .map_or(self.input.len(), |(i, _)| i);
+                self.move_to_line_end();
                 None
             }
             KeyCode::Up => {
-                self.history_up();
+                self.move_up();
                 None
             }
             KeyCode::Down => {
-                self.history_down();
+                self.move_down();
                 None
             }
             _ => None,
@@ -226,38 +274,322 @@ impl Composer {
     }
 
     fn insert_char(&mut self, ch: char) {
+        self.exit_history_browsing();
         self.input.insert(self.cursor, ch);
         self.cursor += 1;
+        self.preferred_column = None;
     }
 
     fn insert_text(&mut self, text: &str) {
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        let pasted: Vec<char> = normalized.chars().collect();
+        let normalized = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ");
+        let mut pasted: Vec<char> = normalized
+            .chars()
+            .filter(|character| *character == '\n' || !character.is_control())
+            .collect();
+        let is_path = pasted
+            .first()
+            .is_some_and(|character| matches!(character, '/' | '~' | '.'));
+        let follows_word = self
+            .input
+            .get(self.cursor.saturating_sub(1))
+            .is_some_and(|character| character.is_alphanumeric() || *character == '_');
+        if is_path && follows_word {
+            pasted.insert(0, ' ');
+        }
+        self.exit_history_browsing();
         let inserted = pasted.len();
         self.input.splice(self.cursor..self.cursor, pasted);
         self.cursor += inserted;
+        self.preferred_column = None;
     }
 
-    fn delete_to_line_start(&mut self) {
+    fn clear(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+        self.exit_history_browsing();
+        self.preferred_column = None;
+    }
+
+    fn add_to_history(&mut self, prompt: &str) {
+        let prompt = prompt.trim();
+        if prompt.is_empty()
+            || self
+                .prompt_history
+                .last()
+                .is_some_and(|last| last == prompt)
+        {
+            return;
+        }
+        self.prompt_history.push(prompt.to_owned());
+        if self.prompt_history.len() > 100 {
+            self.prompt_history.remove(0);
+        }
+    }
+
+    fn line_bounds(&self) -> (usize, usize) {
         let start = self.input[..self.cursor]
             .iter()
             .rposition(|ch| *ch == '\n')
             .map_or(0, |index| index + 1);
+        let end = self.input[self.cursor..]
+            .iter()
+            .position(|ch| *ch == '\n')
+            .map_or(self.input.len(), |index| self.cursor + index);
+        (start, end)
+    }
+
+    fn move_to_line_start(&mut self) {
+        self.exit_history_browsing();
+        self.cursor = self.line_bounds().0;
+        self.preferred_column = None;
+    }
+
+    fn move_to_line_end(&mut self) {
+        self.exit_history_browsing();
+        self.cursor = self.line_bounds().1;
+        self.preferred_column = None;
+    }
+
+    fn move_left(&mut self) {
+        self.exit_history_browsing();
+        if let Some(cursor) = self.previous_grapheme_start() {
+            self.cursor = cursor;
+        }
+        self.preferred_column = None;
+    }
+
+    fn move_right(&mut self) {
+        self.exit_history_browsing();
+        if let Some(cursor) = self.next_grapheme_end() {
+            self.cursor = cursor;
+        }
+        self.preferred_column = None;
+    }
+
+    fn previous_grapheme_start(&self) -> Option<usize> {
+        let prefix: String = self.input[..self.cursor].iter().collect();
+        prefix
+            .graphemes(true)
+            .next_back()
+            .map(|grapheme| self.cursor - grapheme.chars().count())
+    }
+
+    fn next_grapheme_end(&self) -> Option<usize> {
+        let suffix: String = self.input[self.cursor..].iter().collect();
+        suffix
+            .graphemes(true)
+            .next()
+            .map(|grapheme| self.cursor + grapheme.chars().count())
+    }
+
+    fn delete_backward(&mut self) {
+        if let Some(start) = self.previous_grapheme_start() {
+            self.exit_history_browsing();
+            self.input.drain(start..self.cursor);
+            self.cursor = start;
+            self.preferred_column = None;
+        }
+    }
+
+    fn move_word_left(&mut self) {
+        self.exit_history_browsing();
+        while self.cursor > 0 && self.input[self.cursor - 1].is_whitespace() {
+            self.cursor -= 1;
+        }
+        while self.cursor > 0 && !self.input[self.cursor - 1].is_whitespace() {
+            self.cursor -= 1;
+        }
+        self.preferred_column = None;
+    }
+
+    fn move_word_right(&mut self) {
+        self.exit_history_browsing();
+        while self.cursor < self.input.len() && !self.input[self.cursor].is_whitespace() {
+            self.cursor += 1;
+        }
+        while self.cursor < self.input.len() && self.input[self.cursor].is_whitespace() {
+            self.cursor += 1;
+        }
+        self.preferred_column = None;
+    }
+
+    fn set_visual_width(&mut self, width: usize) {
+        self.visual_width = width.max(1);
+    }
+
+    fn visual_lines(&self) -> Vec<VisualLine> {
+        let width = self.visual_width.max(1);
+        let text = self.input_text();
+        let mut lines = Vec::new();
+        let mut start = 0;
+        let mut column = 0;
+
+        for (byte_index, grapheme) in text.grapheme_indices(true) {
+            let index = text[..byte_index].chars().count();
+            let grapheme_chars = grapheme.chars().count();
+            if grapheme == "\n" {
+                lines.push(VisualLine { start, end: index });
+                start = index + grapheme_chars;
+                column = 0;
+                continue;
+            }
+
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if column > 0 && column + grapheme_width > width {
+                lines.push(VisualLine { start, end: index });
+                start = index;
+                column = 0;
+            }
+            column += grapheme_width;
+        }
+        lines.push(VisualLine {
+            start,
+            end: self.input.len(),
+        });
+        lines
+    }
+
+    fn visual_cursor(&self, lines: &[VisualLine]) -> (usize, usize) {
+        let line_index = lines
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, line)| self.cursor >= line.start && self.cursor <= line.end)
+            .map_or(0, |(index, _)| index);
+        let line = lines[line_index];
+        let text: String = self.input[line.start..self.cursor.min(line.end)]
+            .iter()
+            .collect();
+        let column = text.graphemes(true).map(UnicodeWidthStr::width).sum();
+        (line_index, column)
+    }
+
+    fn cursor_at_visual_column(&self, line: VisualLine, target_column: usize) -> usize {
+        let text: String = self.input[line.start..line.end].iter().collect();
+        let mut column = 0;
+        let mut character_offset = 0;
+        for grapheme in text.graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if column + grapheme_width > target_column {
+                break;
+            }
+            column += grapheme_width;
+            character_offset += grapheme.chars().count();
+            if column >= target_column {
+                return line.start + character_offset;
+            }
+        }
+        line.start + character_offset
+    }
+
+    fn move_up(&mut self) {
+        let lines = self.visual_lines();
+        let (line_index, column) = self.visual_cursor(&lines);
+        if line_index == 0 {
+            if self.input.is_empty() || self.history_index.is_some() || column == 0 {
+                self.history_up();
+            } else {
+                self.move_to_line_start();
+            }
+        } else {
+            self.move_vertical(&lines, line_index - 1, column);
+        }
+    }
+
+    fn move_down(&mut self) {
+        let lines = self.visual_lines();
+        let (line_index, column) = self.visual_cursor(&lines);
+        if line_index + 1 == lines.len() {
+            if self.history_index.is_some() {
+                self.history_down();
+            } else {
+                self.move_to_line_end();
+            }
+        } else {
+            self.move_vertical(&lines, line_index + 1, column);
+        }
+    }
+
+    fn move_vertical(&mut self, lines: &[VisualLine], target_line: usize, column: usize) {
+        self.exit_history_browsing();
+        self.cursor = self.cursor_at_visual_column(lines[target_line], column);
+        self.preferred_column = Some(self.preferred_column.unwrap_or(column));
+    }
+
+    fn delete_to_line_start(&mut self) {
+        self.exit_history_browsing();
+        let start = self.line_bounds().0;
         self.input.drain(start..self.cursor);
         self.cursor = start;
+        self.preferred_column = None;
+    }
+
+    fn delete_to_line_end(&mut self) {
+        self.exit_history_browsing();
+        let end = self.line_bounds().1;
+        self.input.drain(self.cursor..end);
+        self.preferred_column = None;
+    }
+
+    fn delete_word_backward(&mut self) {
+        self.exit_history_browsing();
+        let end = self.cursor;
+        let mut start = end;
+        while start > 0 && self.input[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !self.input[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        self.input.drain(start..end);
+        self.cursor = start;
+        self.preferred_column = None;
+    }
+
+    fn delete_word_forward(&mut self) {
+        self.exit_history_browsing();
+        let start = self.cursor;
+        let mut end = start;
+        while end < self.input.len() && self.input[end].is_whitespace() {
+            end += 1;
+        }
+        while end < self.input.len() && !self.input[end].is_whitespace() {
+            end += 1;
+        }
+        self.input.drain(start..end);
+        self.preferred_column = None;
+    }
+
+    fn delete_forward(&mut self) {
+        if let Some(end) = self.next_grapheme_end() {
+            self.exit_history_browsing();
+            self.input.drain(self.cursor..end);
+            self.preferred_column = None;
+        }
     }
 
     fn history_up(&mut self) {
         if self.prompt_history.is_empty() {
             return;
         }
-        let index = self
-            .history_index
-            .unwrap_or(self.prompt_history.len())
-            .saturating_sub(1);
+        let index = match self.history_index {
+            Some(0) => return,
+            Some(index) => index - 1,
+            None => {
+                self.history_draft = Some(ComposerDraft {
+                    input: self.input.clone(),
+                    cursor: self.cursor,
+                });
+                self.prompt_history.len() - 1
+            }
+        };
         self.history_index = Some(index);
         self.input = self.prompt_history[index].chars().collect();
-        self.cursor = self.input.len();
+        self.cursor = 0;
+        self.preferred_column = None;
     }
 
     fn history_down(&mut self) {
@@ -265,13 +597,22 @@ impl Composer {
             return;
         };
         if index + 1 < self.prompt_history.len() {
-            self.history_index = Some(index + 1);
-            self.input = self.prompt_history[index + 1].chars().collect();
+            let next = index + 1;
+            self.history_index = Some(next);
+            self.input = self.prompt_history[next].chars().collect();
+            self.cursor = self.input.len();
         } else {
             self.history_index = None;
-            self.input.clear();
+            let draft = self.history_draft.take().unwrap_or_default();
+            self.input = draft.input;
+            self.cursor = draft.cursor.min(self.input.len());
         }
-        self.cursor = self.input.len();
+        self.preferred_column = None;
+    }
+
+    fn exit_history_browsing(&mut self) {
+        self.history_index = None;
+        self.history_draft = None;
     }
 }
 
@@ -308,6 +649,7 @@ struct App {
     model_selection: usize,
     loading: bool,
     quit: bool,
+    last_ctrl_c: Option<Instant>,
     request: Option<AbortHandle>,
     hide_thinking: bool,
 }
@@ -358,6 +700,7 @@ impl App {
             model_selection: 0,
             loading: false,
             quit: false,
+            last_ctrl_c: None,
             request: None,
             hide_thinking: false,
         }
@@ -368,14 +711,12 @@ impl App {
     }
 
     fn submit(&mut self, agent: Arc<Mutex<MuAgent>>, tx: mpsc::UnboundedSender<UiEvent>) {
-        let prompt = self.input_text();
-        if prompt.trim().is_empty() || self.loading {
+        let prompt = self.input_text().trim().to_owned();
+        if prompt.is_empty() || self.loading {
             return;
         }
-        self.prompt_history.push(prompt.clone());
-        self.history_index = None;
-        self.input.clear();
-        self.cursor = 0;
+        self.composer.add_to_history(&prompt);
+        self.composer.clear();
         self.messages.push(Message {
             role: Role::User,
             text: prompt.clone(),
@@ -463,6 +804,19 @@ impl App {
         }
     }
 
+    fn handle_ctrl_c(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_ctrl_c
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500))
+        {
+            self.quit = true;
+        } else {
+            self.composer.clear();
+            self.last_ctrl_c = Some(now);
+        }
+    }
+
     fn cancel(&mut self) {
         if let Some(request) = self.request.take() {
             request.abort();
@@ -547,7 +901,7 @@ fn handle_key(
         return;
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.quit = true;
+        app.handle_ctrl_c();
         return;
     }
     if key.code == KeyCode::Char('d')
@@ -567,11 +921,11 @@ fn handle_key(
             return;
         }
         KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.messages.scroll.scroll_by(-8);
+            app.composer.history_up();
             return;
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.messages.scroll.scroll_by(8);
+            app.composer.history_down();
             return;
         }
         KeyCode::PageUp => {
@@ -715,8 +1069,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         .split_whitespace()
         .next()
         .unwrap_or_default();
-    app.input.clear();
-    app.cursor = 0;
+    app.composer.clear();
     app.command_menu_open = false;
     match command {
         "quit" | "exit" => app.quit = true,
@@ -766,6 +1119,7 @@ fn insert_char(app: &mut App, ch: char) {
 fn render(frame: &mut Frame, app: &mut App) {
     let input_text = app.input_text();
     let editor_width = frame.area().width.saturating_sub(2).max(1);
+    app.composer.set_visual_width(usize::from(editor_width));
     let editor_lines = Paragraph::new(input_text.clone())
         .wrap(Wrap { trim: false })
         .line_count(editor_width)
@@ -832,7 +1186,7 @@ fn header_lines(app: &App) -> Vec<Line<'static>> {
     ]);
     let help = Line::from(Span::styled(
         format!(
-            "Ctrl+P model · Ctrl+T thinking {} · / commands · PgUp/PgDn or wheel · Esc clear · Ctrl+C exit",
+            "Ctrl+P model · Ctrl+T thinking {} · / commands · PgUp/PgDn or wheel · Esc clear · Ctrl+C clear/twice quit · Ctrl+D quit when empty",
             if app.hide_thinking {
                 "hidden"
             } else {
@@ -1224,7 +1578,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let help = if app.loading {
         "Esc interrupt · Ctrl+C cancel and exit"
     } else {
-        "Enter send · Shift+Enter/Ctrl+J newline · Ctrl+P model · / commands · Ctrl+C exit"
+        "Enter send · Shift+Enter/Ctrl+J newline · Ctrl+P model · / commands · Ctrl+C clear/twice quit · Ctrl+D quit when empty"
     };
     frame.render_widget(
         Paragraph::new(vec![
@@ -1364,6 +1718,84 @@ mod tests {
             composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(ComposerAction::Submit)
         );
+
+        composer.clear();
+        composer.insert_text("ab");
+        composer.cursor = 0;
+        composer.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(composer.input_text(), "b");
+    }
+
+    #[test]
+    fn ctrl_c_clears_first_and_exits_on_a_second_press() {
+        let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
+        app.composer.insert_text("draft");
+
+        app.handle_ctrl_c();
+        assert_eq!(app.input_text(), "");
+        assert!(!app.quit);
+
+        app.handle_ctrl_c();
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn up_and_down_move_between_lines_before_using_prompt_history() {
+        let mut composer = Composer::default();
+        composer.set_visual_width(80);
+        composer.insert_text("first\nsecond");
+        composer.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.cursor, "first".len());
+
+        composer.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.cursor, 0);
+        composer.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(composer.cursor, "first\n".len());
+    }
+
+    #[test]
+    fn vertical_cursor_movement_tracks_wrapped_visual_lines_and_sticky_column() {
+        let mut composer = Composer::default();
+        composer.set_visual_width(4);
+        composer.insert_text("abcdefgh");
+        composer.cursor = 6;
+
+        composer.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(composer.cursor, 2);
+        composer.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(composer.cursor, 6);
+    }
+
+    #[test]
+    fn cursor_movement_and_backspace_treat_combining_graphemes_as_one_character() {
+        let mut composer = Composer::default();
+        composer.insert_text("a👩‍👩‍👧‍👦e\u{301}b");
+        composer.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        composer.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert_eq!(composer.input_text(), "a👩‍👩‍👧‍👦b");
+        composer.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(composer.input_text(), "ab");
+    }
+
+    #[test]
+    fn history_navigation_restores_the_draft_and_cursor() {
+        let mut composer = Composer::default();
+        composer.add_to_history("older prompt");
+        composer.add_to_history("newer prompt");
+        composer.insert_text("my draft");
+        composer.cursor = 3;
+
+        composer.history_up();
+        assert_eq!(composer.input_text(), "newer prompt");
+        assert_eq!(composer.cursor, 0);
+        composer.history_up();
+        assert_eq!(composer.input_text(), "older prompt");
+        composer.history_down();
+        assert_eq!(composer.input_text(), "newer prompt");
+        composer.history_down();
+        assert_eq!(composer.input_text(), "my draft");
+        assert_eq!(composer.cursor, 3);
     }
 
     #[test]
@@ -1378,6 +1810,18 @@ mod tests {
     }
 
     #[test]
+    fn paste_expands_tabs_filters_control_characters_and_separates_paths() {
+        let mut composer = Composer::default();
+        composer.insert_text("src");
+        composer.insert_text("/tmp/file");
+        assert_eq!(composer.input_text(), "src /tmp/file");
+        composer.clear();
+        composer.insert_text("one\ttwo\u{1}");
+
+        assert_eq!(composer.input_text(), "one    two");
+    }
+
+    #[test]
     fn supports_multiline_composition_and_prompt_history() {
         let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
         insert_char(&mut app, 'a');
@@ -1389,7 +1833,7 @@ mod tests {
         app.composer.history_up();
         assert_eq!(app.input_text(), "previous prompt");
         app.composer.history_down();
-        assert_eq!(app.input_text(), "");
+        assert_eq!(app.input_text(), "a\nb");
     }
 
     #[test]

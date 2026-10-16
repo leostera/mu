@@ -115,8 +115,14 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
     writer.write_all(b"hello from PTY\r")?;
     writer.flush()?;
     wait_for(&screen, |text| {
-        text.contains("Demo backend received: hello from PTY")
+        text.contains("Demo backend received: hello from PTY") && text.contains("● ready")
     })?;
+    writer.write_all(b"\x1b[A")?;
+    writer.flush()?;
+    wait_for(&screen, |text| text.matches("hello from PTY").count() >= 3)?;
+    writer.write_all(&[0x1b])?;
+    writer.flush()?;
+    wait_for(&screen, |text| text.matches("hello from PTY").count() == 2)?;
 
     for index in 0..8 {
         let prompt = format!("scroll marker {index}");
@@ -133,6 +139,9 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
     }
     wait_for(&screen, |text| text.contains("scroll marker 0"))?;
 
+    writer.write_all(&[0x03])?;
+    writer.flush()?;
+    thread::sleep(Duration::from_millis(50));
     writer.write_all(&[0x03])?;
     writer.flush()?;
     assert!(child.wait()?.success());
