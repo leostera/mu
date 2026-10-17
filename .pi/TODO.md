@@ -4,7 +4,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## Agent loop and AI/provider behavior
 
-- [ ] Add deterministic provider fakes and Pi-derived tests for complete agent-loop turns, streaming, errors, retries, cancellation, and tool results.
+- [ ] Add deterministic provider tests for errors, retries, and cancellation boundaries.
 - [ ] Match Pi retry policy and user-visible retry/abort behavior.
 - [ ] Handle incomplete, interrupted, refused, and length-truncated provider outputs; do not execute truncated tool arguments.
 - [ ] Match Pi steering/follow-up interleavings at request, tool-call, error, and cancellation boundaries; current queue is FIFO per lane, but broader interleaving tests are needed.

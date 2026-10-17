@@ -51,6 +51,8 @@ enum ProviderTransport {
         token: String,
     },
     Demo,
+    #[cfg(test)]
+    Scripted(Arc<StdMutex<VecDeque<Result<Reply, String>>>>),
 }
 struct FunctionCall {
     call_id: String,
@@ -395,6 +397,22 @@ impl Provider {
         tools: &[Value],
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<Reply, AgentError> {
+        #[cfg(test)]
+        if let ProviderTransport::Scripted(replies) = &self.transport {
+            let reply = replies
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pop_front()
+                .ok_or_else(|| AgentError::Provider("scripted provider exhausted".into()))?
+                .map_err(AgentError::Provider)?;
+            for character in reply.thinking.chars() {
+                on_event(AgentEvent::ThinkingDelta(character.to_string()));
+            }
+            for character in reply.text.chars() {
+                on_event(AgentEvent::TextDelta(character.to_string()));
+            }
+            return Ok(reply);
+        }
         if matches!(&self.transport, ProviderTransport::Demo) {
             let prompt = history
                 .last()
@@ -1241,12 +1259,109 @@ pub async fn run_cli() -> Result<(), AgentError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentPromptQueue, PromptBehavior, configured_models, execute_in_parallel,
-        session_active_mcp_tools, session_codemode_store, trusted_url,
+        AgentPromptQueue, FunctionCall, PromptBehavior, Reply, configured_models,
+        execute_in_parallel, session_active_mcp_tools, session_codemode_store, trusted_url,
     };
     use mu_session::SessionDocument;
     use serde_json::Value;
     use std::path::Path;
+    #[tokio::test]
+    async fn scripted_provider_runs_a_complete_streaming_tool_turn_offline() {
+        let root = std::env::temp_dir().join(format!("mu-scripted-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temporary project");
+        let config = super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.clone(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
+        let replies =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+                Ok(Reply {
+                    text: String::new(),
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    output_items: vec![serde_json::json!({
+                        "type":"function_call",
+                        "call_id":"call-write",
+                        "name":"write",
+                        "arguments":"{\"path\":\"result.txt\",\"content\":\"saved\"}"
+                    })],
+                    tool_calls: vec![FunctionCall {
+                        call_id: "call-write".into(),
+                        name: "write".into(),
+                        arguments: serde_json::json!({"path":"result.txt","content":"saved"}),
+                    }],
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: None,
+                    total_tokens: 0,
+                }),
+                Ok(Reply {
+                    text: "saved file".into(),
+                    thinking: "verify result".into(),
+                    thinking_signature: None,
+                    output_items: Vec::new(),
+                    tool_calls: Vec::new(),
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: None,
+                    total_tokens: 0,
+                }),
+            ])));
+        agent.provider.transport = super::ProviderTransport::Scripted(replies);
+        let mut events = Vec::new();
+
+        agent
+            .submit("create the result file".into(), &mut |event| {
+                events.push(event)
+            })
+            .await
+            .expect("complete scripted agent turn");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("result.txt")).expect("tool output file"),
+            "saved"
+        );
+        assert!(events.contains(&super::AgentEvent::ToolStarted {
+            call_id: "call-write".into(),
+            name: "write".into(),
+            arguments: serde_json::json!({"path":"result.txt","content":"saved"}),
+        }));
+        assert!(events.contains(&super::AgentEvent::ToolFinished {
+            call_id: "call-write".into(),
+            output: format!("Wrote 5 bytes to {}", root.join("result.txt").display()),
+            is_error: false,
+        }));
+        assert!(events.contains(&super::AgentEvent::ThinkingDelta("v".into())));
+        assert!(events.contains(&super::AgentEvent::TextDelta("s".into())));
+        assert_eq!(agent.history[1]["type"], "function_call");
+        assert_eq!(agent.history[2]["type"], "function_call_output");
+        assert_eq!(
+            agent.history[2]["output"],
+            format!("Wrote 5 bytes to {}", root.join("result.txt").display())
+        );
+        let session = std::fs::read_to_string(agent.session_path()).expect("read session");
+        let parsed = SessionDocument::parse_jsonl(&session).expect("parse session");
+        assert!(parsed.entries().any(|entry| {
+            entry
+                .extra_fields()
+                .get("message")
+                .and_then(Value::as_object)
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                == Some("toolResult")
+        }));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
     #[tokio::test]
     async fn starting_a_new_session_clears_context_and_preserves_the_old_file() {
         let root = std::env::temp_dir().join(format!("mu-new-session-{}", uuid::Uuid::new_v4()));
