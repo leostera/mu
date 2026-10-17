@@ -67,7 +67,6 @@ async fn pi_default_builtin_tool_set_contains_all_eight_tools() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts and edit-tool-legacy-input.test.ts.
 #[tokio::test]
-#[ignore = "Mu edit still accepts one oldText/newText pair instead of Pi's edits array"]
 async fn pi_edit_applies_disjoint_edits_in_one_atomic_call() {
     let dir = temp_dir("edit-multi");
     let path = dir.join("file.txt");

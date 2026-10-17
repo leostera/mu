@@ -3,6 +3,7 @@ use std::{
     process::Stdio,
 };
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -26,7 +27,7 @@ pub fn definitions() -> Vec<Value> {
     vec![
         json!({"type":"function","name":"read","description":"Read a file. Supports line offset and limit.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}}),
         json!({"type":"function","name":"write","description":"Write content to a file, creating parent directories as needed.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}}),
-        json!({"type":"function","name":"edit","description":"Replace one exact text occurrence in a file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["path","oldText","newText"],"additionalProperties":false}}),
+        json!({"type":"function","name":"edit","description":"Edit a single file using exact text replacements. Each edits[].oldText must match a unique, non-overlapping region of the original file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false}}),
         json!({"type":"function","name":"bash","description":"Run a shell command in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}),
     ]
 }
@@ -184,28 +185,152 @@ fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     })
 }
 
-fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
-    let path = resolve(cwd, args)?;
-    let old = string_arg(args, "oldText")?;
-    let new = string_arg(args, "newText")?;
-    if old.is_empty() {
-        return Err(ToolError::Arguments("`oldText` must not be empty".into()));
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextEdit {
+    #[serde(rename = "oldText")]
+    old_text: String,
+    #[serde(rename = "newText")]
+    new_text: String,
+}
+
+fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
+    let mut args = args.clone();
+    let object = args
+        .as_object_mut()
+        .ok_or_else(|| ToolError::Arguments("edit arguments must be an object".into()))?;
+
+    // Pi accepts legacy oldText/newText fields and a few model-emitted edits forms.
+    if let Some(edits) = object.get_mut("edits") {
+        if let Some(encoded) = edits.as_str() {
+            if let Ok(parsed) = serde_json::from_str::<Value>(encoded) {
+                *edits = parsed;
+            }
+        }
+        if edits.is_object() {
+            *edits = Value::Array(vec![edits.take()]);
+        }
     }
-    let content = std::fs::read_to_string(&path)?;
-    let mut matches = content.match_indices(old);
-    let Some((index, _)) = matches.next() else {
-        return Err(ToolError::Arguments("oldText was not found".into()));
-    };
-    if matches.next().is_some() {
+    if let (Some(old), Some(new)) = (object.remove("oldText"), object.remove("newText")) {
+        let legacy = json!({"oldText":old,"newText":new});
+        match object.remove("edits") {
+            Some(Value::Array(mut edits)) => {
+                edits.push(legacy);
+                object.insert("edits".into(), Value::Array(edits));
+            }
+            Some(Value::Null) | None => {
+                object.insert("edits".into(), Value::Array(vec![legacy]));
+            }
+            Some(_) => {
+                return Err(ToolError::Arguments("`edits` must be an array".into()));
+            }
+        }
+    }
+
+    let edits = object
+        .get("edits")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolError::Arguments("`edits` must be an array".into()))?;
+    if edits.is_empty() {
         return Err(ToolError::Arguments(
-            "oldText matched more than once".into(),
+            "edits must contain at least one replacement".into(),
         ));
     }
-    let mut updated = content;
-    updated.replace_range(index..index + old.len(), new);
-    std::fs::write(&path, updated)?;
+    edits
+        .iter()
+        .map(|value| {
+            serde_json::from_value(value.clone())
+                .map_err(|error| ToolError::Arguments(format!("invalid edit: {error}")))
+        })
+        .collect()
+}
+
+fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let path = resolve(cwd, args)?;
+    let edits = parse_edits(args)?;
+    let original = std::fs::read_to_string(&path)?;
+    let (bom, content) = original
+        .strip_prefix('\u{feff}')
+        .map_or(("", original.as_str()), |content| ("\u{feff}", content));
+    let line_ending = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized_edits = edits
+        .into_iter()
+        .map(|edit| TextEdit {
+            old_text: edit.old_text.replace("\r\n", "\n").replace('\r', "\n"),
+            new_text: edit.new_text.replace("\r\n", "\n").replace('\r', "\n"),
+        })
+        .collect::<Vec<_>>();
+
+    let mut replacements = Vec::with_capacity(normalized_edits.len());
+    for (index, edit) in normalized_edits.iter().enumerate() {
+        if edit.old_text.is_empty() {
+            return Err(ToolError::Arguments(format!(
+                "edits[{index}].oldText must not be empty in {}.",
+                path.display()
+            )));
+        }
+        let matches = normalized
+            .match_indices(&edit.old_text)
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => {
+                return Err(ToolError::Arguments(format!(
+                    "Could not find edits[{index}] in {}. The oldText must match exactly including all whitespace and newlines.",
+                    path.display()
+                )));
+            }
+            [start] => {
+                replacements.push((*start, edit.old_text.len(), edit.new_text.as_str(), index))
+            }
+            _ => {
+                return Err(ToolError::Arguments(format!(
+                    "Found {} occurrences of edits[{index}] in {}. Each oldText must be unique. Please provide more context to make it unique.",
+                    matches.len(),
+                    path.display()
+                )));
+            }
+        }
+    }
+    replacements.sort_by_key(|(start, _, _, _)| *start);
+    for pair in replacements.windows(2) {
+        let (start, length, _, index) = pair[0];
+        let (next_start, _, _, next_index) = pair[1];
+        if start + length > next_start {
+            return Err(ToolError::Arguments(format!(
+                "edits[{index}] and edits[{next_index}] overlap in {}. Merge them into one edit or target disjoint regions.",
+                path.display()
+            )));
+        }
+    }
+
+    let mut updated = normalized.clone();
+    for (start, length, replacement, _) in replacements.into_iter().rev() {
+        updated.replace_range(start..start + length, replacement);
+    }
+    if updated == normalized {
+        return Err(ToolError::Arguments(format!(
+            "No changes made to {}. The replacements produced identical content.",
+            path.display()
+        )));
+    }
+    let restored = if line_ending == "\r\n" {
+        updated.replace('\n', "\r\n")
+    } else {
+        updated
+    };
+    std::fs::write(&path, format!("{bom}{restored}"))?;
     Ok(ToolResult {
-        content: format!("Edited {}", path.display()),
+        content: format!(
+            "Successfully replaced {} block(s) in {}.",
+            normalized_edits.len(),
+            path.display()
+        ),
     })
 }
 
@@ -377,7 +502,12 @@ mod tests {
             &json!({"path":"file","oldText":"x","newText":"y"}),
         )
         .await;
-        assert!(result.unwrap_err().to_string().contains("more than once"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Found 2 occurrences")
+        );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "x x");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -396,7 +526,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(missing.to_string().contains("oldText was not found"));
+        assert!(missing.to_string().contains("Could not find edits[0]"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\nafter\n");
 
         let empty = execute(
@@ -406,8 +536,71 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(empty.to_string().contains("oldText` must not be empty"));
+        assert!(
+            empty
+                .to_string()
+                .contains("edits[0].oldText must not be empty")
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\nafter\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_preserves_bom_and_crlf_and_accepts_legacy_single_edit_arguments() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        std::fs::write(&path, "\u{feff}alpha\r\nbeta\r\n").unwrap();
+
+        let result = execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","oldText":"beta","newText":"BETA"}),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.content.contains("Successfully replaced 1 block(s)"));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}alpha\r\nBETA\r\n"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_multi_rejects_overlap_and_missing_edits_without_partial_mutation() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        let original = "alpha\nbeta\ngamma\n";
+        std::fs::write(&path, original).unwrap();
+
+        let overlap = execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","edits":[
+                {"oldText":"alpha\nbeta\n","newText":"A\nB\n"},
+                {"oldText":"beta\ngamma\n","newText":"B\nG\n"}
+            ]}),
+        )
+        .await
+        .unwrap_err();
+        assert!(overlap.to_string().contains("overlap"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        let missing = execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","edits":[
+                {"oldText":"alpha\n","newText":"ALPHA\n"},
+                {"oldText":"missing\n","newText":"MISSING\n"}
+            ]}),
+        )
+        .await
+        .unwrap_err();
+        assert!(missing.to_string().contains("Could not find edits[1]"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
