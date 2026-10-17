@@ -184,12 +184,20 @@ impl McpRegistry {
             .any(|tool| tool.exposure == Exposure::Deferred)
     }
 
-    pub(crate) fn search_tools(&self, query: &str, limit: usize) -> Vec<Value> {
+    pub(crate) fn search_tools(
+        &self,
+        query: &str,
+        limit: usize,
+        active_tools: &HashSet<String>,
+    ) -> Vec<Value> {
         let candidates = self
             .tools
-            .values()
-            .filter(|tool| matches!(tool.exposure, Exposure::Codemode | Exposure::Deferred))
-            .map(|tool| tool.definition.clone())
+            .iter()
+            .filter(|(name, tool)| {
+                matches!(tool.exposure, Exposure::Codemode | Exposure::Deferred)
+                    && !active_tools.contains(*name)
+            })
+            .map(|(_, tool)| tool.definition.clone())
             .collect::<Vec<_>>();
         crate::tool_search::rank(query, &candidates, limit)
     }
@@ -1492,7 +1500,7 @@ done
         let mut deferred_registry = registry.clone();
         deferred_registry.tools.get_mut(tool_name).unwrap().exposure = Exposure::Deferred;
         assert!(deferred_registry.has_deferred_tools());
-        let matches = deferred_registry.search_tools("return text", 8);
+        let matches = deferred_registry.search_tools("return text", 8, &HashSet::new());
         assert_eq!(matches[0]["name"], tool_name);
         assert!(
             deferred_registry
@@ -1506,15 +1514,17 @@ done
             1
         );
 
-        let (output, is_error) = crate::codemode::execute(
+        let (output, is_error, store_writes) = crate::codemode::execute(
             Path::new("."),
             &registry,
+            &json!({}),
             &json!({"code":"const result = await tools.mcp__test__echo({ text: 'hello' }); text(result.answer); return result;"}),
         )
         .await
         .expect("execute MCP tool through codemode");
         assert!(!is_error, "{output}");
         assert!(output.contains("42"), "{output}");
+        assert!(store_writes.is_none());
     }
 
     #[test]

@@ -439,6 +439,29 @@ impl SessionDocument {
         }));
     }
 
+    /// Append a Pi-compatible custom entry on the active session branch.
+    pub fn append_custom_entry(&mut self, custom_type: &str, data: Value) {
+        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let id = next_entry_id(
+            &mut self
+                .entries()
+                .filter_map(|entry| entry.id.as_ref().map(|id| id.as_str().to_owned()))
+                .collect(),
+        );
+        let mut extra = BTreeMap::new();
+        extra.insert("customType".into(), Value::String(custom_type.to_owned()));
+        extra.insert("data".into(), data);
+        self.records.push(SessionRecord::Entry(SessionEntry {
+            entry_type: EntryType("custom".into()),
+            id: Some(id),
+            parent_id: parent_id
+                .map(ParentReference::Entry)
+                .unwrap_or(ParentReference::Root),
+            timestamp: now_timestamp(),
+            extra,
+        }));
+    }
+
     pub fn append_model_change(&mut self, provider: &str, model_id: &str) {
         let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
         let id = next_entry_id(
@@ -606,6 +629,37 @@ impl SessionDocument {
             SessionRecord::Header(_) => None,
             SessionRecord::Entry(entry) => Some(entry),
         })
+    }
+
+    /// Return entries on the active leaf-to-root path in root-to-leaf order.
+    pub fn active_branch_entries(&self) -> Vec<&SessionEntry> {
+        let entries = self.entries().collect::<Vec<_>>();
+        let by_id = entries
+            .iter()
+            .filter_map(|entry| entry.id.as_ref().map(|id| (id.as_str(), *entry)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let Some(mut entry) = entries.last().copied() else {
+            return Vec::new();
+        };
+        let mut branch = Vec::new();
+        let mut visited = HashSet::new();
+        while let Some(id) = entry.id.as_ref() {
+            if !visited.insert(id.as_str()) {
+                break;
+            }
+            branch.push(entry);
+            match &entry.parent_id {
+                ParentReference::Entry(parent_id) => {
+                    let Some(parent) = by_id.get(parent_id.as_str()) else {
+                        break;
+                    };
+                    entry = parent;
+                }
+                ParentReference::Root | ParentReference::LegacyMissing => break,
+            }
+        }
+        branch.reverse();
+        branch
     }
 
     pub fn to_jsonl(&self) -> Result<String, SessionWriteError> {
@@ -952,6 +1006,32 @@ mod tests {
             entries[1].parent_id,
             ParentReference::Entry(entries[0].id.clone().unwrap())
         );
+    }
+
+    #[test]
+    fn active_branch_follows_leaf_parent_links_and_custom_entries_round_trip() {
+        let input = [
+            r#"{"type":"session","version":3,"id":"session","timestamp":"t","cwd":"/tmp"}"#,
+            r#"{"type":"custom","id":"root","parentId":null,"timestamp":"t","customType":"codemode-store","data":{"set":{"a":1},"delete":[]}}"#,
+            r#"{"type":"custom","id":"left","parentId":"root","timestamp":"t","customType":"other","data":{}}"#,
+            r#"{"type":"custom","id":"right","parentId":"root","timestamp":"t","customType":"codemode-store","data":{"set":{"b":2},"delete":[]}}"#,
+        ]
+        .join("\n");
+        let mut document = SessionDocument::parse_jsonl(&input).unwrap();
+        let active_ids = document
+            .active_branch_entries()
+            .iter()
+            .filter_map(|entry| entry.id.as_ref().map(|id| id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(active_ids, ["root", "right"]);
+
+        document.append_custom_entry(
+            "codemode-store",
+            serde_json::json!({"set":{"c":3},"delete":[]}),
+        );
+        let written = document.to_jsonl().unwrap();
+        assert!(written.contains(r#""customType":"codemode-store""#));
+        assert!(written.contains(r#""c":3"#));
     }
 
     #[test]

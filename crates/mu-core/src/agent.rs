@@ -563,6 +563,59 @@ fn api_name(transport: &ProviderTransport) -> &'static str {
     }
 }
 
+fn session_active_mcp_tools(session: &SessionDocument) -> HashSet<String> {
+    let mut active = HashSet::new();
+    for entry in session.active_branch_entries() {
+        if entry.entry_type.as_str() != "custom"
+            || entry
+                .extra_fields()
+                .get("customType")
+                .and_then(Value::as_str)
+                != Some("mcp-tool-loadout")
+        {
+            continue;
+        }
+        active = entry
+            .extra_fields()
+            .get("data")
+            .and_then(|data| data.get("active"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+    }
+    active
+}
+
+fn session_codemode_store(session: &SessionDocument) -> Value {
+    let mut store = serde_json::Map::new();
+    for entry in session.active_branch_entries() {
+        if entry.entry_type.as_str() != "custom"
+            || entry
+                .extra_fields()
+                .get("customType")
+                .and_then(Value::as_str)
+                != Some("codemode-store")
+        {
+            continue;
+        }
+        let Some(data) = entry.extra_fields().get("data").and_then(Value::as_object) else {
+            continue;
+        };
+        if let Some(deleted) = data.get("delete").and_then(Value::as_array) {
+            for key in deleted.iter().filter_map(Value::as_str) {
+                store.remove(key);
+            }
+        }
+        if let Some(values) = data.get("set").and_then(Value::as_object) {
+            store.extend(values.clone());
+        }
+    }
+    Value::Object(store)
+}
+
 fn session_path(c: &Config) -> PathBuf {
     let cwd = c
         .cwd
@@ -616,6 +669,7 @@ impl MuAgent {
         let mcp = crate::mcp::McpRegistry::connect(&config.agent_dir, &config.cwd).await;
         let session_path = session_path(&config);
         let session = SessionDocument::new(config.cwd.to_string_lossy().into_owned());
+        let active_mcp_tools = session_active_mcp_tools(&session);
         Ok(Self {
             provider,
             provider_id: config.provider,
@@ -627,7 +681,7 @@ impl MuAgent {
             skills,
             hide_thinking_block: config.hide_thinking_block,
             mcp,
-            active_mcp_tools: HashSet::new(),
+            active_mcp_tools,
         })
     }
 
@@ -648,6 +702,8 @@ impl MuAgent {
             hide_thinking_block: false,
         };
         let path = session_path(&config);
+        let session = SessionDocument::new(config.cwd.to_string_lossy().into_owned());
+        let active_mcp_tools = session_active_mcp_tools(&session);
         Ok(Self {
             provider: Provider {
                 transport: ProviderTransport::Demo,
@@ -657,14 +713,14 @@ impl MuAgent {
             },
             provider_id: config.provider,
             model_choices: config.model_choices,
-            session: SessionDocument::new(config.cwd.to_string_lossy().into_owned()),
+            session,
             history: Vec::new(),
             session_path: path,
             cwd: config.cwd.clone(),
             skills: crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir),
             hide_thinking_block: config.hide_thinking_block,
             mcp: crate::mcp::McpRegistry::default(),
-            active_mcp_tools: HashSet::new(),
+            active_mcp_tools,
         })
     }
 
@@ -715,6 +771,10 @@ impl MuAgent {
         arguments: &Value,
     ) -> Result<crate::tools::ToolResult, crate::tools::ToolError> {
         crate::tools::execute(&self.cwd, name, arguments).await
+    }
+
+    fn codemode_store(&self) -> Value {
+        session_codemode_store(&self.session)
     }
 
     fn tool_definitions(&self, active_mcp_tools: &HashSet<String>) -> Vec<Value> {
@@ -801,47 +861,83 @@ impl MuAgent {
                                 .and_then(Value::as_u64)
                                 .unwrap_or(8)
                                 .clamp(1, 30) as usize;
-                            let matches = self.mcp.search_tools(query, limit);
+                            let matches =
+                                self.mcp.search_tools(query, limit, &self.active_mcp_tools);
                             for tool in &matches {
                                 if let Some(name) = tool.get("name").and_then(Value::as_str) {
                                     self.active_mcp_tools.insert(name.to_owned());
                                 }
                             }
-                            let visible = matches
-                                .iter()
-                                .map(|tool| {
-                                    json!({
-                                        "name":tool.get("name"),
-                                        "description":tool.get("description")
+                            let output = if matches.is_empty() {
+                                "No matching tools found.".to_owned()
+                            } else {
+                                let loaded = matches
+                                    .iter()
+                                    .map(|tool| {
+                                        format!(
+                                            "- {}: {}",
+                                            tool.get("name")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default(),
+                                            tool.get("description")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default()
+                                                .lines()
+                                                .next()
+                                                .unwrap_or_default()
+                                        )
                                     })
-                                })
-                                .collect::<Vec<_>>();
-                            Ok((
-                                serde_json::to_string_pretty(&visible).unwrap_or_default(),
-                                false,
-                            ))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                format!(
+                                    "Loaded {} tool{}. They are available from your next call:\n{loaded}",
+                                    matches.len(),
+                                    if matches.len() == 1 { "" } else { "s" }
+                                )
+                            };
+                            if !matches.is_empty() {
+                                let mut active =
+                                    self.active_mcp_tools.iter().cloned().collect::<Vec<_>>();
+                                active.sort();
+                                self.session.append_custom_entry(
+                                    "mcp-tool-loadout",
+                                    json!({"active":active}),
+                                );
+                                self.session
+                                    .write_atomic(&self.session_path)
+                                    .map_err(|error| AgentError::Session(error.to_string()))?;
+                            }
+                            Ok((output, false, None))
                         }
                         None => Err("tool_search requires a non-empty query".into()),
                     }
                 } else if call.name == "codemode" {
-                    crate::codemode::execute(&self.cwd, &self.mcp, &call.arguments)
+                    let store = self.codemode_store();
+                    crate::codemode::execute(&self.cwd, &self.mcp, &store, &call.arguments)
                         .await
                         .map_err(|error| error.to_string())
                 } else {
                     match self.mcp.call(&call.name, &call.arguments).await {
-                        Some(Ok(result)) => Ok((result.content, result.is_error)),
+                        Some(Ok(result)) => Ok((result.content, result.is_error, None)),
                         Some(Err(error)) => Err(error),
                         None => self
                             .execute_tool(&call.name, &call.arguments)
                             .await
-                            .map(|result| (result.content, false))
+                            .map(|result| (result.content, false, None))
                             .map_err(|error| error.to_string()),
                     }
                 };
-                let (output, is_error) = match result {
+                let (output, is_error, store_writes) = match result {
                     Ok(result) => result,
-                    Err(error) => (error, true),
+                    Err(error) => (error, true, None),
                 };
+                if let Some(store_writes) = store_writes {
+                    self.session
+                        .append_custom_entry("codemode-store", store_writes);
+                    self.session
+                        .write_atomic(&self.session_path)
+                        .map_err(|error| AgentError::Session(error.to_string()))?;
+                }
                 on_event(AgentEvent::ToolFinished {
                     call_id: call.call_id.clone(),
                     output: output.clone(),
@@ -955,8 +1051,30 @@ pub async fn run_cli() -> Result<(), AgentError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{configured_models, trusted_url};
+    use super::{configured_models, session_active_mcp_tools, session_codemode_store, trusted_url};
+    use mu_session::SessionDocument;
     use std::path::Path;
+    #[test]
+    fn restores_codemode_store_and_tool_loadout_from_the_active_session_branch() {
+        let input = [
+            r#"{"type":"session","version":3,"id":"session","timestamp":"t","cwd":"/tmp"}"#,
+            r#"{"type":"custom","id":"root","parentId":null,"timestamp":"t","customType":"codemode-store","data":{"set":{"count":1,"old":true},"delete":[]}}"#,
+            r#"{"type":"custom","id":"sibling","parentId":"root","timestamp":"t","customType":"codemode-store","data":{"set":{"sibling":true},"delete":[]}}"#,
+            r#"{"type":"custom","id":"leaf","parentId":"root","timestamp":"t","customType":"codemode-store","data":{"set":{"count":2},"delete":["old"]}}"#,
+            r#"{"type":"custom","id":"loadout","parentId":"leaf","timestamp":"t","customType":"mcp-tool-loadout","data":{"active":["mcp__test__echo"]}}"#,
+        ]
+        .join("\n");
+        let session = SessionDocument::parse_jsonl(&input).expect("parse session branch");
+        assert_eq!(
+            session_codemode_store(&session),
+            serde_json::json!({"count":2})
+        );
+        assert_eq!(
+            session_active_mcp_tools(&session),
+            ["mcp__test__echo".to_owned()].into()
+        );
+    }
+
     #[test]
     fn reads_final_openai_responses_reasoning_when_no_reasoning_delta_arrived() {
         let item = serde_json::json!({

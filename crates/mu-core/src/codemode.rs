@@ -46,8 +46,9 @@ pub(crate) fn definition(mcp: &McpRegistry) -> Value {
 pub(crate) async fn execute(
     cwd: &Path,
     mcp: &McpRegistry,
+    stored_values: &Value,
     arguments: &Value,
-) -> Result<(String, bool), String> {
+) -> Result<(String, bool, Option<Value>), String> {
     let code = arguments
         .get("code")
         .and_then(Value::as_str)
@@ -63,7 +64,7 @@ pub(crate) async fn execute(
             }))
         })
         .collect::<Vec<_>>();
-    let source = script_source(code, &metadata)?;
+    let source = script_source(code, &metadata, stored_values)?;
     let mcp = mcp.clone();
     let cwd = cwd.to_owned();
     let searchable_tools = tool_definitions.clone();
@@ -189,13 +190,25 @@ pub(crate) async fn execute(
                     response.push_str(error);
                 }
             }
-            Ok((response, !ok))
+            let store_writes = result
+                .value
+                .get("storeWrites")
+                .filter(|_| ok)
+                .filter(|writes| {
+                    writes
+                        .get("set")
+                        .and_then(Value::as_object)
+                        .is_some_and(|set| !set.is_empty())
+                })
+                .cloned();
+            Ok((response, !ok, store_writes))
         }
         Err(error) => Ok((
             format!(
                 "Script failed\nWall time {elapsed:.1} seconds\nOutput:\nScript error:\n{error}"
             ),
             true,
+            None,
         )),
     }
 }
@@ -206,13 +219,20 @@ fn callable_tool_definitions(mcp: &McpRegistry) -> Vec<Value> {
     definitions
 }
 
-fn script_source(code: &str, metadata: &[Value]) -> Result<String, String> {
+fn script_source(code: &str, metadata: &[Value], stored_values: &Value) -> Result<String, String> {
     let metadata = serde_json::to_string(metadata).map_err(|error| error.to_string())?;
+    let stored_values = if stored_values.is_object() {
+        stored_values.to_string()
+    } else {
+        "{}".into()
+    };
+    let stored_values = serde_json::to_string(&stored_values).map_err(|error| error.to_string())?;
     Ok(format!(
         r#"async () => {{
   const __muTools = {metadata};
   const __muOutput = [];
-  const __muStore = Object.create(null);
+  const __muStore = JSON.parse({stored_values});
+  const __muStoreWrites = Object.create(null);
   const __muExit = Symbol("mu codemode exit");
   globalThis.tools = Object.create(null);
   for (const tool of __muTools) {{
@@ -226,7 +246,11 @@ fn script_source(code: &str, metadata: &[Value]) -> Result<String, String> {
   globalThis.text = (value) => __muOutput.push(typeof value === "string" ? value : JSON.stringify(value));
   globalThis.image = (_value) => __muOutput.push("[image output is not supported by this Mu renderer]");
   globalThis.exit = () => {{ throw __muExit; }};
-  globalThis.store = (key, value) => {{ __muStore[String(key)] = value; }};
+  globalThis.store = (key, value) => {{
+    const cloned = JSON.parse(JSON.stringify(value));
+    __muStore[String(key)] = cloned;
+    __muStoreWrites[String(key)] = cloned;
+  }};
   globalThis.load = (key) => __muStore[String(key)];
   globalThis.searchTools = async (query, options = {{}}) => native.search_tools(query, options);
   globalThis.describeTool = (name) => __muTools.find((tool) => tool.name === name);
@@ -247,7 +271,7 @@ fn script_source(code: &str, metadata: &[Value]) -> Result<String, String> {
 {code}
 }})(); }}
     catch (error) {{ if (error !== __muExit) throw error; }}
-    return {{ ok: true, value: value === undefined ? null : value, output: __muOutput }};
+    return {{ ok: true, value: value === undefined ? null : value, output: __muOutput, storeWrites: {{ set: __muStoreWrites, delete: [] }} }};
   }} catch (error) {{
     return {{ ok: false, value: null, output: __muOutput, error: String(error && error.stack || error) }};
   }}
@@ -273,10 +297,11 @@ mod tests {
         fs::create_dir_all(&cwd).unwrap();
         fs::write(cwd.join("sample.txt"), "the file content").unwrap();
 
-        let (output, is_error) = execute(
+        let (output, is_error, store_writes) = execute(
             &cwd,
             &McpRegistry::default(),
-            &json!({"code":"const result = await tools.read({ path: 'sample.txt' }); text(result); const matches = await searchTools('read file'); text(matches[0].name); return { done: true, capabilities: [typeof fetch, typeof env, typeof Deno] };"}),
+            &json!({"count":1}),
+            &json!({"code":"const result = await tools.read({ path: 'sample.txt' }); text(result); const matches = await searchTools('read file'); text(matches[0].name); store('count', load('count') + 1); return { done: true, capabilities: [typeof fetch, typeof env, typeof Deno] };"}),
         )
         .await
         .unwrap();
@@ -286,6 +311,7 @@ mod tests {
         assert!(output.contains("\nread"));
         assert!(output.contains("\"done\":true"));
         assert!(output.contains("\"capabilities\":[\"undefined\",\"undefined\",\"undefined\"]"));
+        assert_eq!(store_writes.unwrap()["set"]["count"], 2);
         fs::remove_dir_all(cwd).unwrap();
     }
 
@@ -294,16 +320,18 @@ mod tests {
         let cwd = std::env::temp_dir().join(format!("mu-codemode-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&cwd).unwrap();
 
-        let (output, is_error) = execute(
+        let (output, is_error, store_writes) = execute(
             &cwd,
             &McpRegistry::default(),
-            &json!({"code":"await tools.read({ path: 'missing.txt' });"}),
+            &json!({}),
+            &json!({"code":"store('lost', true); await tools.read({ path: 'missing.txt' });"}),
         )
         .await
         .unwrap();
         assert!(is_error, "{output}");
         assert!(output.contains("Script failed"));
         assert!(output.contains("Script error:"));
+        assert!(store_writes.is_none());
         fs::remove_dir_all(cwd).unwrap();
     }
 }
