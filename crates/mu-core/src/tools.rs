@@ -64,9 +64,16 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         .and_then(Value::as_u64)
         .unwrap_or(1)
         .max(1) as usize;
+    let lines = text.split('\n').collect::<Vec<_>>();
+    if offset > lines.len() {
+        return Err(ToolError::Arguments(format!(
+            "Offset {offset} is beyond end of file ({} lines total)",
+            lines.len()
+        )));
+    }
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(2000) as usize;
-    let content = text
-        .lines()
+    let content = lines
+        .iter()
         .skip(offset - 1)
         .take(limit)
         .enumerate()
@@ -154,7 +161,7 @@ mod tests {
         let read = execute(&dir, "read", &json!({"path":"nested/file.txt","offset":2}))
             .await
             .unwrap();
-        assert!(read.content.ends_with("     2\ttwo"));
+        assert!(read.content.contains("     2\ttwo\n"));
         execute(
             &dir,
             "edit",
@@ -165,6 +172,23 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("nested/file.txt")).unwrap(),
             "one\nthree\n"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_rejects_offsets_beyond_the_end_of_file() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file"), "one\ntwo").unwrap();
+
+        let error = execute(&dir, "read", &json!({"path":"file","offset":3}))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid arguments: Offset 3 is beyond end of file (2 lines total)"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

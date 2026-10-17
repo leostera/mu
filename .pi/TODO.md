@@ -22,7 +22,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## Built-in tools and skills
 
-- [ ] Compare each built-in tool's schema, validation, filesystem/shell behavior, error text, output limits, and safety/approval semantics against Pi; add edge-case fixtures and tests.
+- [ ] Compare each built-in tool's remaining schema, validation, filesystem/shell behavior, output limits, and safety/approval semantics against Pi; add edge-case fixtures and tests.
 - [ ] Complete skill activation/command behavior, argument handling, and parity for discovery precedence, frontmatter, and content injection.
 - [ ] Match tool-output limits, content-block conversion, and large-output behavior.
 
