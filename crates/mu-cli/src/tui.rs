@@ -1527,7 +1527,29 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
     app.command_menu_open = false;
     match command {
         "quit" | "exit" => app.quit = true,
-        "clear" | "new" => app.messages.clear(),
+        "clear" | "new" => match agent.try_lock() {
+            Ok(mut agent) => match agent.start_new_session() {
+                Ok(()) => {
+                    app.messages.clear();
+                    app.queued_prompts.clear();
+                    app.session_path = agent.session_path().display().to_string();
+                }
+                Err(error) => app.messages.push(Message {
+                    role: Role::Assistant,
+                    text: format!("Could not start a new session: {error}"),
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    error: true,
+                }),
+            },
+            Err(_) => app.messages.push(Message {
+                role: Role::Assistant,
+                text: "Could not start a new session while Mu is busy.".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: true,
+            }),
+        },
         "model" => {
             app.model_selection = app
                 .models

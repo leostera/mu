@@ -806,6 +806,10 @@ impl MuAgent {
             model_choices: vec!["mu-demo".into(), "mu-demo-alt".into()],
             hide_thinking_block: false,
         };
+        Self::demo_from_config(config)
+    }
+
+    fn demo_from_config(config: Config) -> Result<Self, AgentError> {
         let path = session_path(&config);
         let session = SessionDocument::new(config.cwd.to_string_lossy().into_owned());
         let active_mcp_tools = session_active_mcp_tools(&session);
@@ -867,6 +871,28 @@ impl MuAgent {
 
     pub fn session_path(&self) -> &Path {
         &self.session_path
+    }
+
+    /// Start a fresh Pi-format session while preserving this agent's provider and settings.
+    pub fn start_new_session(&mut self) -> Result<(), AgentError> {
+        let parent = self.session_path.parent().ok_or_else(|| {
+            AgentError::Session("current session path has no parent directory".into())
+        })?;
+        let timestamp = chrono::Utc::now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            .replace([':', '.'], "-");
+        let next_path = parent.join(format!("{timestamp}_{}.jsonl", uuid::Uuid::new_v4()));
+        let next_session = SessionDocument::new(self.cwd.to_string_lossy().into_owned());
+        next_session
+            .write_atomic(&next_path)
+            .map_err(|error| AgentError::Session(error.to_string()))?;
+
+        self.session = next_session;
+        self.history.clear();
+        self.session_path = next_path;
+        self.active_mcp_tools.clear();
+        self.prompt_queue.clear();
+        Ok(())
     }
 
     /// Skills discovered from Pi's global and project skill directories.
@@ -1221,6 +1247,55 @@ mod tests {
     use mu_session::SessionDocument;
     use serde_json::Value;
     use std::path::Path;
+    #[tokio::test]
+    async fn starting_a_new_session_clears_context_and_preserves_the_old_file() {
+        let root = std::env::temp_dir().join(format!("mu-new-session-{}", uuid::Uuid::new_v4()));
+        let agent_dir = root.join("agent");
+        std::fs::create_dir_all(&root).expect("create temporary project");
+        let config = super::Config {
+            agent_dir,
+            cwd: root.clone(),
+            provider: "mu-demo".into(),
+            model: "mu-demo".into(),
+            model_choices: vec!["mu-demo".into()],
+            hide_thinking_block: false,
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
+        agent
+            .submit("old conversation".into(), &mut |_| {})
+            .await
+            .expect("write old session");
+        let old_path = agent.session_path().to_owned();
+        agent.active_mcp_tools.insert("mcp__test__echo".into());
+        agent
+            .prompt_queue
+            .enqueue("pending prompt".into(), PromptBehavior::FollowUp);
+
+        agent.start_new_session().expect("start new session");
+
+        assert_ne!(agent.session_path(), old_path);
+        assert!(agent.history.is_empty());
+        assert!(agent.active_mcp_tools.is_empty());
+        assert_eq!(agent.prompt_queue.take_next(), None);
+        let old_session = std::fs::read_to_string(&old_path).expect("preserve old session file");
+        assert!(
+            super::SessionDocument::parse_jsonl(&old_session)
+                .expect("parse old session")
+                .entries()
+                .count()
+                > 0
+        );
+        let new_session = std::fs::read_to_string(agent.session_path()).expect("new session file");
+        assert_eq!(
+            super::SessionDocument::parse_jsonl(&new_session)
+                .expect("parse new session")
+                .entries()
+                .count(),
+            0
+        );
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
     #[test]
     fn prompt_queue_prioritizes_fifo_steering_before_follow_ups() {
         let queue = AgentPromptQueue::default();
