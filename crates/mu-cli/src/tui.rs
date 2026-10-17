@@ -1476,12 +1476,9 @@ fn insert_char(app: &mut App, ch: char) {
 
 fn render(frame: &mut Frame, app: &mut App) {
     let input_text = app.input_text();
-    let editor_width = frame.area().width.saturating_sub(2).max(1);
+    let editor_width = frame.area().width.max(1);
     app.composer.set_visual_width(usize::from(editor_width));
-    let editor_lines = Paragraph::new(input_text.clone())
-        .wrap(Wrap { trim: false })
-        .line_count(editor_width)
-        .clamp(1, 8) as u16;
+    let editor_lines = editor_line_count(&input_text, editor_width).clamp(1, 8) as u16;
     let menu_rows = if app.command_menu_open || app.model_selector_open {
         let item_count = if app.model_selector_open {
             app.models.len()
@@ -1826,13 +1823,18 @@ fn render_command_menu(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+fn editor_line_count(input: &str, width: u16) -> usize {
+    let wrapped_lines = Paragraph::new(input)
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1));
+    wrapped_lines + usize::from(input.ends_with('\n'))
+}
+
 fn editor_cursor_position(input: &[char], cursor: usize, inner: Rect) -> Position {
     let width = inner.width.max(1);
     let width_cells = usize::from(width);
     let text: String = input.iter().collect();
-    let content_rows = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .line_count(width);
+    let content_rows = editor_line_count(&text, width);
     let visible_rows = usize::from(inner.height.max(1));
     let scroll = content_rows.saturating_sub(visible_rows);
 
@@ -1893,9 +1895,7 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &App, input: &str) {
         Style::default().fg(Color::White)
     };
     let visible = area.height.saturating_sub(2);
-    let content_lines = Paragraph::new(text.to_owned())
-        .wrap(Wrap { trim: false })
-        .line_count(area.width.saturating_sub(2).max(1));
+    let content_lines = editor_line_count(text, area.width);
     let scroll = (content_lines as u16).saturating_sub(visible);
     frame.render_widget(
         Paragraph::new(text.to_owned())
@@ -2248,6 +2248,28 @@ mod tests {
         assert_eq!(app.input_text(), "previous prompt");
         app.composer.history_down();
         assert_eq!(app.input_text(), "a\nb");
+    }
+
+    #[test]
+    fn shift_enter_keeps_a_trailing_blank_line_visible() {
+        let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render empty composer");
+        let empty_title_row = row_with_text(terminal.backend(), "message · Enter send");
+
+        app.composer
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(app.input_text().chars().collect::<Vec<_>>(), vec!['\n']);
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render trailing blank line");
+
+        let multiline_title_row = row_with_text(terminal.backend(), "message · Enter send");
+        assert_eq!(multiline_title_row + 1, empty_title_row);
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(usize::from(cursor.y), multiline_title_row + 2);
     }
 
     #[test]
