@@ -20,7 +20,9 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## Built-in tools and skills
 
-- [ ] Compare each built-in tool's remaining schema, validation, filesystem/shell behavior, output limits, and safety/approval semantics against Pi; add edge-case fixtures and tests.
+- [ ] Port Pi's `tools.test.ts` cases for `read`, `write`, `edit`, and `bash`; match schemas, exact outputs/errors, and filesystem/shell edge behavior.
+- [ ] Add Pi's `grep`, `find`, `ls`, and `powershell` built-in tools and port their tests; Mu currently exposes only `read`, `write`, `edit`, and `bash`.
+- [ ] Match the remaining built-in tool output limits, image/content-block conversion, safety/approval behavior, and structured results.
 - [ ] Complete skill activation/command behavior, argument handling, and parity for discovery precedence, frontmatter, and content injection.
 - [ ] Match tool-output limits, content-block conversion, and large-output behavior.
 

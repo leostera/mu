@@ -1527,7 +1527,10 @@ mod tests {
         }));
         assert!(events.contains(&super::AgentEvent::ToolFinished {
             call_id: "call-write".into(),
-            output: format!("Wrote 5 bytes to {}", root.join("result.txt").display()),
+            output: format!(
+                "Successfully wrote to {}",
+                root.join("result.txt").display()
+            ),
             is_error: false,
         }));
         assert!(events.contains(&super::AgentEvent::ThinkingDelta("v".into())));
@@ -1536,7 +1539,10 @@ mod tests {
         assert_eq!(agent.history[2]["type"], "function_call_output");
         assert_eq!(
             agent.history[2]["output"],
-            format!("Wrote 5 bytes to {}", root.join("result.txt").display())
+            format!(
+                "Successfully wrote to {}",
+                root.join("result.txt").display()
+            )
         );
         let session = std::fs::read_to_string(agent.session_path()).expect("read session");
         let parsed = SessionDocument::parse_jsonl(&session).expect("parse session");
