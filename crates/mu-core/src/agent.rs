@@ -732,6 +732,10 @@ impl MuAgent {
         &self.provider_id
     }
 
+    pub fn mcp_status(&self) -> String {
+        self.mcp.status_text()
+    }
+
     pub fn model_choices(&self) -> &[String] {
         &self.model_choices
     }

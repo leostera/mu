@@ -91,6 +91,7 @@ struct ExposedTool {
 #[derive(Clone)]
 pub(crate) struct McpRegistry {
     tools: BTreeMap<String, ExposedTool>,
+    server_status: Vec<String>,
     auto_enable_codemode: bool,
 }
 
@@ -139,6 +140,9 @@ impl McpRegistry {
             let tool_exposure = config.tool_exposure.clone();
             match connect_server(config, cwd).await {
                 Ok((server, tools)) => {
+                    registry
+                        .server_status
+                        .push(format!("{name}: connected ({} tools)", tools.len()));
                     for tool in tools {
                         let exposure =
                             tool_exposure_for(server_exposure, &tool_exposure, &tool.name);
@@ -162,10 +166,22 @@ impl McpRegistry {
                         );
                     }
                 }
-                Err(error) => eprintln!("mu: MCP server `{name}`: {error}"),
+                Err(error) => {
+                    registry
+                        .server_status
+                        .push(format!("{name}: disconnected ({error})"));
+                    eprintln!("mu: MCP server `{name}`: {error}");
+                }
             }
         }
         registry
+    }
+
+    pub(crate) fn status_text(&self) -> String {
+        if self.server_status.is_empty() {
+            return "No MCP servers configured.".to_owned();
+        }
+        self.server_status.join("\n")
     }
 
     pub(crate) fn definitions_for_model(&self, active_tools: &HashSet<String>) -> Vec<Value> {
@@ -238,6 +254,7 @@ impl Default for McpRegistry {
     fn default() -> Self {
         Self {
             tools: BTreeMap::new(),
+            server_status: Vec::new(),
             auto_enable_codemode: true,
         }
     }
@@ -1183,6 +1200,14 @@ fn expand_environment(value: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_reports_when_no_servers_are_configured() {
+        assert_eq!(
+            McpRegistry::default().status_text(),
+            "No MCP servers configured."
+        );
+    }
 
     #[test]
     fn loads_stdio_servers_and_resolves_relative_working_directories() {

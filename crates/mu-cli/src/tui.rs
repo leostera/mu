@@ -1407,6 +1407,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("help", "Show help"),
     ("hotkeys", "Show keyboard shortcuts"),
     ("tools", "List available tools"),
+    ("mcp", "Show MCP server status"),
     ("login", "Configure provider authentication"),
     ("logout", "Remove provider authentication"),
     ("quit", "Exit Mu"),
@@ -1440,9 +1441,22 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 .unwrap_or(0);
             app.model_selector_open = true;
         }
+        "mcp" => {
+            let text = agent
+                .try_lock()
+                .map(|agent| agent.mcp_status())
+                .unwrap_or_else(|_| "MCP status is unavailable while Mu is busy.".into());
+            app.messages.push(Message {
+                role: Role::Assistant,
+                text,
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: false,
+            });
+        }
         "help" => app.messages.push(Message {
             role: Role::Assistant,
-            text: "Commands: /help, /model, /new, /clear, /quit".into(),
+            text: "Commands: /help, /model, /mcp, /new, /clear, /quit".into(),
             thinking: String::new(),
             tools: Vec::new(),
             error: false,
