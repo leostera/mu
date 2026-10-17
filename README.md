@@ -6,7 +6,7 @@ A Rust port of the core of Pi, with Deno Core embedding for JavaScript/TypeScrip
 
 Mu now starts a fullscreen Ratatui/Crossterm TUI with a scrollable Pi-style chat document above a fixed command/composer/status dock. The header scrolls with the transcript; manual scroll position is preserved while responses stream, with follow-to-end behavior when the user is at the bottom. The live provider implementation supports the Cloudflare OpenCode Pi plugin (`opencode-cf`) with OpenAI Responses models: it discovers the gateway, obtains a Cloudflare Access token from `cloudflared` (or `OPENCODE_CF_TOKEN`), streams text, and writes each turn to a new Pi v3 JSONL session under the same `~/.pi/agent/sessions/<cwd>/` layout. `mu --demo` starts the same UI with a deterministic no-network backend.
 
-This remains an early vertical slice, not a drop-in coding agent. Mu exposes Pi-shaped `read`, `write`, `edit`, and `bash` tools to the OpenAI Responses tool loop, and discovers Pi-style `SKILL.md` resources under `~/.pi/agent/skills`, `~/.agents/skills`, `.pi/skills`, and `.agents/skills`. Skill metadata enters the system prompt; the model reads a skill file when needed. Mu can also launch stdio MCP servers from `~/.pi/agent/mcp.json`, negotiate MCP, discover tools, and route calls through the agent loop. For now it exposes discovered MCP tools directly; HTTP transports, project-level MCP configuration, Pi's codemode/deferred exposure, and the `/mcp` manager are not implemented. Built-in file/shell tools and MCP server processes run with the current user's OS permissions and are **not sandboxed**; only configure MCP servers you trust. Session resume/branching, the rest of Pi's tools/config surface, and extension API compatibility remain incomplete. The Deno smoke test only establishes that embedded V8 can evaluate JavaScript. The Pi reference is pinned as a git submodule at [`reference/pi`](reference/pi), commit `698a2d23b86a5045dd54554354a5e0cb7e466795`; initialize it with `git submodule update --init --recursive`.
+This remains an early vertical slice, not a drop-in coding agent. Mu exposes Pi-shaped `read`, `write`, `edit`, and `bash` tools to the OpenAI Responses tool loop, and discovers Pi-style `SKILL.md` resources under `~/.pi/agent/skills`, `~/.agents/skills`, `.pi/skills`, and `.agents/skills`. Skill metadata enters the system prompt; the model reads a skill file when needed. Mu can also launch stdio MCP servers from `~/.pi/agent/mcp.json`, negotiate MCP, discover tools, and route calls through the agent loop. It now honors Pi's `direct`, `hidden`, `codemode`, and `deferred` exposure settings, including per-tool overrides, and Pi's default is `codemode`. The `codemode` and `deferred` routing tools are not implemented yet, so only explicitly `direct` tools can currently be called by the model. HTTP transports, project-level MCP configuration, and the `/mcp` manager remain unimplemented. Built-in file/shell tools and MCP server processes run with the current user's OS permissions and are **not sandboxed**; only configure MCP servers you trust. Session resume/branching, the rest of Pi's tools/config surface, and extension API compatibility remain incomplete. The Deno smoke test only establishes that embedded V8 can evaluate JavaScript. The Pi reference is pinned as a git submodule at [`reference/pi`](reference/pi), commit `698a2d23b86a5045dd54554354a5e0cb7e466795`; initialize it with `git submodule update --init --recursive`.
 
 Mu reads `defaultProvider` and `defaultModel` from Pi's global `settings.json`, with `.pi/settings.json` in the current project taking precedence. Configure stdio MCP servers using the shared `mcpServers` shape in `<PI_CODING_AGENT_DIR>/mcp.json` (default `~/.pi/agent/mcp.json`), for example:
 
@@ -15,13 +15,14 @@ Mu reads `defaultProvider` and `defaultModel` from Pi's global `settings.json`, 
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "exposure": "direct"
     }
   }
 }
 ```
 
-Mu currently reads only this global file and starts enabled stdio servers when a live agent connects. Set `PI_CODING_AGENT_DIR` to use a non-default Pi agent directory. The current live provider adapter is specific to the default Cloudflare OpenCode gateway. A PTY integration test uses `portable-pty` and `vt100` to drive the real binary with the offline demo backend, so normal tests need no gateway credentials or model calls.
+Mu currently reads only this global file and starts enabled stdio servers when a live agent connects. The example sets `exposure` to `direct` because Pi's default, `codemode`, is not callable in Mu yet. Set `PI_CODING_AGENT_DIR` to use a non-default Pi agent directory. The current live provider adapter is specific to the default Cloudflare OpenCode gateway. A PTY integration test uses `portable-pty` and `vt100` to drive the real binary with the offline demo backend, so normal tests need no gateway credentials or model calls.
 
 ## Development
 

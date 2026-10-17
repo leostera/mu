@@ -17,7 +17,27 @@ use tokio::{
 const PROTOCOL_VERSION: &str = "2025-11-25";
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Exposure {
+    Codemode,
+    Deferred,
+    Direct,
+    Hidden,
+}
+
+impl Exposure {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "codemode" | "codemode-deferred" => Some(Self::Codemode),
+            "deferred" => Some(Self::Deferred),
+            "direct" => Some(Self::Direct),
+            "hidden" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ServerConfig {
@@ -26,13 +46,15 @@ struct ServerConfig {
     args: Vec<String>,
     env: BTreeMap<String, String>,
     cwd: Option<PathBuf>,
+    exposure: Exposure,
+    tool_exposure: Vec<(String, Exposure)>,
+    timeout: Duration,
 }
 
 struct RemoteTool {
     name: String,
     description: String,
     input_schema: Value,
-    exposed_name: String,
 }
 
 struct ConnectedServer {
@@ -55,6 +77,7 @@ struct McpProcess {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    request_timeout: Duration,
 }
 
 pub(crate) struct McpToolResult {
@@ -77,21 +100,36 @@ impl McpRegistry {
         let mut used_names = HashSet::new();
         for config in configs {
             let name = config.name.clone();
-            match connect_server(config, cwd, &mut used_names).await {
+            let server_exposure = config.exposure;
+            let tool_exposure = config.tool_exposure.clone();
+            match connect_server(config, cwd).await {
                 Ok((server, tools)) => {
+                    let mut unavailable_exposure = false;
                     for tool in tools {
+                        let exposure =
+                            tool_exposure_for(server_exposure, &tool_exposure, &tool.name);
+                        if exposure != Exposure::Direct {
+                            unavailable_exposure |= exposure != Exposure::Hidden;
+                            continue;
+                        }
+                        let exposed_name = unique_tool_name(&name, &tool.name, &mut used_names);
                         registry.tools.insert(
-                            tool.exposed_name.clone(),
+                            exposed_name.clone(),
                             ExposedTool {
                                 server: Arc::clone(&server),
                                 remote_name: tool.name,
                                 definition: json!({
                                     "type": "function",
-                                    "name": tool.exposed_name,
+                                    "name": exposed_name,
                                     "description": tool.description,
                                     "parameters": tool.input_schema,
                                 }),
                             },
+                        );
+                    }
+                    if unavailable_exposure {
+                        eprintln!(
+                            "mu: MCP server `{name}` uses codemode/deferred exposure; those discovery modes are not implemented yet, so its tools are not available to the model"
                         );
                     }
                 }
@@ -138,14 +176,14 @@ impl McpProcess {
         let request = json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params});
         let mut encoded = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
         encoded.push(b'\n');
-        timeout(REQUEST_TIMEOUT, self.stdin.write_all(&encoded))
+        timeout(self.request_timeout, self.stdin.write_all(&encoded))
             .await
             .map_err(|_| format!("{method} request timed out while writing"))?
             .map_err(|error| format!("{method} request write failed: {error}"))?;
 
         loop {
             let mut line = String::new();
-            let read = timeout(REQUEST_TIMEOUT, self.stdout.read_line(&mut line))
+            let read = timeout(self.request_timeout, self.stdout.read_line(&mut line))
                 .await
                 .map_err(|_| format!("{method} request timed out waiting for a response"))?
                 .map_err(|error| format!("{method} response read failed: {error}"))?;
@@ -229,7 +267,6 @@ impl McpProcess {
 async fn connect_server(
     config: ServerConfig,
     cwd: &Path,
-    used_names: &mut HashSet<String>,
 ) -> Result<(Arc<ConnectedServer>, Vec<RemoteTool>), String> {
     let mut command = Command::new(&config.command);
     command
@@ -254,6 +291,7 @@ async fn connect_server(
         stdin,
         stdout: BufReader::new(stdout),
         next_id: 1,
+        request_timeout: config.timeout,
     };
 
     let initialized = process
@@ -307,7 +345,6 @@ async fn connect_server(
                 .filter(|schema| schema.is_object())
                 .cloned()
                 .ok_or_else(|| format!("MCP tool `{name}` has no object inputSchema"))?;
-            let exposed_name = unique_tool_name(&config.name, name, used_names);
             tools.push(RemoteTool {
                 name: name.to_owned(),
                 description: tool
@@ -317,7 +354,6 @@ async fn connect_server(
                     .unwrap_or(name)
                     .to_owned(),
                 input_schema,
-                exposed_name,
             });
         }
         cursor = page
@@ -340,6 +376,45 @@ async fn connect_server(
         }
     }
     Err("MCP tools/list exceeded 100 pages".into())
+}
+
+fn tool_exposure_for(default: Exposure, overrides: &[(String, Exposure)], tool: &str) -> Exposure {
+    if let Some((_, exposure)) = overrides
+        .iter()
+        .find(|(pattern, _)| !pattern.contains('*') && pattern == tool)
+    {
+        return *exposure;
+    }
+    overrides
+        .iter()
+        .find(|(pattern, _)| pattern.contains('*') && wildcard_matches(pattern, tool))
+        .map_or(default, |(_, exposure)| *exposure)
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    let mut rest = value;
+    let mut parts = pattern.split('*').peekable();
+    if let Some(prefix) = parts.next() {
+        if !pattern.starts_with('*') {
+            let Some(after_prefix) = rest.strip_prefix(prefix) else {
+                return false;
+            };
+            rest = after_prefix;
+        }
+    }
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(index) = rest.find(part) else {
+            return false;
+        };
+        if parts.peek().is_none() && !pattern.ends_with('*') && index + part.len() != rest.len() {
+            return false;
+        }
+        rest = &rest[index + part.len()..];
+    }
+    pattern.starts_with('*') || value.starts_with(pattern.split('*').next().unwrap_or_default())
 }
 
 fn unique_tool_name(server: &str, tool: &str, used_names: &mut HashSet<String>) -> String {
@@ -379,6 +454,9 @@ fn load_configs(path: &Path, project_cwd: &Path) -> Result<Vec<ServerConfig>, St
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let value: Value =
         serde_json::from_str(&source).map_err(|error| format!("{}: {error}", path.display()))?;
+    if !value.is_object() {
+        return Err(format!("{}: expected a JSON object", path.display()));
+    }
     let Some(servers) = value.get("mcpServers") else {
         return Ok(Vec::new());
     };
@@ -399,13 +477,106 @@ fn load_configs(path: &Path, project_cwd: &Path) -> Result<Vec<ServerConfig>, St
             eprintln!("mu: skipping MCP server `{name}`: config must be an object");
             continue;
         };
-        if object.get("enabled").and_then(Value::as_bool) == Some(false) {
+        if let Some(enabled) = object.get("enabled") {
+            match enabled.as_bool() {
+                Some(false) => continue,
+                Some(true) => {}
+                None => {
+                    eprintln!("mu: skipping MCP server `{name}`: enabled must be a boolean");
+                    continue;
+                }
+            }
+        }
+        match object.get("type") {
+            None => {}
+            Some(Value::String(kind)) if kind == "stdio" => {}
+            Some(_) => {
+                eprintln!(
+                    "mu: skipping MCP server `{name}`: only stdio transport is supported currently"
+                );
+                continue;
+            }
+        }
+        if object.contains_key("url") {
+            eprintln!(
+                "mu: skipping MCP server `{name}`: only stdio transport is supported currently"
+            );
             continue;
         }
-        if object.get("exposure").and_then(Value::as_str) == Some("hidden") {
+        if object
+            .get("description")
+            .is_some_and(|value| !value.is_string())
+        {
+            eprintln!("mu: skipping MCP server `{name}`: description must be a string");
             continue;
         }
-        let Some(command) = object.get("command").and_then(Value::as_str) else {
+        let exposure = match object.get("exposure") {
+            None => Exposure::Codemode,
+            Some(Value::String(value)) => match Exposure::parse(value) {
+                Some(exposure) => exposure,
+                None => {
+                    eprintln!("mu: skipping MCP server `{name}`: unknown exposure `{value}`");
+                    continue;
+                }
+            },
+            Some(_) => {
+                eprintln!("mu: skipping MCP server `{name}`: exposure must be a string");
+                continue;
+            }
+        };
+        let tool_exposure = match object.get("toolExposure") {
+            None => Vec::new(),
+            Some(Value::Object(entries)) => {
+                let mut parsed = Vec::new();
+                let mut invalid = false;
+                for (pattern, raw_exposure) in entries {
+                    let Some(raw_exposure) = raw_exposure.as_str() else {
+                        invalid = true;
+                        break;
+                    };
+                    let Some(exposure) = Exposure::parse(raw_exposure) else {
+                        invalid = true;
+                        break;
+                    };
+                    parsed.push((pattern.clone(), exposure));
+                }
+                if invalid {
+                    eprintln!(
+                        "mu: skipping MCP server `{name}`: toolExposure entries must use a known exposure"
+                    );
+                    continue;
+                }
+                parsed
+            }
+            Some(_) => {
+                eprintln!("mu: skipping MCP server `{name}`: toolExposure must be an object");
+                continue;
+            }
+        };
+        let timeout = match object.get("timeout") {
+            None => DEFAULT_REQUEST_TIMEOUT,
+            Some(value) => {
+                let Some(seconds) = value
+                    .as_f64()
+                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                else {
+                    eprintln!(
+                        "mu: skipping MCP server `{name}`: timeout must be a positive number"
+                    );
+                    continue;
+                };
+                let Ok(timeout) = Duration::try_from_secs_f64(seconds) else {
+                    eprintln!("mu: skipping MCP server `{name}`: timeout is too large");
+                    continue;
+                };
+                timeout
+            }
+        };
+        let Some(command) = object
+            .get("command")
+            .and_then(Value::as_str)
+            .filter(|command| !command.is_empty())
+        else {
             eprintln!(
                 "mu: skipping MCP server `{name}`: only stdio `command` servers are supported currently"
             );
@@ -438,20 +609,30 @@ fn load_configs(path: &Path, project_cwd: &Path) -> Result<Vec<ServerConfig>, St
             eprintln!("mu: skipping MCP server `{name}`: env must map names to strings");
             continue;
         };
-        let server_cwd = object.get("cwd").and_then(Value::as_str).map(|cwd| {
-            let path = PathBuf::from(cwd);
-            if path.is_absolute() {
-                path
-            } else {
-                project_cwd.join(path)
+        let server_cwd = match object.get("cwd") {
+            None => None,
+            Some(Value::String(cwd)) => {
+                let path = PathBuf::from(cwd);
+                Some(if path.is_absolute() {
+                    path
+                } else {
+                    project_cwd.join(path)
+                })
             }
-        });
+            Some(_) => {
+                eprintln!("mu: skipping MCP server `{name}`: cwd must be a string");
+                continue;
+            }
+        };
         configs.push(ServerConfig {
             name: name.clone(),
             command: command.to_owned(),
             args,
             env,
             cwd: server_cwd,
+            exposure,
+            tool_exposure,
+            timeout,
         });
     }
     Ok(configs)
@@ -487,18 +668,36 @@ mod tests {
         let config = root.join("mcp.json");
         std::fs::write(
             &config,
-            r#"{"mcpServers":{"filesystem":{"command":"node","args":["server.js"],"cwd":"tools","env":{"ROOT":"${HOME}"}},"disabled":{"command":"never","enabled":false}}}"#,
+            r#"{"mcpServers":{"filesystem":{"command":"node","args":["server.js"],"cwd":"tools","env":{"ROOT":"${HOME}"}},"direct":{"command":"node","exposure":"direct","toolExposure":{"read*":"hidden","read_file":"direct"},"timeout":2.5},"disabled":{"command":"never","enabled":false}}}"#,
         )
         .unwrap();
 
         let servers = load_configs(&config, &root).unwrap();
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].name, "filesystem");
-        assert_eq!(servers[0].command, "node");
-        assert_eq!(servers[0].args, ["server.js"]);
+        assert_eq!(servers.len(), 2);
+        let filesystem = servers
+            .iter()
+            .find(|server| server.name == "filesystem")
+            .unwrap();
+        assert_eq!(filesystem.command, "node");
+        assert_eq!(filesystem.args, ["server.js"]);
+        assert_eq!(filesystem.exposure, Exposure::Codemode);
         assert_eq!(
-            servers[0].cwd.as_deref(),
+            filesystem.cwd.as_deref(),
             Some(root.join("tools").as_path())
+        );
+        let direct = servers
+            .iter()
+            .find(|server| server.name == "direct")
+            .unwrap();
+        assert_eq!(direct.exposure, Exposure::Direct);
+        assert_eq!(direct.timeout, Duration::from_secs_f64(2.5));
+        assert_eq!(
+            tool_exposure_for(direct.exposure, &direct.tool_exposure, "read_file"),
+            Exposure::Direct
+        );
+        assert_eq!(
+            tool_exposure_for(direct.exposure, &direct.tool_exposure, "read_directory"),
+            Exposure::Hidden
         );
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -524,13 +723,15 @@ done
             args: vec!["-c".into(), script.into()],
             env: BTreeMap::new(),
             cwd: None,
+            exposure: Exposure::Direct,
+            tool_exposure: Vec::new(),
+            timeout: DEFAULT_REQUEST_TIMEOUT,
         };
-        let mut names = HashSet::new();
-        let (server, tools) = connect_server(config, Path::new("."), &mut names)
+        let (server, tools) = connect_server(config, Path::new("."))
             .await
             .expect("connect stdio MCP server");
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].exposed_name, "mcp__test__echo");
+        assert_eq!(tools[0].name, "echo");
 
         let result = server
             .process
@@ -541,6 +742,26 @@ done
             .expect("call MCP tool");
         assert_eq!(result.content, "hello from MCP");
         assert!(!result.is_error);
+    }
+
+    #[test]
+    fn exact_tool_exposure_overrides_server_and_wildcards() {
+        let overrides = vec![
+            ("read*".to_owned(), Exposure::Hidden),
+            ("read_file".to_owned(), Exposure::Direct),
+        ];
+        assert_eq!(
+            tool_exposure_for(Exposure::Codemode, &overrides, "read_file"),
+            Exposure::Direct
+        );
+        assert_eq!(
+            tool_exposure_for(Exposure::Codemode, &overrides, "read_directory"),
+            Exposure::Hidden
+        );
+        assert_eq!(
+            tool_exposure_for(Exposure::Codemode, &overrides, "write_file"),
+            Exposure::Codemode
+        );
     }
 
     #[test]
