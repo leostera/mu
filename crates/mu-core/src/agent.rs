@@ -5,7 +5,7 @@ use std::{
     process::Stdio,
 };
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::join_all};
 use mu_session::{
     AssistantToolResponse, AssistantTurnResponse, MessageCost, MessageUsage, SessionDocument,
     ToolCallRecord,
@@ -629,6 +629,29 @@ fn session_path(c: &Config) -> PathBuf {
     dir.join(format!("{ts}_{}.jsonl", uuid::Uuid::new_v4()))
 }
 
+async fn execute_in_parallel<I, F>(futures: I) -> Vec<F::Output>
+where
+    I: IntoIterator<Item = F>,
+    F: std::future::Future,
+{
+    join_all(futures).await
+}
+
+async fn execute_independent_tool(
+    mcp: &crate::mcp::McpRegistry,
+    cwd: &Path,
+    call: &FunctionCall,
+) -> Result<(String, bool, Option<Value>), String> {
+    match mcp.call(&call.name, &call.arguments).await {
+        Some(Ok(result)) => Ok((result.content, result.is_error, None)),
+        Some(Err(error)) => Err(error),
+        None => crate::tools::execute(cwd, &call.name, &call.arguments)
+            .await
+            .map(|result| (result.content, false, None))
+            .map_err(|error| error.to_string()),
+    }
+}
+
 fn usage(r: &Reply) -> MessageUsage {
     MessageUsage {
         input: r.input,
@@ -850,8 +873,26 @@ impl MuAgent {
                     arguments: call.arguments.clone(),
                 });
             }
+            let mut parallel_results = if calls
+                .iter()
+                .all(|call| !matches!(call.name.as_str(), "tool_search" | "codemode"))
+            {
+                Some(
+                    execute_in_parallel(
+                        calls
+                            .iter()
+                            .map(|call| execute_independent_tool(&self.mcp, &self.cwd, call)),
+                    )
+                    .await
+                    .into_iter(),
+                )
+            } else {
+                None
+            };
             for call in calls {
-                let result = if call.name == "tool_search" {
+                let result = if let Some(results) = parallel_results.as_mut() {
+                    results.next().expect("one result per tool call")
+                } else if call.name == "tool_search" {
                     let query = call
                         .arguments
                         .get("query")
@@ -1055,9 +1096,25 @@ pub async fn run_cli() -> Result<(), AgentError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{configured_models, session_active_mcp_tools, session_codemode_store, trusted_url};
+    use super::{
+        configured_models, execute_in_parallel, session_active_mcp_tools, session_codemode_store,
+        trusted_url,
+    };
     use mu_session::SessionDocument;
     use std::path::Path;
+    #[tokio::test]
+    async fn independent_tool_calls_run_concurrently_and_keep_call_order() {
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let futures = (0..2).map(|value| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            async move {
+                barrier.wait().await;
+                value
+            }
+        });
+        assert_eq!(execute_in_parallel(futures).await, [0, 1]);
+    }
+
     #[test]
     fn restores_codemode_store_and_tool_loadout_from_the_active_session_branch() {
         let input = [
