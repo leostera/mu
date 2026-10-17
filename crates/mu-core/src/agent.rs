@@ -726,6 +726,9 @@ impl MuAgent {
             .push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
         let mut tool_definitions = crate::tools::definitions();
         tool_definitions.extend(self.mcp.definitions());
+        if self.mcp.codemode_enabled() {
+            tool_definitions.push(crate::codemode::definition(&self.mcp));
+        }
         let mut reply = self
             .provider
             .complete(&self.history, &tool_definitions, on_event)
@@ -772,14 +775,20 @@ impl MuAgent {
                 });
             }
             for call in calls {
-                let result = match self.mcp.call(&call.name, &call.arguments).await {
-                    Some(Ok(result)) => Ok((result.content, result.is_error)),
-                    Some(Err(error)) => Err(error),
-                    None => self
-                        .execute_tool(&call.name, &call.arguments)
+                let result = if call.name == "codemode" {
+                    crate::codemode::execute(&self.cwd, &self.mcp, &call.arguments)
                         .await
-                        .map(|result| (result.content, false))
-                        .map_err(|error| error.to_string()),
+                        .map_err(|error| error.to_string())
+                } else {
+                    match self.mcp.call(&call.name, &call.arguments).await {
+                        Some(Ok(result)) => Ok((result.content, result.is_error)),
+                        Some(Err(error)) => Err(error),
+                        None => self
+                            .execute_tool(&call.name, &call.arguments)
+                            .await
+                            .map(|result| (result.content, false))
+                            .map_err(|error| error.to_string()),
+                    }
                 };
                 let (output, is_error) = match result {
                     Ok(result) => result,

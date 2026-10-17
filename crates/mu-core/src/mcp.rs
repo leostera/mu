@@ -61,15 +61,18 @@ struct ConnectedServer {
     process: Mutex<McpProcess>,
 }
 
+#[derive(Clone)]
 struct ExposedTool {
     server: Arc<ConnectedServer>,
     remote_name: String,
+    exposure: Exposure,
     definition: Value,
 }
 
-#[derive(Default)]
+#[derive(Clone)]
 pub(crate) struct McpRegistry {
     tools: BTreeMap<String, ExposedTool>,
+    auto_enable_codemode: bool,
 }
 
 struct McpProcess {
@@ -88,15 +91,18 @@ pub(crate) struct McpToolResult {
 impl McpRegistry {
     pub(crate) async fn connect(agent_dir: &Path, cwd: &Path) -> Self {
         let path = agent_dir.join("mcp.json");
-        let configs = match load_configs(&path, cwd) {
-            Ok(configs) => configs,
+        let (configs, auto_enable_codemode) = match load_config(&path, cwd) {
+            Ok(config) => config,
             Err(error) => {
                 eprintln!("mu: MCP configuration: {error}");
                 return Self::default();
             }
         };
 
-        let mut registry = Self::default();
+        let mut registry = Self {
+            auto_enable_codemode,
+            ..Self::default()
+        };
         let mut used_names = HashSet::new();
         for config in configs {
             let name = config.name.clone();
@@ -104,12 +110,10 @@ impl McpRegistry {
             let tool_exposure = config.tool_exposure.clone();
             match connect_server(config, cwd).await {
                 Ok((server, tools)) => {
-                    let mut unavailable_exposure = false;
                     for tool in tools {
                         let exposure =
                             tool_exposure_for(server_exposure, &tool_exposure, &tool.name);
-                        if exposure != Exposure::Direct {
-                            unavailable_exposure |= exposure != Exposure::Hidden;
+                        if exposure == Exposure::Hidden {
                             continue;
                         }
                         let exposed_name = unique_tool_name(&name, &tool.name, &mut used_names);
@@ -118,6 +122,7 @@ impl McpRegistry {
                             ExposedTool {
                                 server: Arc::clone(&server),
                                 remote_name: tool.name,
+                                exposure,
                                 definition: json!({
                                     "type": "function",
                                     "name": exposed_name,
@@ -125,11 +130,6 @@ impl McpRegistry {
                                     "parameters": tool.input_schema,
                                 }),
                             },
-                        );
-                    }
-                    if unavailable_exposure {
-                        eprintln!(
-                            "mu: MCP server `{name}` uses codemode/deferred exposure; those discovery modes are not implemented yet, so its tools are not available to the model"
                         );
                     }
                 }
@@ -142,8 +142,24 @@ impl McpRegistry {
     pub(crate) fn definitions(&self) -> Vec<Value> {
         self.tools
             .values()
+            .filter(|tool| tool.exposure == Exposure::Direct)
             .map(|tool| tool.definition.clone())
             .collect()
+    }
+
+    pub(crate) fn codemode_definitions(&self) -> Vec<Value> {
+        self.tools
+            .values()
+            .map(|tool| tool.definition.clone())
+            .collect()
+    }
+
+    pub(crate) fn codemode_enabled(&self) -> bool {
+        self.auto_enable_codemode
+            && self
+                .tools
+                .values()
+                .any(|tool| tool.exposure == Exposure::Codemode)
     }
 
     pub(crate) async fn call(
@@ -160,6 +176,15 @@ impl McpRegistry {
                 .call_tool(&tool.remote_name, arguments)
                 .await,
         )
+    }
+}
+
+impl Default for McpRegistry {
+    fn default() -> Self {
+        Self {
+            tools: BTreeMap::new(),
+            auto_enable_codemode: true,
+        }
     }
 }
 
@@ -446,9 +471,9 @@ fn unique_tool_name(server: &str, tool: &str, used_names: &mut HashSet<String>) 
     unreachable!("an unused provider tool name is available")
 }
 
-fn load_configs(path: &Path, project_cwd: &Path) -> Result<Vec<ServerConfig>, String> {
+fn load_config(path: &Path, project_cwd: &Path) -> Result<(Vec<ServerConfig>, bool), String> {
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), true));
     }
     let source =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -457,8 +482,18 @@ fn load_configs(path: &Path, project_cwd: &Path) -> Result<Vec<ServerConfig>, St
     if !value.is_object() {
         return Err(format!("{}: expected a JSON object", path.display()));
     }
+    let auto_enable_codemode = match value.get("autoEnableCodemode") {
+        None => true,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err(format!(
+                "{}: `autoEnableCodemode` must be a boolean",
+                path.display()
+            ));
+        }
+    };
     let Some(servers) = value.get("mcpServers") else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), auto_enable_codemode));
     };
     let servers = servers
         .as_object()
@@ -635,7 +670,7 @@ fn load_configs(path: &Path, project_cwd: &Path) -> Result<Vec<ServerConfig>, St
             timeout,
         });
     }
-    Ok(configs)
+    Ok((configs, auto_enable_codemode))
 }
 
 fn expand_environment(value: &str) -> Result<String, String> {
@@ -668,11 +703,14 @@ mod tests {
         let config = root.join("mcp.json");
         std::fs::write(
             &config,
-            r#"{"mcpServers":{"filesystem":{"command":"node","args":["server.js"],"cwd":"tools","env":{"ROOT":"${HOME}"}},"direct":{"command":"node","exposure":"direct","toolExposure":{"read*":"hidden","read_file":"direct"},"timeout":2.5},"disabled":{"command":"never","enabled":false}}}"#,
+            r#"{"autoEnableCodemode":false,"mcpServers":{"filesystem":{"command":"node","args":["server.js"],"cwd":"tools","env":{"ROOT":"${HOME}"}},"direct":{"command":"node","exposure":"direct","toolExposure":{"read*":"hidden","read_file":"direct"},"timeout":2.5},"disabled":{"command":"never","enabled":false}}}"#,
         )
         .unwrap();
 
-        let servers = load_configs(&config, &root).unwrap();
+        let (servers, auto_enable) = load_config(&config, &root).unwrap();
+        assert!(!auto_enable);
+        let (_, default_auto_enable) = load_config(&root.join("missing.json"), &root).unwrap();
+        assert!(default_auto_enable);
         assert_eq!(servers.len(), 2);
         let filesystem = servers
             .iter()
@@ -723,7 +761,7 @@ done
             args: vec!["-c".into(), script.into()],
             env: BTreeMap::new(),
             cwd: None,
-            exposure: Exposure::Direct,
+            exposure: Exposure::Codemode,
             tool_exposure: Vec::new(),
             timeout: DEFAULT_REQUEST_TIMEOUT,
         };
@@ -733,15 +771,35 @@ done
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
 
-        let result = server
-            .process
-            .lock()
-            .await
-            .call_tool("echo", &json!({"text":"hello"}))
-            .await
-            .expect("call MCP tool");
-        assert_eq!(result.content, "hello from MCP");
-        assert!(!result.is_error);
+        let tool_name = "mcp__test__echo";
+        let definition = json!({
+            "type":"function",
+            "name":tool_name,
+            "description":"Return text",
+            "parameters":{"type":"object","properties":{"text":{"type":"string"}}}
+        });
+        let mut registry = McpRegistry::default();
+        registry.tools.insert(
+            tool_name.into(),
+            ExposedTool {
+                server,
+                remote_name: "echo".into(),
+                exposure: Exposure::Codemode,
+                definition,
+            },
+        );
+        assert!(registry.codemode_enabled());
+        assert!(registry.definitions().is_empty());
+        assert_eq!(registry.codemode_definitions().len(), 1);
+        let (output, is_error) = crate::codemode::execute(
+            Path::new("."),
+            &registry,
+            &json!({"code":"return await tools.mcp__test__echo({ text: 'hello' });"}),
+        )
+        .await
+        .expect("execute MCP tool through codemode");
+        assert!(!is_error, "{output}");
+        assert!(output.contains("hello from MCP"), "{output}");
     }
 
     #[test]
