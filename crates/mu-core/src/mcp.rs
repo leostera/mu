@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -90,8 +90,7 @@ pub(crate) struct McpToolResult {
 
 impl McpRegistry {
     pub(crate) async fn connect(agent_dir: &Path, cwd: &Path) -> Self {
-        let path = agent_dir.join("mcp.json");
-        let (configs, auto_enable_codemode) = match load_config(&path, cwd) {
+        let (configs, auto_enable_codemode) = match load_config(agent_dir, cwd) {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("mu: MCP configuration: {error}");
@@ -471,33 +470,160 @@ fn unique_tool_name(server: &str, tool: &str, used_names: &mut HashSet<String>) 
     unreachable!("an unused provider tool name is available")
 }
 
-fn load_config(path: &Path, project_cwd: &Path) -> Result<(Vec<ServerConfig>, bool), String> {
+fn read_mcp_config(path: &Path) -> Result<Value, String> {
     if !path.exists() {
-        return Ok((Vec::new(), true));
+        return Ok(json!({"mcpServers": {}}));
     }
     let source =
         std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let source = source.strip_prefix('\u{feff}').unwrap_or(&source);
     let value: Value =
-        serde_json::from_str(&source).map_err(|error| format!("{}: {error}", path.display()))?;
+        serde_json::from_str(source).map_err(|error| format!("{}: {error}", path.display()))?;
     if !value.is_object() {
         return Err(format!("{}: expected a JSON object", path.display()));
     }
-    let auto_enable_codemode = match value.get("autoEnableCodemode") {
-        None => true,
-        Some(Value::Bool(enabled)) => *enabled,
-        Some(_) => {
-            return Err(format!(
-                "{}: `autoEnableCodemode` must be a boolean",
-                path.display()
-            ));
-        }
-    };
-    let Some(servers) = value.get("mcpServers") else {
-        return Ok((Vec::new(), auto_enable_codemode));
-    };
-    let servers = servers
+    Ok(value)
+}
+
+fn config_servers(path: &Path, config: &Value) -> Result<Map<String, Value>, String> {
+    match config.get("mcpServers") {
+        None => Ok(Map::new()),
+        Some(Value::Object(servers)) => Ok(servers.clone()),
+        Some(_) => Err(format!(
+            "{}: `mcpServers` must be an object",
+            path.display()
+        )),
+    }
+}
+
+fn parse_auto_enable_codemode(path: &Path, config: &Value) -> Result<bool, String> {
+    match config.get("autoEnableCodemode") {
+        None => Ok(true),
+        Some(Value::Bool(enabled)) => Ok(*enabled),
+        Some(_) => Err(format!(
+            "{}: `autoEnableCodemode` must be a boolean",
+            path.display()
+        )),
+    }
+}
+
+fn is_project_override(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        !object.contains_key("command")
+            && !object.contains_key("url")
+            && !object.contains_key("type")
+    })
+}
+
+fn project_is_trusted(agent_dir: &Path, cwd: &Path) -> Result<bool, String> {
+    let trust_path = agent_dir.join("trust.json");
+    if !trust_path.exists() {
+        return Ok(false);
+    }
+    let source = std::fs::read_to_string(&trust_path)
+        .map_err(|error| format!("{}: {error}", trust_path.display()))?;
+    let trust: Value = serde_json::from_str(source.strip_prefix('\u{feff}').unwrap_or(&source))
+        .map_err(|error| format!("{}: {error}", trust_path.display()))?;
+    let trust = trust
         .as_object()
-        .ok_or_else(|| format!("{}: `mcpServers` must be an object", path.display()))?;
+        .ok_or_else(|| format!("{}: expected a JSON object", trust_path.display()))?;
+    if trust
+        .values()
+        .any(|value| !value.is_null() && !value.is_boolean())
+    {
+        return Err(format!(
+            "{}: trust decisions must be booleans or null",
+            trust_path.display()
+        ));
+    }
+
+    let mut current = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
+    loop {
+        if let Some(decision) = trust.get(current.to_string_lossy().as_ref()) {
+            if let Some(decision) = decision.as_bool() {
+                return Ok(decision);
+            }
+        }
+        if !current.pop() {
+            return Ok(false);
+        }
+    }
+}
+
+fn load_config(agent_dir: &Path, project_cwd: &Path) -> Result<(Vec<ServerConfig>, bool), String> {
+    let global_path = agent_dir.join("mcp.json");
+    let global = read_mcp_config(&global_path)?;
+    let mut auto_enable_codemode = parse_auto_enable_codemode(&global_path, &global)?;
+    let mut servers = config_servers(&global_path, &global)?;
+
+    let project_path = project_cwd.join(".pi/mcp.json");
+    if project_path.exists()
+        && project_is_trusted(agent_dir, project_cwd).unwrap_or_else(|error| {
+            eprintln!("mu: MCP project trust: {error}");
+            false
+        })
+    {
+        match read_mcp_config(&project_path) {
+            Ok(project) => {
+                if let Some(value) = project.get("autoEnableCodemode") {
+                    match value.as_bool() {
+                        Some(enabled) => auto_enable_codemode = enabled,
+                        None => eprintln!(
+                            "mu: {}: `autoEnableCodemode` must be a boolean",
+                            project_path.display()
+                        ),
+                    }
+                }
+                match config_servers(&project_path, &project) {
+                    Ok(project_servers) => {
+                        for (name, project_entry) in &project_servers {
+                            if is_project_override(project_entry) {
+                                let Some(global_entry) = servers.get_mut(name) else {
+                                    eprintln!(
+                                        "mu: {}: project override for `{name}` has no global server",
+                                        project_path.display()
+                                    );
+                                    continue;
+                                };
+                                let Some(global_object) = global_entry.as_object_mut() else {
+                                    eprintln!(
+                                        "mu: {}: global server `{name}` cannot be overridden",
+                                        project_path.display()
+                                    );
+                                    continue;
+                                };
+                                let Some(project_object) = project_entry.as_object() else {
+                                    continue;
+                                };
+                                let allowed = ["enabled", "exposure", "toolExposure"];
+                                if project_object
+                                    .keys()
+                                    .any(|key| !allowed.contains(&key.as_str()))
+                                {
+                                    eprintln!(
+                                        "mu: {}: override for `{name}` may only set enabled, exposure, and toolExposure",
+                                        project_path.display()
+                                    );
+                                    continue;
+                                }
+                                global_object.extend(project_object.clone());
+                            } else {
+                                servers.insert(name.clone(), project_entry.clone());
+                            }
+                        }
+                    }
+                    Err(error) => eprintln!("mu: ignoring project MCP config: {error}"),
+                }
+            }
+            Err(error) => eprintln!("mu: ignoring project MCP config: {error}"),
+        }
+    }
+
+    let value = json!({"mcpServers": servers});
+    let servers = value
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .expect("merged MCP server map is an object");
     let mut configs = Vec::new();
     for (name, raw) in servers {
         if name.is_empty()
@@ -707,9 +833,9 @@ mod tests {
         )
         .unwrap();
 
-        let (servers, auto_enable) = load_config(&config, &root).unwrap();
+        let (servers, auto_enable) = load_config(&root, &root).unwrap();
         assert!(!auto_enable);
-        let (_, default_auto_enable) = load_config(&root.join("missing.json"), &root).unwrap();
+        let (_, default_auto_enable) = load_config(&root.join("empty-agent"), &root).unwrap();
         assert!(default_auto_enable);
         assert_eq!(servers.len(), 2);
         let filesystem = servers
@@ -737,6 +863,71 @@ mod tests {
             tool_exposure_for(direct.exposure, &direct.tool_exposure, "read_directory"),
             Exposure::Hidden
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_mcp_config_requires_trust_and_only_overrides_safe_fields() {
+        let root = std::env::temp_dir().join(format!("mu-mcp-project-{}", uuid::Uuid::new_v4()));
+        let agent_dir = root.join("agent");
+        let project = root.join("project");
+        std::fs::create_dir_all(agent_dir.join("sessions")).unwrap();
+        std::fs::create_dir_all(project.join(".pi")).unwrap();
+        std::fs::write(
+            agent_dir.join("mcp.json"),
+            serde_json::to_vec(&json!({
+                "mcpServers": {
+                    "internal": {
+                        "command":"global-server",
+                        "env":{"TOKEN":"global-secret"},
+                        "exposure":"codemode"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".pi/mcp.json"),
+            serde_json::to_vec(&json!({
+                "autoEnableCodemode":false,
+                "mcpServers": {
+                    "internal":{"exposure":"direct"},
+                    "local":{"command":"project-server"},
+                    "missing":{"enabled":false}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (untrusted_servers, untrusted_auto_enable) = load_config(&agent_dir, &project).unwrap();
+        assert!(untrusted_auto_enable);
+        assert_eq!(untrusted_servers.len(), 1);
+        assert_eq!(untrusted_servers[0].name, "internal");
+        assert_eq!(untrusted_servers[0].exposure, Exposure::Codemode);
+
+        let canonical_project = std::fs::canonicalize(&project).unwrap();
+        std::fs::write(
+            agent_dir.join("trust.json"),
+            serde_json::to_vec(&json!({canonical_project.to_string_lossy().as_ref(): true}))
+                .unwrap(),
+        )
+        .unwrap();
+        let (trusted_servers, trusted_auto_enable) = load_config(&agent_dir, &project).unwrap();
+        assert!(!trusted_auto_enable);
+        assert_eq!(trusted_servers.len(), 2);
+        let internal = trusted_servers
+            .iter()
+            .find(|server| server.name == "internal")
+            .unwrap();
+        assert_eq!(internal.command, "global-server");
+        assert_eq!(
+            internal.env.get("TOKEN").map(String::as_str),
+            Some("global-secret")
+        );
+        assert_eq!(internal.exposure, Exposure::Direct);
+        assert!(trusted_servers.iter().any(|server| server.name == "local"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
