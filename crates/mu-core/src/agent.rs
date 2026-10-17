@@ -311,6 +311,7 @@ impl Provider {
     async fn complete(
         &self,
         history: &[Value],
+        tools: &[Value],
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<Reply, AgentError> {
         if matches!(&self.transport, ProviderTransport::Demo) {
@@ -346,7 +347,7 @@ impl Provider {
             unreachable!("demo backend returned above")
         };
         let input = history;
-        let mut request_body = json!({"model":self.model,"instructions":self.instructions,"input":input,"tools":crate::tools::definitions(),"stream":true,"store":false});
+        let mut request_body = json!({"model":self.model,"instructions":self.instructions,"input":input,"tools":tools,"stream":true,"store":false});
         if self.supports_reasoning {
             request_body["reasoning"] = json!({"effort":"medium","summary":"auto"});
             request_body["include"] = json!(["reasoning.encrypted_content"]);
@@ -602,6 +603,7 @@ pub struct MuAgent {
     cwd: PathBuf,
     skills: crate::skills::SkillCatalog,
     hide_thinking_block: bool,
+    mcp: crate::mcp::McpRegistry,
 }
 
 impl MuAgent {
@@ -609,6 +611,7 @@ impl MuAgent {
         let config = config()?;
         let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
         let provider = connect(&config, skills.system_prompt()).await?;
+        let mcp = crate::mcp::McpRegistry::connect(&config.agent_dir, &config.cwd).await;
         let session_path = session_path(&config);
         let session = SessionDocument::new(config.cwd.to_string_lossy().into_owned());
         Ok(Self {
@@ -621,6 +624,7 @@ impl MuAgent {
             cwd: config.cwd.clone(),
             skills,
             hide_thinking_block: config.hide_thinking_block,
+            mcp,
         })
     }
 
@@ -656,6 +660,7 @@ impl MuAgent {
             cwd: config.cwd.clone(),
             skills: crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir),
             hide_thinking_block: config.hide_thinking_block,
+            mcp: crate::mcp::McpRegistry::default(),
         })
     }
 
@@ -719,7 +724,12 @@ impl MuAgent {
             .map_err(|error| AgentError::Session(error.to_string()))?;
         self.history
             .push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
-        let mut reply = self.provider.complete(&self.history, on_event).await?;
+        let mut tool_definitions = crate::tools::definitions();
+        tool_definitions.extend(self.mcp.definitions());
+        let mut reply = self
+            .provider
+            .complete(&self.history, &tool_definitions, on_event)
+            .await?;
         for _ in 0..8 {
             if reply.tool_calls.is_empty() {
                 break;
@@ -762,10 +772,18 @@ impl MuAgent {
                 });
             }
             for call in calls {
-                let result = self.execute_tool(&call.name, &call.arguments).await;
+                let result = match self.mcp.call(&call.name, &call.arguments).await {
+                    Some(Ok(result)) => Ok((result.content, result.is_error)),
+                    Some(Err(error)) => Err(error),
+                    None => self
+                        .execute_tool(&call.name, &call.arguments)
+                        .await
+                        .map(|result| (result.content, false))
+                        .map_err(|error| error.to_string()),
+                };
                 let (output, is_error) = match result {
-                    Ok(result) => (result.content, false),
-                    Err(error) => (error.to_string(), true),
+                    Ok(result) => result,
+                    Err(error) => (error, true),
                 };
                 on_event(AgentEvent::ToolFinished {
                     call_id: call.call_id.clone(),
@@ -781,7 +799,10 @@ impl MuAgent {
                     .write_atomic(&self.session_path)
                     .map_err(|error| AgentError::Session(error.to_string()))?;
             }
-            reply = self.provider.complete(&self.history, on_event).await?;
+            reply = self
+                .provider
+                .complete(&self.history, &tool_definitions, on_event)
+                .await?;
         }
         if !reply.tool_calls.is_empty() {
             return Err(AgentError::Provider(

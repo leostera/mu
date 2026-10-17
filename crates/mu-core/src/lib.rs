@@ -4,6 +4,7 @@
 //! runtime can evolve without changing the on-disk compatibility contract.
 
 mod agent;
+mod mcp;
 pub mod skills;
 pub mod tools;
 
