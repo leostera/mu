@@ -1363,6 +1363,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripted_provider_failure_persists_the_user_turn_without_an_assistant_turn() {
+        let root = std::env::temp_dir().join(format!("mu-provider-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temporary project");
+        let config = super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.clone(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
+        agent.provider.transport =
+            super::ProviderTransport::Scripted(std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::from([Err("synthetic upstream failure".into())]),
+            )));
+        let mut events = Vec::new();
+
+        let error = agent
+            .submit("request that fails".into(), &mut |event| events.push(event))
+            .await
+            .expect_err("scripted provider failure should propagate");
+
+        assert_eq!(error.to_string(), "provider: synthetic upstream failure");
+        assert!(events.is_empty());
+        assert_eq!(agent.history.len(), 1);
+        assert_eq!(agent.history[0]["role"], "user");
+        let session = std::fs::read_to_string(agent.session_path()).expect("read session");
+        let parsed = SessionDocument::parse_jsonl(&session).expect("parse session");
+        let messages = parsed
+            .active_branch_entries()
+            .into_iter()
+            .filter(|entry| entry.entry_type.as_str() == "message")
+            .filter_map(|entry| entry.extra_fields().get("message"))
+            .collect::<Vec<_>>();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[tokio::test]
     async fn starting_a_new_session_clears_context_and_preserves_the_old_file() {
         let root = std::env::temp_dir().join(format!("mu-new-session-{}", uuid::Uuid::new_v4()));
         let agent_dir = root.join("agent");
