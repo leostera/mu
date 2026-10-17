@@ -10,5 +10,7 @@ pub mod skills;
 mod tool_search;
 pub mod tools;
 
-pub use agent::{AgentError, AgentEvent, MuAgent, run_cli, run_prompt};
+pub use agent::{
+    AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior, run_cli, run_prompt,
+};
 pub use mu_session as session;

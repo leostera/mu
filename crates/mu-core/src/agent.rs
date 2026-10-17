@@ -1,8 +1,9 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     io::{self, Write},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex as StdMutex},
 };
 
 use futures_util::{StreamExt, future::join_all};
@@ -57,6 +58,81 @@ struct FunctionCall {
     arguments: Value,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptBehavior {
+    Steer,
+    FollowUp,
+}
+
+#[derive(Clone)]
+pub struct AgentPromptQueue {
+    pending: Arc<StdMutex<PendingPrompts>>,
+}
+
+#[derive(Default)]
+struct PendingPrompts {
+    steering: VecDeque<String>,
+    follow_up: VecDeque<String>,
+}
+
+impl AgentPromptQueue {
+    pub fn enqueue(&self, prompt: String, behavior: PromptBehavior) {
+        if prompt.trim().is_empty() {
+            return;
+        }
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match behavior {
+            PromptBehavior::Steer => pending.steering.push_back(prompt),
+            PromptBehavior::FollowUp => pending.follow_up.push_back(prompt),
+        }
+    }
+
+    pub fn take_next(&self) -> Option<(String, PromptBehavior)> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        pending
+            .steering
+            .pop_front()
+            .map(|prompt| (prompt, PromptBehavior::Steer))
+            .or_else(|| {
+                pending
+                    .follow_up
+                    .pop_front()
+                    .map(|prompt| (prompt, PromptBehavior::FollowUp))
+            })
+    }
+
+    fn take_steering(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .steering
+            .pop_front()
+    }
+
+    pub fn clear(&self) {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        pending.steering.clear();
+        pending.follow_up.clear();
+    }
+}
+
+impl Default for AgentPromptQueue {
+    fn default() -> Self {
+        Self {
+            pending: Arc::new(StdMutex::new(PendingPrompts::default())),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentEvent {
     TextDelta(String),
@@ -70,6 +146,10 @@ pub enum AgentEvent {
         call_id: String,
         output: String,
         is_error: bool,
+    },
+    QueuedPromptStarted {
+        prompt: String,
+        behavior: PromptBehavior,
     },
 }
 struct Reply {
@@ -682,6 +762,7 @@ pub struct MuAgent {
     hide_thinking_block: bool,
     mcp: crate::mcp::McpRegistry,
     active_mcp_tools: HashSet<String>,
+    prompt_queue: AgentPromptQueue,
 }
 
 impl MuAgent {
@@ -705,6 +786,7 @@ impl MuAgent {
             hide_thinking_block: config.hide_thinking_block,
             mcp,
             active_mcp_tools,
+            prompt_queue: AgentPromptQueue::default(),
         })
     }
 
@@ -744,6 +826,7 @@ impl MuAgent {
             hide_thinking_block: config.hide_thinking_block,
             mcp: crate::mcp::McpRegistry::default(),
             active_mcp_tools,
+            prompt_queue: AgentPromptQueue::default(),
         })
     }
 
@@ -757,6 +840,10 @@ impl MuAgent {
 
     pub fn mcp_status(&self) -> String {
         self.mcp.status_text()
+    }
+
+    pub fn prompt_queue(&self) -> AgentPromptQueue {
+        self.prompt_queue.clone()
     }
 
     pub fn model_choices(&self) -> &[String] {
@@ -800,6 +887,24 @@ impl MuAgent {
         crate::tools::execute(&self.cwd, name, arguments).await
     }
 
+    fn record_queued_prompt(
+        &mut self,
+        prompt: String,
+        behavior: PromptBehavior,
+        on_event: &mut impl FnMut(AgentEvent),
+    ) -> Result<(), AgentError> {
+        self.session.append_user_text(prompt.clone());
+        self.session
+            .write_atomic(&self.session_path)
+            .map_err(|error| AgentError::Session(error.to_string()))?;
+        self.history.push(json!({
+            "role":"user",
+            "content":[{"type":"input_text","text":prompt}],
+        }));
+        on_event(AgentEvent::QueuedPromptStarted { prompt, behavior });
+        Ok(())
+    }
+
     fn codemode_store(&self) -> Value {
         session_codemode_store(&self.session)
     }
@@ -827,6 +932,9 @@ impl MuAgent {
             .map_err(|error| AgentError::Session(error.to_string()))?;
         self.history
             .push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
+        if let Some(steering) = self.prompt_queue.take_steering() {
+            self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
+        }
         let mut tool_definitions = self.tool_definitions(&self.active_mcp_tools);
         let mut reply = self
             .provider
@@ -997,6 +1105,9 @@ impl MuAgent {
                     .write_atomic(&self.session_path)
                     .map_err(|error| AgentError::Session(error.to_string()))?;
             }
+            if let Some(steering) = self.prompt_queue.take_steering() {
+                self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
+            }
             tool_definitions = self.tool_definitions(&self.active_mcp_tools);
             reply = self
                 .provider
@@ -1029,6 +1140,13 @@ impl MuAgent {
             );
         } else {
             self.history.extend(reply.output_items);
+        }
+        if let Some((prompt, behavior)) = self.prompt_queue.take_next() {
+            on_event(AgentEvent::QueuedPromptStarted {
+                prompt: prompt.clone(),
+                behavior,
+            });
+            return Box::pin(self.submit(prompt, on_event)).await;
         }
         Ok(())
     }
@@ -1097,11 +1215,29 @@ pub async fn run_cli() -> Result<(), AgentError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configured_models, execute_in_parallel, session_active_mcp_tools, session_codemode_store,
-        trusted_url,
+        AgentPromptQueue, PromptBehavior, configured_models, execute_in_parallel,
+        session_active_mcp_tools, session_codemode_store, trusted_url,
     };
     use mu_session::SessionDocument;
+    use serde_json::Value;
     use std::path::Path;
+    #[test]
+    fn prompt_queue_prioritizes_fifo_steering_before_follow_ups() {
+        let queue = AgentPromptQueue::default();
+        queue.enqueue("later".into(), PromptBehavior::FollowUp);
+        queue.enqueue("steer one".into(), PromptBehavior::Steer);
+        queue.enqueue("steer two".into(), PromptBehavior::Steer);
+
+        assert_eq!(queue.take_steering().as_deref(), Some("steer one"));
+        assert_eq!(queue.take_steering().as_deref(), Some("steer two"));
+        assert_eq!(queue.take_steering(), None);
+        assert_eq!(
+            queue.take_next(),
+            Some(("later".into(), PromptBehavior::FollowUp))
+        );
+        assert_eq!(queue.take_next(), None);
+    }
+
     #[tokio::test]
     async fn independent_tool_calls_run_concurrently_and_keep_call_order() {
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
@@ -1113,6 +1249,56 @@ mod tests {
             }
         });
         assert_eq!(execute_in_parallel(futures).await, [0, 1]);
+    }
+
+    #[tokio::test]
+    async fn submit_consumes_steering_then_follow_up_prompts_as_new_user_turns() {
+        let mut agent = super::MuAgent::demo().expect("demo agent");
+        let queue = agent.prompt_queue();
+        let mut inserted_steering = false;
+        let mut inserted_follow_up = false;
+        let mut queued_started = Vec::new();
+
+        agent
+            .submit("initial request".into(), &mut |event| match event {
+                super::AgentEvent::TextDelta(_) if !inserted_steering => {
+                    inserted_steering = true;
+                    queue.enqueue("steer the current work".into(), PromptBehavior::Steer);
+                }
+                super::AgentEvent::QueuedPromptStarted {
+                    behavior: PromptBehavior::Steer,
+                    ..
+                } if !inserted_follow_up => {
+                    inserted_follow_up = true;
+                    queued_started.push(PromptBehavior::Steer);
+                    queue.enqueue("after that, summarize".into(), PromptBehavior::FollowUp);
+                }
+                super::AgentEvent::QueuedPromptStarted { behavior, .. } => {
+                    queued_started.push(behavior);
+                }
+                _ => {}
+            })
+            .await
+            .expect("complete queued turns");
+
+        assert_eq!(
+            queued_started,
+            [PromptBehavior::Steer, PromptBehavior::FollowUp]
+        );
+        let user_text = agent
+            .history
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .filter_map(|message| message.pointer("/content/0/text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            user_text,
+            [
+                "initial request",
+                "steer the current work",
+                "after that, summarize",
+            ]
+        );
     }
 
     #[test]

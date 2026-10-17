@@ -2,7 +2,7 @@ mod layout;
 mod terminal;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io,
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -10,7 +10,7 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use mu_core::{AgentEvent, MuAgent};
+use mu_core::{AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -126,6 +126,7 @@ enum ComposerAction {
     OpenCommandMenu,
     ExecuteCommand,
     Submit,
+    FollowUp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,6 +192,9 @@ impl Composer {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.insert_char('\n');
                 None
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                Some(ComposerAction::FollowUp)
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => None,
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1008,6 +1012,8 @@ struct App {
     quit: bool,
     last_ctrl_c: Option<Instant>,
     request: Option<AbortHandle>,
+    prompt_queue: AgentPromptQueue,
+    queued_prompts: VecDeque<(String, PromptBehavior)>,
     hide_thinking: bool,
 }
 
@@ -1032,6 +1038,7 @@ impl App {
             agent.provider().to_owned(),
             agent.session_path().display().to_string(),
         );
+        app.prompt_queue = agent.prompt_queue();
         app.hide_thinking = agent.hide_thinking_block();
         app.models = agent.model_choices().to_vec();
         app.model_selection = app
@@ -1059,6 +1066,8 @@ impl App {
             quit: false,
             last_ctrl_c: None,
             request: None,
+            prompt_queue: AgentPromptQueue::default(),
+            queued_prompts: VecDeque::new(),
             hide_thinking: false,
         }
     }
@@ -1067,12 +1076,51 @@ impl App {
         self.composer.input_text()
     }
 
+    fn queue_prompt(&mut self, behavior: PromptBehavior) {
+        let prompt = self.composer.expanded_text().trim().to_owned();
+        if prompt.is_empty() {
+            return;
+        }
+        self.composer.add_to_history(&prompt);
+        self.composer.clear();
+        self.composer.undo_stack.clear();
+        self.prompt_queue.enqueue(prompt.clone(), behavior);
+        self.queued_prompts.push_back((prompt, behavior));
+        self.messages.scroll.scroll_to_end();
+    }
+
     fn submit(&mut self, agent: Arc<Mutex<MuAgent>>, tx: mpsc::UnboundedSender<UiEvent>) {
         let prompt = self.composer.expanded_text().trim().to_owned();
         if prompt.is_empty() || self.loading {
             return;
         }
         self.composer.add_to_history(&prompt);
+        self.submit_prompt(prompt, agent, tx);
+    }
+
+    fn submit_queued_prompt(
+        &mut self,
+        prompt: String,
+        behavior: PromptBehavior,
+        agent: Arc<Mutex<MuAgent>>,
+        tx: mpsc::UnboundedSender<UiEvent>,
+    ) {
+        if let Some(index) = self
+            .queued_prompts
+            .iter()
+            .position(|(queued, queued_behavior)| queued == &prompt && *queued_behavior == behavior)
+        {
+            self.queued_prompts.remove(index);
+        }
+        self.submit_prompt(prompt, agent, tx);
+    }
+
+    fn submit_prompt(
+        &mut self,
+        prompt: String,
+        agent: Arc<Mutex<MuAgent>>,
+        tx: mpsc::UnboundedSender<UiEvent>,
+    ) {
         self.composer.clear();
         self.composer.undo_stack.clear();
         self.messages.push(Message {
@@ -1108,6 +1156,31 @@ impl App {
 
     fn apply(&mut self, event: UiEvent) {
         match event {
+            UiEvent::Agent(AgentEvent::QueuedPromptStarted { prompt, behavior }) => {
+                if let Some(index) =
+                    self.queued_prompts
+                        .iter()
+                        .position(|(queued, queued_behavior)| {
+                            queued == &prompt && queued_behavior == &behavior
+                        })
+                {
+                    self.queued_prompts.remove(index);
+                }
+                self.messages.push(Message {
+                    role: Role::User,
+                    text: prompt,
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    error: false,
+                });
+                self.messages.push(Message {
+                    role: Role::Assistant,
+                    text: String::new(),
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    error: false,
+                });
+            }
             UiEvent::Agent(event) => {
                 let Some(message) = self.messages.last_mut() else {
                     return;
@@ -1126,6 +1199,7 @@ impl App {
                         output: None,
                         error: false,
                     }),
+                    AgentEvent::QueuedPromptStarted { .. } => unreachable!("handled above"),
                     AgentEvent::ToolFinished {
                         call_id,
                         output,
@@ -1176,6 +1250,8 @@ impl App {
     }
 
     fn cancel(&mut self) {
+        self.prompt_queue.clear();
+        self.queued_prompts.clear();
         if let Some(request) = self.request.take() {
             request.abort();
         }
@@ -1204,7 +1280,7 @@ pub async fn run(agent: MuAgent) -> Result<(), Box<dyn std::error::Error>> {
                 match event {
                     Event::Key(key) => handle_key(key, &mut app, Arc::clone(&agent), tx.clone()),
                     Event::Mouse(mouse) => handle_mouse(mouse.kind, &mut app),
-                    Event::Paste(text) if !app.loading && !app.model_selector_open => {
+                    Event::Paste(text) if !app.model_selector_open => {
                         app.composer.insert_text(&text);
                         app.command_selection = 0;
                     },
@@ -1212,7 +1288,15 @@ pub async fn run(agent: MuAgent) -> Result<(), Box<dyn std::error::Error>> {
                     _ => {},
                 }
             },
-            event = rx.recv(), if app.loading => if let Some(event) = event { app.apply(event); },
+            event = rx.recv(), if app.loading => if let Some(event) = event {
+                let finished = matches!(&event, UiEvent::Finished(_));
+                app.apply(event);
+                if finished {
+                    if let Some((prompt, behavior)) = app.prompt_queue.take_next() {
+                        app.submit_queued_prompt(prompt, behavior, Arc::clone(&agent), tx.clone());
+                    }
+                }
+            },
         }
     }
     Ok(())
@@ -1240,9 +1324,20 @@ fn handle_key(
     if app.loading {
         if key.code == KeyCode::Esc {
             app.cancel();
-        } else if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             app.cancel();
             app.quit = true;
+            return;
+        }
+        match app.composer.handle_key(key) {
+            Some(ComposerAction::Submit | ComposerAction::ExecuteCommand) => {
+                app.queue_prompt(PromptBehavior::Steer)
+            }
+            Some(ComposerAction::FollowUp) => app.queue_prompt(PromptBehavior::FollowUp),
+            Some(ComposerAction::OpenCommandMenu) => app.command_menu_open = false,
+            None => {}
         }
         return;
     }
@@ -1302,7 +1397,7 @@ fn handle_key(
             app.command_selection = 0;
         }
         Some(ComposerAction::ExecuteCommand) => execute_command(app, &agent),
-        Some(ComposerAction::Submit) => app.submit(agent, tx),
+        Some(ComposerAction::Submit | ComposerAction::FollowUp) => app.submit(agent, tx),
         None => {}
     }
 }
@@ -1724,6 +1819,16 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             ]));
         }
     }
+    for (prompt, behavior) in &app.queued_prompts {
+        let label = match behavior {
+            PromptBehavior::Steer => "steer",
+            PromptBehavior::FollowUp => "follow-up",
+        };
+        lines.push(Line::from(Span::styled(
+            format!("↳ queued {label}: {prompt}"),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     let content_lines = paragraph.line_count(area.width.max(1));
     let max_scroll =
@@ -1948,7 +2053,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         ),
     ]);
     let help = if app.loading {
-        "Esc interrupt · Ctrl+C cancel and exit"
+        "Enter steer · Alt+Enter follow up · Esc interrupt · Ctrl+C cancel and exit"
     } else {
         "Enter send · Shift+Enter/Ctrl+J newline · Ctrl+P model · / commands · Ctrl+C clear/twice quit · Ctrl+D quit when empty"
     };
@@ -1964,11 +2069,54 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentEvent, App, Composer, ComposerAction, Message, Role, UiEvent, handle_mouse,
-        insert_char, render,
+        AgentEvent, App, Composer, ComposerAction, Message, Role, UiEvent, handle_key,
+        handle_mouse, insert_char, render,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+    use mu_core::{MuAgent, PromptBehavior};
     use ratatui::{Terminal, backend::TestBackend};
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, mpsc};
+
+    #[tokio::test]
+    async fn enter_while_generating_queues_steering_and_alt_enter_queues_follow_up() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.prompt_queue = agent.lock().await.prompt_queue();
+        app.loading = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.composer.insert_text("add a test");
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            Arc::clone(&agent),
+            tx.clone(),
+        );
+        assert_eq!(app.input_text(), "");
+        assert_eq!(app.queued_prompts.len(), 1);
+        assert_eq!(app.queued_prompts[0].0, "add a test");
+        assert_eq!(app.queued_prompts[0].1, PromptBehavior::Steer);
+
+        app.composer.insert_text("then summarize");
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            &mut app,
+            agent,
+            tx,
+        );
+        assert_eq!(app.queued_prompts.len(), 2);
+        assert_eq!(app.queued_prompts[1].0, "then summarize");
+        assert_eq!(app.queued_prompts[1].1, PromptBehavior::FollowUp);
+
+        app.apply(UiEvent::Agent(AgentEvent::QueuedPromptStarted {
+            prompt: "add a test".into(),
+            behavior: PromptBehavior::Steer,
+        }));
+        assert_eq!(app.queued_prompts.len(), 1);
+        assert_eq!(app.messages[0].text, "add a test");
+        assert!(matches!(app.messages[0].role, Role::User));
+    }
 
     #[test]
     fn renders_pi_style_header_composer_and_footer() {
