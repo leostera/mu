@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::{self, Write},
     path::{Path, PathBuf},
     process::Stdio,
@@ -604,6 +605,7 @@ pub struct MuAgent {
     skills: crate::skills::SkillCatalog,
     hide_thinking_block: bool,
     mcp: crate::mcp::McpRegistry,
+    active_mcp_tools: HashSet<String>,
 }
 
 impl MuAgent {
@@ -625,6 +627,7 @@ impl MuAgent {
             skills,
             hide_thinking_block: config.hide_thinking_block,
             mcp,
+            active_mcp_tools: HashSet::new(),
         })
     }
 
@@ -661,6 +664,7 @@ impl MuAgent {
             skills: crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir),
             hide_thinking_block: config.hide_thinking_block,
             mcp: crate::mcp::McpRegistry::default(),
+            active_mcp_tools: HashSet::new(),
         })
     }
 
@@ -713,6 +717,18 @@ impl MuAgent {
         crate::tools::execute(&self.cwd, name, arguments).await
     }
 
+    fn tool_definitions(&self, active_mcp_tools: &HashSet<String>) -> Vec<Value> {
+        let mut definitions = crate::tools::definitions();
+        definitions.extend(self.mcp.definitions_for_model(active_mcp_tools));
+        if self.mcp.codemode_enabled() {
+            definitions.push(crate::codemode::definition(&self.mcp));
+        }
+        if self.mcp.has_deferred_tools() {
+            definitions.push(crate::tool_search::definition());
+        }
+        definitions
+    }
+
     pub async fn submit(
         &mut self,
         prompt: String,
@@ -724,11 +740,7 @@ impl MuAgent {
             .map_err(|error| AgentError::Session(error.to_string()))?;
         self.history
             .push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
-        let mut tool_definitions = crate::tools::definitions();
-        tool_definitions.extend(self.mcp.definitions());
-        if self.mcp.codemode_enabled() {
-            tool_definitions.push(crate::codemode::definition(&self.mcp));
-        }
+        let mut tool_definitions = self.tool_definitions(&self.active_mcp_tools);
         let mut reply = self
             .provider
             .complete(&self.history, &tool_definitions, on_event)
@@ -775,7 +787,43 @@ impl MuAgent {
                 });
             }
             for call in calls {
-                let result = if call.name == "codemode" {
+                let result = if call.name == "tool_search" {
+                    let query = call
+                        .arguments
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .filter(|query| !query.trim().is_empty());
+                    match query {
+                        Some(query) => {
+                            let limit = call
+                                .arguments
+                                .get("limit")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(8)
+                                .clamp(1, 30) as usize;
+                            let matches = self.mcp.search_tools(query, limit);
+                            for tool in &matches {
+                                if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                                    self.active_mcp_tools.insert(name.to_owned());
+                                }
+                            }
+                            let visible = matches
+                                .iter()
+                                .map(|tool| {
+                                    json!({
+                                        "name":tool.get("name"),
+                                        "description":tool.get("description")
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            Ok((
+                                serde_json::to_string_pretty(&visible).unwrap_or_default(),
+                                false,
+                            ))
+                        }
+                        None => Err("tool_search requires a non-empty query".into()),
+                    }
+                } else if call.name == "codemode" {
                     crate::codemode::execute(&self.cwd, &self.mcp, &call.arguments)
                         .await
                         .map_err(|error| error.to_string())
@@ -808,6 +856,7 @@ impl MuAgent {
                     .write_atomic(&self.session_path)
                     .map_err(|error| AgentError::Session(error.to_string()))?;
             }
+            tool_definitions = self.tool_definitions(&self.active_mcp_tools);
             reply = self
                 .provider
                 .complete(&self.history, &tool_definitions, on_event)

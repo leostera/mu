@@ -66,8 +66,9 @@ pub(crate) async fn execute(
     let source = script_source(code, &metadata)?;
     let mcp = mcp.clone();
     let cwd = cwd.to_owned();
-    let native_functions =
-        NativeFunctionRegistry::default().add_function("call_tool", move |args: Value| {
+    let searchable_tools = tool_definitions.clone();
+    let native_functions = NativeFunctionRegistry::default()
+        .add_function("call_tool", move |args: Value| {
             let mcp = mcp.clone();
             let cwd = cwd.clone();
             async move {
@@ -83,12 +84,9 @@ pub(crate) async fn execute(
                 if let Some(result) = mcp.call(name, &arguments).await {
                     let result =
                         result.map_err(|error| CodeModeError::ExecuteCode { reason: error })?;
-                    if result.is_error {
-                        return Err(CodeModeError::ExecuteCode {
-                            reason: result.content,
-                        });
-                    }
-                    return Ok(Value::String(result.content));
+                    return Ok(result
+                        .structured_content
+                        .unwrap_or_else(|| Value::String(result.content)));
                 }
                 let result = tools::execute(&cwd, name, &arguments)
                     .await
@@ -96,6 +94,49 @@ pub(crate) async fn execute(
                         reason: error.to_string(),
                     })?;
                 Ok(Value::String(result.content))
+            }
+        })
+        .add_function("search_tools", move |args: Value| {
+            let tools = searchable_tools.clone();
+            async move {
+                let arguments = args.as_array().ok_or_else(|| CodeModeError::ExecuteCode {
+                    reason: "native search_tools arguments must be an array".into(),
+                })?;
+                let query = arguments.first().and_then(Value::as_str).ok_or_else(|| {
+                    CodeModeError::ExecuteCode {
+                        reason: "searchTools() requires a string query".into(),
+                    }
+                })?;
+                let options = arguments.get(1).and_then(Value::as_object);
+                let namespace = options
+                    .and_then(|options| options.get("namespace"))
+                    .and_then(Value::as_str);
+                let limit = options
+                    .and_then(|options| options.get("limit"))
+                    .and_then(Value::as_u64)
+                    .filter(|limit| *limit > 0)
+                    .unwrap_or(8)
+                    .min(30) as usize;
+                let candidates = tools
+                    .into_iter()
+                    .filter(|tool| {
+                        namespace.is_none_or(|namespace| {
+                            tool.get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|name| {
+                                    name.starts_with(&format!(
+                                        "mcp__{}__",
+                                        namespace.replace('-', "_")
+                                    ))
+                                })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(Value::Array(crate::tool_search::rank(
+                    query,
+                    &candidates,
+                    limit,
+                )))
             }
         });
     let runtime = CodeMode::builder()
@@ -187,18 +228,7 @@ fn script_source(code: &str, metadata: &[Value]) -> Result<String, String> {
   globalThis.exit = () => {{ throw __muExit; }};
   globalThis.store = (key, value) => {{ __muStore[String(key)] = value; }};
   globalThis.load = (key) => __muStore[String(key)];
-  globalThis.searchTools = (query, options = {{}}) => {{
-    if (typeof query !== "string") throw new Error("searchTools() expects a query string");
-    const terms = query.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-    const namespace = options.namespace;
-    return __muTools
-      .filter((tool) => !namespace || tool.name.startsWith("mcp__" + String(namespace).replaceAll("-", "_") + "__"))
-      .map((tool) => ({{ tool, score: terms.filter((term) => (tool.name + " " + tool.description + " " + JSON.stringify(tool.parameters)).toLowerCase().includes(term)).length }}))
-      .filter((entry) => entry.score > 0)
-      .sort((left, right) => right.score - left.score)
-      .slice(0, Number.isInteger(options.limit) && options.limit > 0 ? options.limit : 8)
-      .map((entry) => ({{ name: entry.tool.name, description: entry.tool.description }}));
-  }};
+  globalThis.searchTools = async (query, options = {{}}) => native.search_tools(query, options);
   globalThis.describeTool = (name) => __muTools.find((tool) => tool.name === name);
   globalThis.describeNamespace = (name) => {{
     const prefix = "mcp__" + String(name).replaceAll("-", "_") + "__";
@@ -246,13 +276,14 @@ mod tests {
         let (output, is_error) = execute(
             &cwd,
             &McpRegistry::default(),
-            &json!({"code":"const result = await tools.read({ path: 'sample.txt' }); text(result); return { done: true, capabilities: [typeof fetch, typeof env, typeof Deno] };"}),
+            &json!({"code":"const result = await tools.read({ path: 'sample.txt' }); text(result); const matches = await searchTools('read file'); text(matches[0].name); return { done: true, capabilities: [typeof fetch, typeof env, typeof Deno] };"}),
         )
         .await
         .unwrap();
         assert!(!is_error, "{output}");
         assert!(output.contains("Script completed"));
         assert!(output.contains("the file content"));
+        assert!(output.contains("\nread"));
         assert!(output.contains("\"done\":true"));
         assert!(output.contains("\"capabilities\":[\"undefined\",\"undefined\",\"undefined\"]"));
         fs::remove_dir_all(cwd).unwrap();
