@@ -439,6 +439,24 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn bash_decodes_utf8_split_across_writes_after_collecting_output() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result = execute(
+            &dir,
+            "bash",
+            &json!({"command":"printf '\\303'; sleep 0.01; printf '\\251'"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.content, "é");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn bash_failure_preserves_stdout_and_stderr_in_the_error() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

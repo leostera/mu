@@ -23,6 +23,10 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 - [ ] Port Pi's `tools.test.ts` cases for `read`, `write`, `edit`, and `bash`; Mu `edit` still lacks Pi's multi-edit/fuzzy/CRLF behavior, and Mu `bash` lacks Pi's timeout, streaming, truncation, and structured-result behavior.
 - [ ] Add Pi's `grep`, `find`, `ls`, and `powershell` built-in tools and port their tests; Mu currently exposes only `read`, `write`, `edit`, and `bash`.
 - [ ] Port Pi's path-utils cases for tilde expansion, Unicode normalization, and macOS filename fallbacks; Mu currently only joins relative paths to cwd.
+- [ ] Port Pi's image-read, resize, block-images, and tool-result-image cases once Mu has image content blocks and a resize pipeline.
+- [ ] Add cancellation-safe per-path write/edit serialization and deterministic tests for same-path ordering, cross-path parallelism, symlink aliases, and in-flight aborts.
+- [ ] Port Pi's bash lifecycle cases for inherited stdio, late output, output truncation/persistence, streaming callbacks, abort, and session message persistence.
+- [ ] Implement Pi's configurable default tool selection, strict-sampling metadata, per-tool prompt contributions, and PowerShell runtime; port their selection/schema/system-prompt tests.
 - [ ] Match the remaining built-in tool output limits, image/content-block conversion, safety/approval behavior, and structured results.
 - [ ] Complete skill activation/command behavior, argument handling, and parity for discovery precedence, frontmatter, and content injection.
 - [ ] Match tool-output limits, content-block conversion, and large-output behavior.
