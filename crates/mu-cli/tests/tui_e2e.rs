@@ -72,7 +72,7 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
     writer.write_all(b"/")?;
     writer.flush()?;
     wait_for(&screen, |text| {
-        text.contains("settings") && text.contains("model")
+        text.contains("model") && text.contains("new")
     })?;
     writer.write_all(b"m")?;
     writer.flush()?;

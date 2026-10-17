@@ -1484,27 +1484,11 @@ fn cycle_model(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
 }
 
 const COMMANDS: &[(&str, &str)] = &[
-    ("settings", "Open settings menu"),
     ("model", "Select model (opens selector UI)"),
-    ("tree", "Navigate session tree (switch branches)"),
-    ("thinking", "Set thinking level"),
-    ("scoped-models", "Enable/disable models for Ctrl+P cycling"),
-    ("session", "Show session information"),
-    ("resume", "Resume a previous session"),
     ("new", "Start a new session"),
-    ("fork", "Fork the current session"),
-    ("branch", "Branch from an earlier message"),
-    ("compact", "Compact the conversation"),
-    ("clear", "Clear the conversation"),
-    ("export", "Export the session"),
-    ("copy", "Copy the last assistant response"),
-    ("name", "Set the session name"),
-    ("help", "Show help"),
-    ("hotkeys", "Show keyboard shortcuts"),
-    ("tools", "List available tools"),
+    ("clear", "Start a fresh session"),
     ("mcp", "Show MCP server status"),
-    ("login", "Configure provider authentication"),
-    ("logout", "Remove provider authentication"),
+    ("help", "Show available commands"),
     ("quit", "Exit Mu"),
 ];
 
@@ -2091,14 +2075,25 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentEvent, App, Composer, ComposerAction, Message, Role, UiEvent, handle_key,
-        handle_mouse, insert_char, render,
+        AgentEvent, App, Composer, ComposerAction, Message, Role, UiEvent, filtered_commands,
+        handle_key, handle_mouse, insert_char, render,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use mu_core::{MuAgent, PromptBehavior};
     use ratatui::{Terminal, backend::TestBackend};
     use std::sync::Arc;
     use tokio::sync::{Mutex, mpsc};
+
+    #[test]
+    fn slash_menu_only_advertises_implemented_commands() {
+        let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
+        app.input = vec!['/'];
+        let names = filtered_commands(&app)
+            .into_iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["model", "new", "clear", "mcp", "help", "quit"]);
+    }
 
     #[tokio::test]
     async fn enter_while_generating_queues_steering_and_alt_enter_queues_follow_up() {

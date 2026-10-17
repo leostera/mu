@@ -17,7 +17,6 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 ## CLI and session behavior
 
 - [ ] Implement session discovery, resume, fork/clone, branch navigation, import/export, tree selection, and their command-line forms.
-- [ ] Implement the advertised `/resume`, `/tree`, `/thinking`, `/scoped-models`, `/session`, `/fork`, `/branch`, `/compact`, `/export`, `/copy`, `/name`, `/settings`, `/login`, and `/logout` command behavior (or remove unsupported entries until implemented).
 - [ ] Port Pi session compaction, branch selection, summaries, and context projection behavior end to end.
 - [ ] Resume persisted codemode store and MCP tool activation from an actual loaded session/branch.
 
