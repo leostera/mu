@@ -36,6 +36,7 @@ struct Config {
     model: String,
     model_choices: Vec<String>,
     hide_thinking_block: bool,
+    retry: RetryPolicy,
 }
 struct Provider {
     transport: ProviderTransport,
@@ -64,6 +65,25 @@ struct FunctionCall {
 pub enum PromptBehavior {
     Steer,
     FollowUp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetryPolicy {
+    enabled: bool,
+    max_retries: u32,
+    base_delay_ms: u64,
+    max_delay_ms: u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 2_000,
+            max_delay_ms: 60_000,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -153,6 +173,15 @@ pub enum AgentEvent {
         prompt: String,
         behavior: PromptBehavior,
     },
+    RetryScheduled {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error: String,
+    },
+    RetryAttemptStarted {
+        attempt: u32,
+    },
 }
 struct Reply {
     text: String,
@@ -179,6 +208,7 @@ fn config() -> Result<Config, AgentError> {
     let mut provider = None;
     let mut model = None;
     let mut hide_thinking_block = false;
+    let mut retry = RetryPolicy::default();
     for path in [
         agent_dir.join("settings.json"),
         cwd.join(".pi/settings.json"),
@@ -200,6 +230,7 @@ fn config() -> Result<Config, AgentError> {
         if let Some(v) = value.get("hideThinkingBlock").and_then(Value::as_bool) {
             hide_thinking_block = v;
         }
+        update_retry_policy(&mut retry, &value);
     }
     let provider = provider
         .ok_or_else(|| AgentError::Configuration("Pi settings have no defaultProvider".into()))?;
@@ -213,7 +244,30 @@ fn config() -> Result<Config, AgentError> {
         model,
         model_choices,
         hide_thinking_block,
+        retry,
     })
+}
+
+fn update_retry_policy(retry: &mut RetryPolicy, settings: &Value) {
+    let Some(settings) = settings.get("retry").and_then(Value::as_object) else {
+        return;
+    };
+    if let Some(enabled) = settings.get("enabled").and_then(Value::as_bool) {
+        retry.enabled = enabled;
+    }
+    if let Some(max_retries) = settings.get("maxRetries").and_then(Value::as_u64) {
+        retry.max_retries = max_retries.min(u32::MAX as u64) as u32;
+    }
+    if let Some(base_delay_ms) = settings.get("baseDelayMs").and_then(Value::as_u64) {
+        retry.base_delay_ms = base_delay_ms;
+    }
+    if let Some(max_delay_ms) = settings
+        .get("maxAgentDelayMs")
+        .or_else(|| settings.get("maxDelayMs"))
+        .and_then(Value::as_u64)
+    {
+        retry.max_delay_ms = max_delay_ms;
+    }
 }
 
 fn configured_models(
@@ -750,6 +804,98 @@ async fn execute_independent_tool(
     }
 }
 
+fn retryable_provider_error(error: &AgentError) -> bool {
+    let AgentError::Provider(message) = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    if [
+        "gousagelimiterror",
+        "freeusagelimiterror",
+        "monthly usage limit reached",
+        "available balance",
+        "insufficient_quota",
+        "out of budget",
+        "quota exceeded",
+        "billing",
+        "subscription_sharing_usage_limit_exceeded",
+        "usage limit",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
+    {
+        return false;
+    }
+    [
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "520",
+        "524",
+        "rate limit",
+        "rate-limit",
+        "ratelimit",
+        "too many requests",
+        "overloaded",
+        "server_busy",
+        "servers are currently busy",
+        "currently experiencing high demand",
+        "model is at capacity",
+        "service unavailable",
+        "service is unavailable",
+        "temporarily unavailable",
+        "server error",
+        "internal error",
+        "network",
+        "connection",
+        "fetch failed",
+        "eai_again",
+        "enotfound",
+        "socket hang up",
+        "timeout",
+        "timed out",
+        "upstream",
+        "stream failed",
+        "stream was interrupted",
+        "provider returned error",
+        "provider returned an error",
+        "request buffer limit while retrying upstream",
+        "unable to forward upstream",
+        "upstream request failed",
+        "upstream_stream_read_error",
+        "http/2 stream failed",
+        "other side closed",
+        "getaddrinfo",
+        "socket connection was closed",
+        "ended without",
+        "stream ended before message_stop",
+        "terminal response event",
+        "http2 request did not get a response",
+        "pending stream has been canceled",
+        "retry delay",
+        "you can retry your request",
+        "try your request again",
+        "please retry your request",
+        "resourceexhausted",
+        "subscription_sharing_usage_unavailable",
+        "subscription_sharing_user_unavailable",
+        "terminated",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase))
+}
+
+fn retry_delay_ms(policy: RetryPolicy, attempt: u32) -> u64 {
+    let exponent = attempt.saturating_sub(1).min(63);
+    let multiplier = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX);
+    policy
+        .base_delay_ms
+        .saturating_mul(multiplier)
+        .min(policy.max_delay_ms)
+}
+
 fn usage(r: &Reply) -> MessageUsage {
     MessageUsage {
         input: r.input,
@@ -778,6 +924,7 @@ pub struct MuAgent {
     cwd: PathBuf,
     skills: crate::skills::SkillCatalog,
     hide_thinking_block: bool,
+    retry: RetryPolicy,
     mcp: crate::mcp::McpRegistry,
     active_mcp_tools: HashSet<String>,
     prompt_queue: AgentPromptQueue,
@@ -802,6 +949,7 @@ impl MuAgent {
             cwd: config.cwd.clone(),
             skills,
             hide_thinking_block: config.hide_thinking_block,
+            retry: config.retry,
             mcp,
             active_mcp_tools,
             prompt_queue: AgentPromptQueue::default(),
@@ -823,6 +971,7 @@ impl MuAgent {
             model: "mu-demo".into(),
             model_choices: vec!["mu-demo".into(), "mu-demo-alt".into()],
             hide_thinking_block: false,
+            retry: RetryPolicy::default(),
         };
         Self::demo_from_config(config)
     }
@@ -846,6 +995,7 @@ impl MuAgent {
             cwd: config.cwd.clone(),
             skills: crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir),
             hide_thinking_block: config.hide_thinking_block,
+            retry: config.retry,
             mcp: crate::mcp::McpRegistry::default(),
             active_mcp_tools,
             prompt_queue: AgentPromptQueue::default(),
@@ -953,6 +1103,43 @@ impl MuAgent {
         session_codemode_store(&self.session)
     }
 
+    async fn complete_with_retry(
+        &self,
+        on_event: &mut impl FnMut(AgentEvent),
+    ) -> Result<Reply, AgentError> {
+        let mut attempt = 0;
+        loop {
+            match self
+                .provider
+                .complete(
+                    &self.history,
+                    &self.tool_definitions(&self.active_mcp_tools),
+                    on_event,
+                )
+                .await
+            {
+                Ok(reply) => return Ok(reply),
+                Err(error)
+                    if self.retry.enabled
+                        && attempt < self.retry.max_retries
+                        && retryable_provider_error(&error) =>
+                {
+                    attempt += 1;
+                    let delay_ms = retry_delay_ms(self.retry, attempt);
+                    on_event(AgentEvent::RetryScheduled {
+                        attempt,
+                        max_attempts: self.retry.max_retries,
+                        delay_ms,
+                        error: error.to_string(),
+                    });
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    on_event(AgentEvent::RetryAttemptStarted { attempt });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     fn tool_definitions(&self, active_mcp_tools: &HashSet<String>) -> Vec<Value> {
         let mut definitions = crate::tools::definitions();
         definitions.extend(self.mcp.definitions_for_model(active_mcp_tools));
@@ -979,11 +1166,7 @@ impl MuAgent {
         if let Some(steering) = self.prompt_queue.take_steering() {
             self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
         }
-        let mut tool_definitions = self.tool_definitions(&self.active_mcp_tools);
-        let mut reply = self
-            .provider
-            .complete(&self.history, &tool_definitions, on_event)
-            .await?;
+        let mut reply = self.complete_with_retry(on_event).await?;
         for _ in 0..8 {
             if reply.tool_calls.is_empty() {
                 break;
@@ -1152,11 +1335,7 @@ impl MuAgent {
             if let Some(steering) = self.prompt_queue.take_steering() {
                 self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
             }
-            tool_definitions = self.tool_definitions(&self.active_mcp_tools);
-            reply = self
-                .provider
-                .complete(&self.history, &tool_definitions, on_event)
-                .await?;
+            reply = self.complete_with_retry(on_event).await?;
         }
         if !reply.tool_calls.is_empty() {
             return Err(AgentError::Provider(
@@ -1200,8 +1379,18 @@ pub async fn run_prompt(prompt: String) -> Result<(), AgentError> {
     let mut agent = MuAgent::connect().await?;
     agent
         .submit(prompt, &mut |event| {
-            if let AgentEvent::TextDelta(text) = event {
-                print!("{text}");
+            match event {
+                AgentEvent::TextDelta(text) => print!("{text}"),
+                AgentEvent::RetryScheduled {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    error,
+                } => eprintln!(
+                    "Retry {attempt}/{max_attempts} in {:.1}s: {error} (interrupt to cancel)",
+                    delay_ms as f64 / 1000.0
+                ),
+                _ => {}
             }
             let _ = io::stdout().flush();
         })
@@ -1276,6 +1465,7 @@ mod tests {
             model: "test-model".into(),
             model_choices: vec!["test-model".into()],
             hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
         let replies =
@@ -1363,6 +1553,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripted_provider_retries_transient_failures_with_bounded_attempt_events() {
+        let root = std::env::temp_dir().join(format!("mu-provider-retry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temporary project");
+        let config = super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.clone(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy {
+                enabled: true,
+                max_retries: 2,
+                base_delay_ms: 0,
+                max_delay_ms: 0,
+            },
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
+        agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
+            std::sync::Mutex::new(std::collections::VecDeque::from([
+                Err("model request returned HTTP 503".into()),
+                Err("upstream connection timed out".into()),
+                Ok(Reply {
+                    text: "recovered".into(),
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    output_items: Vec::new(),
+                    tool_calls: Vec::new(),
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: None,
+                    total_tokens: 0,
+                }),
+            ])),
+        ));
+        let mut events = Vec::new();
+
+        agent
+            .submit("retry this request".into(), &mut |event| events.push(event))
+            .await
+            .expect("retry eventually succeeds");
+
+        let scheduled = events
+            .iter()
+            .filter_map(|event| match event {
+                super::AgentEvent::RetryScheduled {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    error,
+                } => Some((*attempt, *max_attempts, *delay_ms, error.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scheduled,
+            [
+                (1, 2, 0, "provider: model request returned HTTP 503"),
+                (2, 2, 0, "provider: upstream connection timed out")
+            ]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, super::AgentEvent::RetryAttemptStarted { .. }))
+                .count(),
+            2
+        );
+        assert!(events.contains(&super::AgentEvent::TextDelta("r".into())));
+        assert_eq!(agent.history[0]["role"], "user");
+        assert_eq!(agent.history[1]["role"], "assistant");
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[tokio::test]
+    async fn cancelling_during_retry_backoff_does_not_start_another_attempt() {
+        let root = std::env::temp_dir().join(format!("mu-retry-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temporary project");
+        let config = super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.clone(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy {
+                enabled: true,
+                max_retries: 1,
+                base_delay_ms: 60_000,
+                max_delay_ms: 60_000,
+            },
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
+        agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
+            std::sync::Mutex::new(std::collections::VecDeque::from([
+                Err("HTTP 503 temporary failure".into()),
+                Ok(Reply {
+                    text: "must not run".into(),
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    output_items: Vec::new(),
+                    tool_calls: Vec::new(),
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: None,
+                    total_tokens: 0,
+                }),
+            ])),
+        ));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            agent
+                .submit("cancel during backoff".into(), &mut |event| {
+                    let _ = event_tx.send(event);
+                })
+                .await
+        });
+        let mut scheduled = false;
+        while let Some(event) = event_rx.recv().await {
+            if matches!(event, super::AgentEvent::RetryScheduled { .. }) {
+                scheduled = true;
+                break;
+            }
+        }
+        assert!(scheduled);
+
+        task.abort();
+
+        assert!(task.await.unwrap_err().is_cancelled());
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[test]
+    fn retry_policy_excludes_quota_errors_and_caps_exponential_backoff() {
+        let mut configured = super::RetryPolicy::default();
+        super::update_retry_policy(
+            &mut configured,
+            &serde_json::json!({"retry":{"enabled":false,"maxRetries":1,"baseDelayMs":50,"maxAgentDelayMs":200}}),
+        );
+        assert_eq!(
+            configured,
+            super::RetryPolicy {
+                enabled: false,
+                max_retries: 1,
+                base_delay_ms: 50,
+                max_delay_ms: 200,
+            }
+        );
+        super::update_retry_policy(
+            &mut configured,
+            &serde_json::json!({"retry":{"maxDelayMs":300}}),
+        );
+        assert_eq!(configured.max_delay_ms, 300);
+        assert!(super::retryable_provider_error(
+            &super::AgentError::Provider("HTTP 503 service unavailable".into())
+        ));
+        assert!(!super::retryable_provider_error(
+            &super::AgentError::Provider("insufficient_quota: billing limit".into())
+        ));
+        let policy = super::RetryPolicy {
+            enabled: true,
+            max_retries: 4,
+            base_delay_ms: 2_000,
+            max_delay_ms: 5_000,
+        };
+        assert_eq!(super::retry_delay_ms(policy, 1), 2_000);
+        assert_eq!(super::retry_delay_ms(policy, 2), 4_000);
+        assert_eq!(super::retry_delay_ms(policy, 3), 5_000);
+    }
+
+    #[tokio::test]
     async fn scripted_provider_failure_persists_the_user_turn_without_an_assistant_turn() {
         let root = std::env::temp_dir().join(format!("mu-provider-error-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create temporary project");
@@ -1373,12 +1738,14 @@ mod tests {
             model: "test-model".into(),
             model_choices: vec!["test-model".into()],
             hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
-        agent.provider.transport =
-            super::ProviderTransport::Scripted(std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::from([Err("synthetic upstream failure".into())]),
-            )));
+        agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
+            std::sync::Mutex::new(std::collections::VecDeque::from([Err(
+                "invalid request: malformed payload".into(),
+            )])),
+        ));
         let mut events = Vec::new();
 
         let error = agent
@@ -1386,7 +1753,10 @@ mod tests {
             .await
             .expect_err("scripted provider failure should propagate");
 
-        assert_eq!(error.to_string(), "provider: synthetic upstream failure");
+        assert_eq!(
+            error.to_string(),
+            "provider: invalid request: malformed payload"
+        );
         assert!(events.is_empty());
         assert_eq!(agent.history.len(), 1);
         assert_eq!(agent.history[0]["role"], "user");
@@ -1415,6 +1785,7 @@ mod tests {
             model: "mu-demo".into(),
             model_choices: vec!["mu-demo".into()],
             hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
         agent

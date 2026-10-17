@@ -1012,6 +1012,7 @@ struct App {
     quit: bool,
     last_ctrl_c: Option<Instant>,
     request: Option<AbortHandle>,
+    retry_status: Option<String>,
     prompt_queue: AgentPromptQueue,
     queued_prompts: VecDeque<(String, PromptBehavior)>,
     hide_thinking: bool,
@@ -1066,6 +1067,7 @@ impl App {
             quit: false,
             last_ctrl_c: None,
             request: None,
+            retry_status: None,
             prompt_queue: AgentPromptQueue::default(),
             queued_prompts: VecDeque::new(),
             hide_thinking: false,
@@ -1186,25 +1188,52 @@ impl App {
                     return;
                 };
                 match event {
-                    AgentEvent::TextDelta(delta) => message.text.push_str(&delta),
-                    AgentEvent::ThinkingDelta(delta) => message.thinking.push_str(&delta),
+                    AgentEvent::TextDelta(delta) => {
+                        self.retry_status = None;
+                        message.text.push_str(&delta);
+                    }
+                    AgentEvent::ThinkingDelta(delta) => {
+                        self.retry_status = None;
+                        message.thinking.push_str(&delta);
+                    }
+                    AgentEvent::RetryScheduled {
+                        attempt,
+                        max_attempts,
+                        delay_ms,
+                        error,
+                    } => {
+                        message.text.clear();
+                        message.thinking.clear();
+                        message.tools.clear();
+                        self.retry_status = Some(format!(
+                            "Retry {attempt}/{max_attempts} in {:.1}s: {error}",
+                            delay_ms as f64 / 1000.0
+                        ));
+                    }
+                    AgentEvent::RetryAttemptStarted { attempt } => {
+                        self.retry_status = Some(format!("Retry attempt {attempt} started…"));
+                    }
                     AgentEvent::ToolStarted {
                         call_id,
                         name,
                         arguments,
-                    } => message.tools.push(ToolActivity {
-                        call_id,
-                        name,
-                        arguments,
-                        output: None,
-                        error: false,
-                    }),
+                    } => {
+                        self.retry_status = None;
+                        message.tools.push(ToolActivity {
+                            call_id,
+                            name,
+                            arguments,
+                            output: None,
+                            error: false,
+                        });
+                    }
                     AgentEvent::QueuedPromptStarted { .. } => unreachable!("handled above"),
                     AgentEvent::ToolFinished {
                         call_id,
                         output,
                         is_error,
                     } => {
+                        self.retry_status = None;
                         if let Some(tool) = message
                             .tools
                             .iter_mut()
@@ -1218,10 +1247,12 @@ impl App {
                 // New output follows the end only if the user has not scrolled away.
             }
             UiEvent::Finished(Ok(())) => {
+                self.retry_status = None;
                 self.loading = false;
                 self.request = None;
             }
             UiEvent::Finished(Err(error)) => {
+                self.retry_status = None;
                 self.loading = false;
                 self.request = None;
                 if let Some(message) = self.messages.last_mut() {
@@ -1255,6 +1286,7 @@ impl App {
         if let Some(request) = self.request.take() {
             request.abort();
         }
+        self.retry_status = None;
         self.loading = false;
         if let Some(message) = self.messages.last_mut() {
             message.text.push_str("\n\n(interrupted)");
@@ -2058,10 +2090,12 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         ),
     ]);
-    let help = if app.loading {
-        "Enter steer · Alt+Enter follow up · Esc interrupt · Ctrl+C cancel and exit"
+    let help = if let Some(status) = &app.retry_status {
+        format!("{status} · Esc interrupt · Ctrl+C cancel and exit")
+    } else if app.loading {
+        "Enter steer · Alt+Enter follow up · Esc interrupt · Ctrl+C cancel and exit".to_owned()
     } else {
-        "Enter send · Shift+Enter/Ctrl+J newline · Ctrl+P model · / commands · Ctrl+C clear/twice quit · Ctrl+D quit when empty"
+        "Enter send · Shift+Enter/Ctrl+J newline · Ctrl+P model · / commands · Ctrl+C clear/twice quit · Ctrl+D quit when empty".to_owned()
     };
     frame.render_widget(
         Paragraph::new(vec![
@@ -2083,6 +2117,44 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
     use std::sync::Arc;
     use tokio::sync::{Mutex, mpsc};
+
+    #[tokio::test]
+    async fn retry_status_is_visible_and_cancel_marks_the_turn_interrupted() {
+        let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
+        app.loading = true;
+        app.messages.push(Message {
+            role: Role::Assistant,
+            text: "partial response".into(),
+            thinking: "partial reasoning".into(),
+            tools: Vec::new(),
+            error: false,
+        });
+
+        app.apply(UiEvent::Agent(AgentEvent::RetryScheduled {
+            attempt: 1,
+            max_attempts: 3,
+            delay_ms: 2_000,
+            error: "provider: HTTP 503".into(),
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Retry 1/3 in 2.0s: provider: HTTP 503"));
+        assert!(app.messages.last().unwrap().text.is_empty());
+        assert!(app.messages.last().unwrap().thinking.is_empty());
+
+        let task = tokio::spawn(std::future::pending::<()>());
+        app.request = Some(task.abort_handle());
+        app.cancel();
+
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(app.retry_status.is_none());
+        assert!(app.messages.last().unwrap().text.contains("(interrupted)"));
+    }
 
     #[test]
     fn slash_menu_only_advertises_implemented_commands() {
