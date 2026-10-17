@@ -20,8 +20,9 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## Built-in tools and skills
 
-- [ ] Port Pi's `tools.test.ts` cases for `read`, `write`, `edit`, and `bash`; match schemas, exact outputs/errors, and filesystem/shell edge behavior.
+- [ ] Port Pi's `tools.test.ts` cases for `read`, `write`, `edit`, and `bash`; Mu `edit` still lacks Pi's multi-edit/fuzzy/CRLF behavior, and Mu `bash` lacks Pi's timeout, streaming, truncation, and structured-result behavior.
 - [ ] Add Pi's `grep`, `find`, `ls`, and `powershell` built-in tools and port their tests; Mu currently exposes only `read`, `write`, `edit`, and `bash`.
+- [ ] Port Pi's path-utils cases for tilde expansion, Unicode normalization, and macOS filename fallbacks; Mu currently only joins relative paths to cwd.
 - [ ] Match the remaining built-in tool output limits, image/content-block conversion, safety/approval behavior, and structured results.
 - [ ] Complete skill activation/command behavior, argument handling, and parity for discovery precedence, frontmatter, and content injection.
 - [ ] Match tool-output limits, content-block conversion, and large-output behavior.

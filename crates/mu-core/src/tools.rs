@@ -369,7 +369,8 @@ mod tests {
     async fn edit_rejects_ambiguous_replacements() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("file"), "x x").unwrap();
+        let path = dir.join("file");
+        std::fs::write(&path, "x x").unwrap();
         let result = execute(
             &dir,
             "edit",
@@ -377,6 +378,83 @@ mod tests {
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("more than once"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "x x");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_missing_or_empty_text_without_mutating_the_file() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        std::fs::write(&path, "before\nafter\n").unwrap();
+
+        let missing = execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","oldText":"absent","newText":"replacement"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(missing.to_string().contains("oldText was not found"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\nafter\n");
+
+        let empty = execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","oldText":"","newText":"replacement"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(empty.to_string().contains("oldText` must not be empty"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\nafter\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bash_runs_in_the_supplied_working_directory() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(windows)]
+        let command = "cd";
+        #[cfg(not(windows))]
+        let command = "pwd";
+
+        let result = execute(&dir, "bash", &json!({"command":command}))
+            .await
+            .unwrap();
+
+        assert!(
+            result
+                .content
+                .trim()
+                .ends_with(dir.file_name().unwrap().to_str().unwrap())
+        );
+        let empty = execute(&dir, "bash", &json!({"command":"true"}))
+            .await
+            .unwrap();
+        assert!(empty.content.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_failure_preserves_stdout_and_stderr_in_the_error() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let error = execute(
+            &dir,
+            "bash",
+            &json!({"command":"printf stdout; printf stderr >&2; exit 7"}),
+        )
+        .await
+        .unwrap_err();
+
+        let text = error.to_string();
+        assert!(text.contains("command failed: exit"));
+        assert!(text.contains("stdout"));
+        assert!(text.contains("stderr"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
