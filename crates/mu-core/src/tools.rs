@@ -1057,14 +1057,12 @@ fn collect_search_files(path: &Path, is_directory: bool) -> Vec<PathBuf> {
     if !is_directory {
         return vec![path.to_owned()];
     }
-    let mut walker = WalkBuilder::new(path);
-    walker.hidden(false).require_git(false);
-    walker
-        .build()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-        .map(|entry| entry.into_path())
-        .collect()
+    let mut files = collect_candidates_with_nested_repositories(path)
+        .into_iter()
+        .filter(|entry| std::fs::symlink_metadata(entry).is_ok_and(|metadata| metadata.is_file()))
+        .collect::<Vec<_>>();
+    files.sort();
+    files
 }
 
 fn search_display_path(root: &Path, file: &Path, is_directory: bool) -> String {
@@ -1128,7 +1126,7 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
     })
 }
 
-fn find_candidates_with_nested_repositories(search_root: &Path) -> Vec<PathBuf> {
+fn collect_candidates_with_nested_repositories(search_root: &Path) -> Vec<PathBuf> {
     let mut pending_roots = vec![(search_root.to_owned(), true)];
     let mut visited_roots = HashSet::from([search_root.to_owned()]);
     let mut candidates = HashSet::new();
@@ -1177,7 +1175,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     }
 
     let mut results = Vec::new();
-    let mut candidates = find_candidates_with_nested_repositories(&path);
+    let mut candidates = collect_candidates_with_nested_repositories(&path);
     candidates.sort();
     for entry_path in candidates {
         let relative = entry_path.strip_prefix(&path).unwrap_or(&entry_path);

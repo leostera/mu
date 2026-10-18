@@ -360,6 +360,22 @@ async fn pi_find_preserves_result_limit_details() {
     cleanup(&dir);
 }
 
+#[tokio::test]
+async fn pi_grep_stops_parent_gitignore_rules_at_nested_repository_boundaries() {
+    let dir = temp_dir("grep-nested-repo");
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::create_dir_all(dir.join("nested/.git")).unwrap();
+    fs::write(dir.join(".gitignore"), "nested/secret.txt\n").unwrap();
+    fs::write(dir.join("nested/secret.txt"), "needle\n").unwrap();
+
+    let result = execute(&dir, "grep", &json!({"pattern":"needle","path":"."}))
+        .await
+        .unwrap();
+
+    assert_eq!(result.content, "nested/secret.txt:1: needle");
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts, grep limit cases.
 #[tokio::test]
 async fn pi_grep_reports_a_limit_only_when_an_additional_match_exists() {
