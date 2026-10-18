@@ -1359,7 +1359,7 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };
     let match_full_path = pattern.contains('/');
-    let match_absolute_path = match_full_path && pattern.starts_with('/');
+    let match_absolute_path = match_full_path && Path::new(pattern).is_absolute();
     let effective_pattern = if match_full_path
         && !match_absolute_path
         && !pattern.starts_with("**/")
