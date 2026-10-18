@@ -1394,10 +1394,67 @@ async fn run_powershell(cwd: &Path, args: &Value) -> Result<ToolResult, ToolErro
     }
 }
 
+fn sanitize_shell_output(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut characters = input.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' {
+            strip_ansi_sequence(&mut characters);
+            continue;
+        }
+        if character == '\u{9b}' {
+            strip_csi_sequence(&mut characters);
+            continue;
+        }
+        if character == '\r' || (character.is_control() && !matches!(character, '\t' | '\n')) {
+            continue;
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn strip_ansi_sequence(characters: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    let Some(introducer) = characters.next() else {
+        return;
+    };
+    match introducer {
+        '[' => strip_csi_sequence(characters),
+        ']' => strip_string_sequence(characters, true),
+        'P' | '^' | '_' | 'X' => strip_string_sequence(characters, false),
+        _ => {}
+    }
+}
+
+fn strip_csi_sequence(characters: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    for character in characters.by_ref() {
+        if ('@'..='~').contains(&character) {
+            break;
+        }
+    }
+}
+
+fn strip_string_sequence(
+    characters: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    bell_terminated: bool,
+) {
+    let mut escaped = false;
+    for character in characters.by_ref() {
+        if bell_terminated && character == '\u{7}' {
+            break;
+        }
+        if escaped && character == '\\' {
+            break;
+        }
+        escaped = character == '\u{1b}';
+    }
+}
+
 fn shell_result(output: Output, started_at: Instant) -> ToolResult {
     const STRUCTURED_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
     let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
     full_output.push_str(&String::from_utf8_lossy(&output.stderr));
+    let full_output = sanitize_shell_output(&full_output);
     let exit_code = output.status.code().unwrap_or(1);
     let (structured_output, structured_truncated) =
         truncate_utf8(&full_output, STRUCTURED_OUTPUT_MAX_BYTES);
@@ -2049,6 +2106,20 @@ mod tests {
                 .contains("Command timed out after 0.05 seconds")
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shell_output_removes_ansi_and_binary_controls_but_keeps_tabs_and_newlines() {
+        assert_eq!(
+            super::sanitize_shell_output("\u{1b}[31mred\u{1b}[0m\r\n\u{1}x\t!"),
+            "red\nx\t!"
+        );
+        assert_eq!(
+            super::sanitize_shell_output(
+                "\u{1b}]8;;https://example.test\u{7}linked\u{1b}]8;;\u{7}"
+            ),
+            "linked"
+        );
     }
 
     #[cfg(unix)]
