@@ -1135,11 +1135,20 @@ async fn pi_find_preserves_backslashes_in_unix_filenames() {
 async fn pi_find_parses_newline_filenames_like_fd_readline_output() {
     let dir = temp_dir("find-newline-name");
     fs::write(dir.join("first \n second.txt"), "content").unwrap();
+    fs::write(dir.join("third.txt"), "content").unwrap();
 
     let result = execute(&dir, "find", &json!({"pattern":"*.txt"}))
         .await
         .unwrap();
-    assert_eq!(result.content, "first\nsecond.txt");
+    assert_eq!(result.content, "first\nsecond.txt\nthird.txt");
+
+    let limited = execute(&dir, "find", &json!({"pattern":"*.txt","limit":2}))
+        .await
+        .unwrap();
+    assert_eq!(
+        limited.content,
+        "first\nsecond.txt\nthird.txt\n\n[2 results limit reached]"
+    );
     cleanup(&dir);
 }
 

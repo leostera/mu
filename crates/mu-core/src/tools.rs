@@ -1537,6 +1537,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     }
 
     let mut results = Vec::new();
+    let mut matched_entries = 0;
     let mut candidates = collect_candidates_with_nested_repositories(&path);
     candidates.sort();
     for entry_path in candidates {
@@ -1556,9 +1557,10 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         if !matches {
             continue;
         }
-        if limit != 0 && results.len() >= limit {
+        if limit != 0 && matched_entries >= limit {
             break;
         }
+        matched_entries += 1;
         let is_directory =
             std::fs::symlink_metadata(&entry_path).is_ok_and(|metadata| metadata.is_dir());
         if is_directory {
