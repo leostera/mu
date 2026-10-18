@@ -899,6 +899,14 @@ fn truncate_tool_output(content: &str) -> (String, bool) {
     (output.join("\n"), truncated)
 }
 
+fn json_number(value: f64) -> Value {
+    if value.fract() == 0.0 && (0.0..18_446_744_073_709_551_616.0).contains(&value) {
+        json!(value as u64)
+    } else {
+        json!(value)
+    }
+}
+
 fn tool_truncation_details(content: &str, truncated_content: &str, max_bytes: usize) -> Value {
     let count_lines = |text: &str| {
         if text.is_empty() {
@@ -933,7 +941,7 @@ struct GrepInput {
     path: PathBuf,
     glob: Option<GlobMatcher>,
     context: usize,
-    limit: usize,
+    limit: f64,
 }
 
 fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
@@ -974,9 +982,14 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
         Some(_) => return Err(ToolError::Arguments("`literal` must be a boolean".into())),
     };
     let context = optional_nonnegative_integer(object.get("context"), "context")?.unwrap_or(0);
-    let limit = optional_nonnegative_integer(object.get("limit"), "limit")?
-        .unwrap_or(GREP_DEFAULT_LIMIT)
-        .max(1);
+    let limit = match object.get("limit") {
+        None => GREP_DEFAULT_LIMIT as f64,
+        Some(value) => value
+            .as_f64()
+            .filter(|limit| limit.is_finite())
+            .ok_or_else(|| ToolError::Arguments("`limit` must be a finite number".into()))?,
+    }
+    .max(1.0);
     let pattern = if literal {
         regex::escape(&pattern)
     } else {
@@ -1046,7 +1059,7 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             if !regex.is_match(line) {
                 continue;
             }
-            if match_count >= input.limit {
+            if match_count as f64 >= input.limit {
                 match_limit_reached = true;
                 break 'files;
             }
@@ -1077,9 +1090,9 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         notices.push(format!(
             "{} matches limit reached. Use limit={} for more, or refine pattern",
             input.limit,
-            input.limit.saturating_mul(2)
+            input.limit * 2.0
         ));
-        details.insert("matchLimitReached".into(), json!(input.limit));
+        details.insert("matchLimitReached".into(), json_number(input.limit));
     }
     if byte_truncated {
         notices.push(format!(

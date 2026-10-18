@@ -276,6 +276,46 @@ async fn pi_grep_obeys_global_limit_and_context_without_returning_later_matches(
 }
 
 #[tokio::test]
+async fn pi_grep_limit_preserves_javascript_number_semantics() {
+    let dir = temp_dir("grep-number-limit");
+    fs::write(
+        dir.join("matches.txt"),
+        "match one\nmatch two\nmatch three\n",
+    )
+    .unwrap();
+
+    let fractional = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":"match","path":"matches.txt","limit":1.5}),
+    )
+    .await
+    .unwrap();
+    assert!(fractional.content.contains("matches.txt:1: match one"));
+    assert!(fractional.content.contains("matches.txt:2: match two"));
+    assert!(!fractional.content.contains("matches.txt:3: match three"));
+    assert!(
+        fractional
+            .content
+            .contains("1.5 matches limit reached. Use limit=3 for more")
+    );
+    assert_eq!(fractional.details.unwrap()["matchLimitReached"], 1.5);
+
+    let negative = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":"match","path":"matches.txt","limit":-2}),
+    )
+    .await
+    .unwrap();
+    assert!(negative.content.contains("matches.txt:1: match one"));
+    assert!(!negative.content.contains("matches.txt:2: match two"));
+    assert!(negative.content.contains("1 matches limit reached"));
+    assert_eq!(negative.details.unwrap()["matchLimitReached"], 1);
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_grep_treats_flag_like_patterns_as_search_text_and_supports_literal_mode() {
     let dir = temp_dir("grep-patterns");
     fs::write(dir.join("sample.txt"), "-flag value\nNeedle\nliteral.dot\n").unwrap();
