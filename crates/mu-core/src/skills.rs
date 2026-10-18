@@ -14,6 +14,12 @@ pub struct Skill {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedSkill {
+    skill: Skill,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillDiagnostic {
     pub path: PathBuf,
     pub message: String,
@@ -110,7 +116,7 @@ fn scan(
         let file = root.join("SKILL.md");
         if !is_ignored(&file, false, &ignore_rules) {
             match parse_skill(&file) {
-                Ok(skill) => add_skill(skill, catalog, names),
+                Ok(parsed) => add_skill(parsed, catalog, names),
                 Err(message) => catalog.diagnostics.push(SkillDiagnostic {
                     path: file,
                     message,
@@ -137,8 +143,8 @@ fn scan(
         {
             // Pi also accepts described Markdown files directly in a skills root.
             // Unlike declared SKILL.md files, unrelated or malformed Markdown is ignored.
-            if let Ok(skill) = parse_skill(&path) {
-                add_skill(skill, catalog, names);
+            if let Ok(parsed) = parse_skill(&path) {
+                add_skill(parsed, catalog, names);
             }
         }
     }
@@ -168,7 +174,14 @@ fn is_ignored(path: &Path, is_directory: bool, rules: &[Gitignore]) -> bool {
     ignored
 }
 
-fn add_skill(skill: Skill, catalog: &mut SkillCatalog, names: &mut HashSet<String>) {
+fn add_skill(parsed: ParsedSkill, catalog: &mut SkillCatalog, names: &mut HashSet<String>) {
+    let ParsedSkill { skill, warnings } = parsed;
+    catalog
+        .diagnostics
+        .extend(warnings.into_iter().map(|message| SkillDiagnostic {
+            path: skill.file_path.clone(),
+            message,
+        }));
     if names.insert(skill.name.clone()) {
         catalog.skills.push(skill);
     } else {
@@ -179,7 +192,7 @@ fn add_skill(skill: Skill, catalog: &mut SkillCatalog, names: &mut HashSet<Strin
     }
 }
 
-fn parse_skill(path: &Path) -> Result<Skill, String> {
+fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let mut lines = text.lines();
     if lines.next() != Some("---") {
@@ -220,27 +233,41 @@ fn parse_skill(path: &Path) -> Result<Skill, String> {
     let name = name
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| dir_name.to_owned());
-    if name.len() > 64
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        || name.starts_with('-')
-        || name.ends_with('-')
-        || name.contains("--")
-    {
-        return Err(format!("invalid skill name `{name}`"));
-    }
     let description = description
         .filter(|s| !s.trim().is_empty())
         .ok_or("description is required")?;
-    if description.len() > 1024 {
-        return Err("description exceeds 1024 characters".into());
+    let mut warnings = Vec::new();
+    let name_length = name.encode_utf16().count();
+    if name_length > 64 {
+        warnings.push(format!("name exceeds 64 characters ({name_length})"));
     }
-    Ok(Skill {
-        name,
-        description,
-        file_path: path.to_path_buf(),
-        disable_model_invocation: disabled,
+    if !name.chars().all(|character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+    }) {
+        warnings.push(
+            "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)".into(),
+        );
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        warnings.push("name must not start or end with a hyphen".into());
+    }
+    if name.contains("--") {
+        warnings.push("name must not contain consecutive hyphens".into());
+    }
+    let description_length = description.encode_utf16().count();
+    if description_length > 1024 {
+        warnings.push(format!(
+            "description exceeds 1024 characters ({description_length})"
+        ));
+    }
+    Ok(ParsedSkill {
+        skill: Skill {
+            name,
+            description,
+            file_path: path.to_path_buf(),
+            disable_model_invocation: disabled,
+        },
+        warnings,
     })
 }
 
@@ -289,7 +316,7 @@ mod tests {
             "---\nname: quoted\ndescription: Quoted flag\ndisable-model-invocation: 'true'\n---\n",
         )
         .unwrap();
-        assert!(!parse_skill(&skill).unwrap().disable_model_invocation);
+        assert!(!parse_skill(&skill).unwrap().skill.disable_model_invocation);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -360,6 +387,37 @@ mod tests {
             .map(|skill| skill.name.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(names, HashSet::from(["visible", "kept"]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_skill_metadata_warns_but_does_not_drop_the_skill() {
+        let root = std::env::temp_dir().join(format!("mu-skills-warnings-{}", Uuid::new_v4()));
+        let skill_dir = root.join(".pi/skills");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("invalid.md"),
+            format!(
+                "---\nname: Bad_Name\ndescription: {}\n---\n",
+                "x".repeat(1025)
+            ),
+        )
+        .unwrap();
+
+        let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].name, "Bad_Name");
+        assert!(
+            catalog
+                .diagnostics
+                .iter()
+                .any(|warning| { warning.message.contains("name contains invalid characters") })
+        );
+        assert!(catalog.diagnostics.iter().any(|warning| {
+            warning
+                .message
+                .contains("description exceeds 1024 characters (1025)")
+        }));
         std::fs::remove_dir_all(root).unwrap();
     }
 
