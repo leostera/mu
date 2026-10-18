@@ -6,6 +6,7 @@
 mod agent;
 mod codemode;
 mod mcp;
+pub mod path_utils;
 pub mod skills;
 mod tool_search;
 pub mod tools;
