@@ -922,12 +922,12 @@ fn parse_list_directory_input(cwd: &Path, args: &Value) -> Result<ListDirectoryI
         .as_object()
         .ok_or_else(|| ToolError::Arguments("ls arguments must be an object".into()))?;
     let path = match object.get("path") {
-        None => cwd.to_owned(),
+        None | Some(Value::Null) => cwd.to_owned(),
         Some(Value::String(path)) => resolve_input_path(cwd, path)?,
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };
     let limit = match object.get("limit") {
-        None => LS_DEFAULT_LIMIT as f64,
+        None | Some(Value::Null) => LS_DEFAULT_LIMIT as f64,
         Some(value) => value
             .as_f64()
             .filter(|limit| limit.is_finite())
@@ -1101,12 +1101,12 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
         .ok_or_else(|| ToolError::Arguments("`pattern` must be a string".into()))?
         .to_owned();
     let path = match object.get("path") {
-        None => cwd.to_owned(),
+        None | Some(Value::Null) => cwd.to_owned(),
         Some(Value::String(path)) => resolve_input_path(cwd, path)?,
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };
     let glob = match object.get("glob") {
-        None => None,
+        None | Some(Value::Null) => None,
         Some(Value::String(glob)) => Some(
             Glob::new(glob)
                 .map_err(|error| ToolError::Command(format!("rg: {error}")))?
@@ -1115,7 +1115,7 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
         Some(_) => return Err(ToolError::Arguments("`glob` must be a string".into())),
     };
     let ignore_case = match object.get("ignoreCase") {
-        None => false,
+        None | Some(Value::Null) => false,
         Some(Value::Bool(value)) => *value,
         Some(_) => {
             return Err(ToolError::Arguments(
@@ -1124,12 +1124,12 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
         }
     };
     let literal = match object.get("literal") {
-        None => false,
+        None | Some(Value::Null) => false,
         Some(Value::Bool(value)) => *value,
         Some(_) => return Err(ToolError::Arguments("`literal` must be a boolean".into())),
     };
     let context = match object.get("context") {
-        None => 0.0,
+        None | Some(Value::Null) => 0.0,
         Some(value) => {
             let context = value
                 .as_f64()
@@ -1139,7 +1139,7 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
         }
     };
     let limit = match object.get("limit") {
-        None => GREP_DEFAULT_LIMIT as f64,
+        None | Some(Value::Null) => GREP_DEFAULT_LIMIT as f64,
         Some(value) => value
             .as_f64()
             .filter(|limit| limit.is_finite())
@@ -1353,7 +1353,7 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::Arguments("`pattern` must be a string".into()))?;
     let path = match object.get("path") {
-        None => cwd.to_owned(),
+        None | Some(Value::Null) => cwd.to_owned(),
         Some(Value::String(path)) => resolve_input_path(cwd, path)?,
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };

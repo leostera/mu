@@ -855,6 +855,42 @@ async fn pi_find_matches_path_globs_from_nested_roots_and_absolute_patterns() {
 }
 
 #[tokio::test]
+async fn pi_optional_search_arguments_treat_null_like_pi_defaults() {
+    let dir = temp_dir("search-null-defaults");
+    fs::write(dir.join("match.txt"), "needle\n").unwrap();
+
+    let ls = execute(&dir, "ls", &json!({"path":null,"limit":null}))
+        .await
+        .unwrap();
+    assert_eq!(ls.content, "match.txt");
+    let find = execute(
+        &dir,
+        "find",
+        &json!({"path":null,"pattern":"*.txt","limit":null}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(find.content, "match.txt");
+    let grep = execute(
+        &dir,
+        "grep",
+        &json!({
+            "path":null,
+            "pattern":"needle",
+            "glob":null,
+            "ignoreCase":null,
+            "literal":null,
+            "context":null,
+            "limit":null
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(grep.content, "match.txt:1: needle");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_preserves_fd_numeric_limit_parse_errors() {
     let dir = temp_dir("find-invalid-limit");
     fs::write(dir.join("one.txt"), "").unwrap();
