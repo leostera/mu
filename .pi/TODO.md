@@ -4,6 +4,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## Agent loop and AI/provider behavior
 
+- [x] Continue tool-call rounds until the model stops or the request is cancelled; Mu no longer applies a fixed 8-round limit.
 - [ ] Handle incomplete, interrupted, refused, and length-truncated provider outputs; do not execute truncated tool arguments.
 - [ ] Match Pi steering/follow-up interleavings at request, tool-call, error, and cancellation boundaries; current queue is FIFO per lane, but broader interleaving tests are needed.
 - [ ] Add finish-turn/prepare-request/prepare-next-turn hooks and their ordering/cancellation semantics.
@@ -74,7 +75,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## TUI experience
 
-- [ ] Replace remaining plain-text rendering with Pi-compatible Markdown, transformers, custom message/entry renderers, and per-tool renderers.
+- [ ] Replace remaining plain-text rendering with Pi-compatible Markdown, transformers, custom message/entry renderers, and per-tool renderers. Mu now renders successful `SKILL.md` reads as compact `[skill] <name>` entries, hides their contents by default, and toggles tool output with Ctrl+O; other built-ins still use generic rendering.
 - [ ] Add expandable/collapsible tool output and richer progress/status rendering; Mu currently truncates tool output in the transcript.
 - [ ] Implement provider-driven autocomplete for slash commands, paths, skills, and extension-defined suggestions; support selection/copy and image paste.
 - [ ] Implement all supported slash-command UI flows, dialogs, overlays, settings, and extension-provided components; keep autocomplete/menu entries honest about what works.

@@ -1636,7 +1636,7 @@ impl MuAgent {
             self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
         }
         let mut reply = self.complete_with_retry(on_event).await?;
-        for _ in 0..8 {
+        loop {
             if reply.tool_calls.is_empty() {
                 break;
             }
@@ -1797,11 +1797,6 @@ impl MuAgent {
                 self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
             }
             reply = self.complete_with_retry(on_event).await?;
-        }
-        if !reply.tool_calls.is_empty() {
-            return Err(AgentError::Provider(
-                "tool call limit exceeded (8 rounds)".into(),
-            ));
         }
         let api = api_name(&self.provider.transport);
         self.session.append_assistant_response(
@@ -2361,6 +2356,78 @@ mod tests {
                 .and_then(Value::as_str)
                 == Some("toolResult")
         }));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[tokio::test]
+    async fn scripted_provider_can_complete_more_than_eight_tool_rounds() {
+        let root =
+            std::env::temp_dir().join(format!("mu-many-tool-rounds-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temporary project");
+        let config = super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.clone(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
+        let mut scripted = std::collections::VecDeque::new();
+        for round in 0..9 {
+            let call_id = format!("call-{round}");
+            let arguments = serde_json::json!({"command":"true"});
+            scripted.push_back(Ok(Reply {
+                text: String::new(),
+                thinking: String::new(),
+                thinking_signature: None,
+                output_items: vec![serde_json::json!({
+                    "type":"function_call",
+                    "call_id":call_id,
+                    "name":"bash",
+                    "arguments":arguments.to_string()
+                })],
+                tool_calls: vec![FunctionCall {
+                    call_id,
+                    name: "bash".into(),
+                    arguments,
+                }],
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: None,
+                total_tokens: 0,
+            }));
+        }
+        scripted.push_back(Ok(Reply {
+            text: "all nine rounds completed".into(),
+            thinking: String::new(),
+            thinking_signature: None,
+            output_items: Vec::new(),
+            tool_calls: Vec::new(),
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: None,
+            total_tokens: 0,
+        }));
+        agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
+            std::sync::Mutex::new(scripted),
+        ));
+
+        agent
+            .submit("run nine independent commands".into(), &mut |_| {})
+            .await
+            .expect("agent loop should have no arbitrary tool-round limit");
+
+        assert_eq!(agent.history.len(), 20);
+        assert_eq!(
+            agent.history.last().unwrap()["content"][0]["text"],
+            "all nine rounds completed"
+        );
         std::fs::remove_dir_all(root).expect("remove temporary project");
     }
 

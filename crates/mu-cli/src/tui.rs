@@ -1018,6 +1018,7 @@ struct App {
     prompt_queue: AgentPromptQueue,
     queued_prompts: VecDeque<(String, PromptBehavior)>,
     hide_thinking: bool,
+    tools_expanded: bool,
 }
 
 impl Deref for App {
@@ -1091,6 +1092,7 @@ impl App {
             prompt_queue: AgentPromptQueue::default(),
             queued_prompts: VecDeque::new(),
             hide_thinking: false,
+            tools_expanded: false,
         }
     }
 
@@ -1436,6 +1438,10 @@ fn handle_key(
 ) {
     if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.hide_thinking = !app.hide_thinking;
+        return;
+    }
+    if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.tools_expanded = !app.tools_expanded;
         return;
     }
     if app.loading {
@@ -1879,21 +1885,28 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 Color::Yellow
             };
+            let compact_skill = !app.tools_expanded && skill_name(tool).is_some();
+            let label = tool_label(tool, app.tools_expanded);
+            let description = if compact_skill {
+                format!(" · {status} (ctrl+o to expand)")
+            } else {
+                format!(" {} · {status}", tool_description(tool))
+            };
             lines.push(Line::from(vec![
                 Span::styled("  ⚙ ", Style::default().fg(color)),
                 Span::styled(
-                    tool.name.clone(),
+                    label,
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!(" {} · {status}", tool_description(tool)),
-                    Style::default().fg(Color::Gray),
-                ),
+                Span::styled(description, Style::default().fg(Color::Gray)),
             ]));
-            if let Some(output) = &tool.output {
-                for line in output.lines().take(4) {
+            if let Some(output) = &tool.output
+                && tool_output_visible(tool, app.tools_expanded)
+            {
+                let visible_lines = if app.tools_expanded { usize::MAX } else { 4 };
+                for line in output.lines().take(visible_lines) {
                     let shown = if line.chars().count() > 180 {
                         format!("{}…", line.chars().take(180).collect::<String>())
                     } else {
@@ -1911,7 +1924,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                         ),
                     ]));
                 }
-                if output.lines().count() > 4 {
+                if !app.tools_expanded && output.lines().count() > 4 {
                     lines.push(Line::from(Span::styled(
                         "    … output truncated",
                         Style::default().fg(Color::DarkGray),
@@ -1986,6 +1999,35 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             &mut state,
         );
     }
+}
+
+fn skill_name(tool: &ToolActivity) -> Option<&str> {
+    if tool.name != "read" {
+        return None;
+    }
+    let path = tool
+        .arguments
+        .get("path")
+        .or_else(|| tool.arguments.get("file_path"))?
+        .as_str()?;
+    let path = std::path::Path::new(path);
+    if path.file_name()?.to_str()? != "SKILL.md" {
+        return None;
+    }
+    path.parent()?.file_name()?.to_str()
+}
+
+fn tool_label(tool: &ToolActivity, expanded: bool) -> String {
+    if !expanded {
+        if let Some(name) = skill_name(tool) {
+            return format!("[skill] {name}");
+        }
+    }
+    tool.name.clone()
+}
+
+fn tool_output_visible(tool: &ToolActivity, expanded: bool) -> bool {
+    expanded || tool.error || skill_name(tool).is_none()
 }
 
 fn tool_description(tool: &ToolActivity) -> String {
@@ -2194,8 +2236,9 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentEvent, App, Composer, ComposerAction, Message, Role, UiEvent, filtered_commands,
-        handle_key, handle_mouse, handle_startup_key, insert_char, render,
+        AgentEvent, App, Composer, ComposerAction, Message, Role, ToolActivity, UiEvent,
+        filtered_commands, handle_key, handle_mouse, handle_startup_key, insert_char, render,
+        skill_name, tool_label, tool_output_visible,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use mu_core::{MuAgent, PromptBehavior};
