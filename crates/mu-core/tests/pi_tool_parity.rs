@@ -23,6 +23,28 @@ fn cleanup(path: &Path) {
 }
 
 #[test]
+fn builtin_definition_order_matches_pi_tool_registry() {
+    let tool_definitions = definitions();
+    let names = tool_definitions
+        .iter()
+        .filter_map(|definition| definition.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "read",
+            "bash",
+            "powershell",
+            "edit",
+            "write",
+            "grep",
+            "find",
+            "ls"
+        ]
+    );
+}
+
+#[test]
 fn current_builtin_definitions_are_valid_json_schemas() {
     let definitions = definitions();
     let mut names = definitions

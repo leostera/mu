@@ -60,7 +60,7 @@ struct Config {
     model_choices: Vec<String>,
     hide_thinking_block: bool,
     retry: RetryPolicy,
-    enabled_tools: HashSet<String>,
+    enabled_tools: Vec<String>,
 }
 struct Provider {
     transport: ProviderTransport,
@@ -307,7 +307,7 @@ fn merge_default_tools(
     Ok(())
 }
 
-fn resolve_default_tools(entries: Option<Vec<String>>) -> HashSet<String> {
+fn resolve_default_tools(entries: Option<Vec<String>>) -> Vec<String> {
     let entries = entries.unwrap_or_else(|| {
         DEFAULT_TOOL_NAMES
             .iter()
@@ -341,13 +341,19 @@ fn resolve_default_tools(entries: Option<Vec<String>>) -> HashSet<String> {
             tools.retain(|tool| tool != name);
         }
     }
-    tools.into_iter().collect()
+    let mut ordered = Vec::new();
+    for tool in tools {
+        if !ordered.contains(&tool) {
+            ordered.push(tool);
+        }
+    }
+    ordered
 }
 
 fn apply_tool_selection(
-    defaults: &HashSet<String>,
+    defaults: &[String],
     selection: &[String],
-) -> Result<HashSet<String>, AgentError> {
+) -> Result<Vec<String>, AgentError> {
     let has_modifier = selection
         .iter()
         .any(|entry| entry.starts_with('+') || entry.starts_with('-'));
@@ -369,19 +375,22 @@ fn apply_tool_selection(
         ));
     }
     if !has_modifier {
-        return Ok(crate::tools::definitions()
-            .iter()
-            .filter_map(|definition| {
-                let name = definition.get("name")?.as_str()?;
-                selection
-                    .iter()
-                    .any(|pattern| tool_name_matches(pattern, name))
-                    .then(|| name.to_owned())
-            })
-            .collect());
+        let definitions = crate::tools::definitions();
+        let mut tools = Vec::new();
+        for pattern in selection {
+            for definition in &definitions {
+                let Some(name) = definition.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                if tool_name_matches(pattern, name) && !tools.iter().any(|tool| tool == name) {
+                    tools.push(name.to_owned());
+                }
+            }
+        }
+        return Ok(tools);
     }
 
-    let mut tools = defaults.clone();
+    let mut tools = defaults.to_vec();
     for entry in selection {
         let name = &entry[1..];
         if name.is_empty() {
@@ -390,9 +399,11 @@ fn apply_tool_selection(
             ));
         }
         if entry.starts_with('+') {
-            tools.insert(name.to_owned());
+            if !tools.iter().any(|tool| tool == name) {
+                tools.push(name.to_owned());
+            }
         } else {
-            tools.remove(name);
+            tools.retain(|tool| tool != name);
         }
     }
     Ok(tools)
@@ -1445,7 +1456,7 @@ pub struct MuAgent {
     skills: crate::skills::SkillCatalog,
     hide_thinking_block: bool,
     retry: RetryPolicy,
-    enabled_tools: HashSet<String>,
+    enabled_tools: Vec<String>,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -1678,7 +1689,7 @@ impl MuAgent {
         name: &str,
         arguments: &Value,
     ) -> Result<crate::tools::ToolResult, crate::tools::ToolError> {
-        if !self.enabled_tools.contains(name) {
+        if !self.enabled_tools.iter().any(|enabled| enabled == name) {
             return Err(crate::tools::ToolError::Arguments(format!(
                 "tool `{name}` is not enabled"
             )));
@@ -1758,13 +1769,17 @@ impl MuAgent {
     }
 
     fn tool_definitions(&self, active_mcp_tools: &HashSet<String>) -> Vec<Value> {
-        let mut definitions = crate::tools::definitions()
-            .into_iter()
-            .filter(|definition| {
-                definition
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| self.enabled_tools.contains(name))
+        let all_definitions = crate::tools::definitions();
+        let mut definitions = self
+            .enabled_tools
+            .iter()
+            .filter_map(|enabled| {
+                all_definitions
+                    .iter()
+                    .find(|definition| {
+                        definition.get("name").and_then(Value::as_str) == Some(enabled)
+                    })
+                    .cloned()
             })
             .collect::<Vec<_>>();
         definitions.extend(self.mcp.definitions_for_model(active_mcp_tools));
@@ -2426,10 +2441,10 @@ mod tests {
         let mut entries = None;
         assert_eq!(
             super::resolve_default_tools(entries.clone()),
-            ["bash", "edit", "read", "write"]
+            ["read", "bash", "edit", "write"]
                 .into_iter()
                 .map(str::to_owned)
-                .collect()
+                .collect::<Vec<_>>()
         );
         super::merge_default_tools(
             &mut entries,
@@ -2443,10 +2458,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             super::resolve_default_tools(entries),
-            ["find", "grep", "read"]
+            ["read", "grep", "find"]
                 .into_iter()
                 .map(str::to_owned)
-                .collect()
+                .collect::<Vec<_>>()
         );
 
         let mut empty = None;
@@ -2467,7 +2482,7 @@ mod tests {
             model_choices: vec!["mu-demo".into()],
             hide_thinking_block: false,
             retry: super::RetryPolicy::default(),
-            enabled_tools: ["grep".to_owned()].into_iter().collect(),
+            enabled_tools: vec!["grep".to_owned()],
         })
         .unwrap();
         let exposed = agent
@@ -2486,14 +2501,17 @@ mod tests {
         let defaults = super::resolve_default_tools(None);
         assert_eq!(
             super::apply_tool_selection(&defaults, &["-bash".into(), "+grep".into()]).unwrap(),
-            ["edit", "grep", "read", "write"]
+            ["read", "edit", "write", "grep"]
                 .into_iter()
                 .map(str::to_owned)
-                .collect()
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             super::apply_tool_selection(&defaults, &["read".into(), "gr*".into()]).unwrap(),
-            ["grep", "read"].into_iter().map(str::to_owned).collect()
+            ["read", "grep"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         );
         assert!(super::apply_tool_selection(&defaults, &["read".into(), "+grep".into()]).is_err());
     }
