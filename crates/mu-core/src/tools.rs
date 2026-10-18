@@ -1333,9 +1333,11 @@ fn default_bash_shell() -> Result<PathBuf, ToolError> {
         if let Some(shell) = known_locations.into_iter().find(|path| path.is_file()) {
             return Ok(shell);
         }
-        if let Some(shell) = std::env::var_os("PATH")
+        let path_directories = std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Some(shell) = path_directories
             .into_iter()
-            .flat_map(std::env::split_paths)
             .map(|directory| directory.join("bash.exe"))
             .find(|path| path.is_file())
         {
