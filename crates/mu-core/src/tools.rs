@@ -936,8 +936,8 @@ fn parse_list_directory_input(cwd: &Path, args: &Value) -> Result<ListDirectoryI
     Ok(ListDirectoryInput { path, limit })
 }
 
-fn trim_fd_output_line(line: &str) -> &str {
-    line.trim_end_matches(is_javascript_trim_whitespace)
+fn trim_javascript_whitespace(line: &str) -> &str {
+    line.trim_matches(is_javascript_trim_whitespace)
 }
 
 fn is_javascript_trim_whitespace(character: char) -> bool {
@@ -964,6 +964,39 @@ fn node_scandir_error(path: &Path, error: std::io::Error) -> String {
         _ => return error.to_string(),
     };
     format!("{code}: {message}, scandir '{}'", path.display())
+}
+
+fn relativize_fd_find_output(
+    entry_path: &Path,
+    search_root: &Path,
+    is_directory: bool,
+) -> Vec<String> {
+    let mut raw_output_path = entry_path.to_string_lossy().into_owned();
+    if is_directory && !raw_output_path.ends_with(std::path::MAIN_SEPARATOR) {
+        raw_output_path.push(std::path::MAIN_SEPARATOR);
+    }
+
+    raw_output_path
+        .split('\n')
+        .filter_map(|raw_line| {
+            let line = trim_javascript_whitespace(raw_line);
+            if line.is_empty() {
+                return None;
+            }
+            let had_trailing_separator = line.ends_with('/') || line.ends_with('\\');
+            let path = Path::new(line);
+            let relative = if path.is_absolute() {
+                path.strip_prefix(search_root).unwrap_or(path)
+            } else {
+                path
+            };
+            let mut result = relative.to_string_lossy().replace('\\', "/");
+            if had_trailing_separator && !result.ends_with('/') {
+                result.push('/');
+            }
+            Some(result)
+        })
+        .collect()
 }
 
 fn sort_directory_entries(entries: &mut [String]) {
@@ -1515,15 +1548,12 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         if limit != 0 && results.len() >= limit {
             break;
         }
-        if std::fs::symlink_metadata(&entry_path).is_ok_and(|metadata| metadata.is_dir()) {
+        let is_directory =
+            std::fs::symlink_metadata(&entry_path).is_ok_and(|metadata| metadata.is_dir());
+        if is_directory {
             display.push('/');
         }
-        let trimmed = trim_fd_output_line(&display);
-        results.push(if trimmed.is_empty() {
-            "/".to_owned()
-        } else {
-            trimmed.to_owned()
-        });
+        results.extend(relativize_fd_find_output(&entry_path, &path, is_directory));
     }
     if results.is_empty() {
         return Ok(ToolResult::text("No files found matching pattern"));
@@ -2139,8 +2169,8 @@ mod tests {
 
     #[test]
     fn find_output_trim_matches_javascript_bom_whitespace_behavior() {
-        assert_eq!(trim_fd_output_line(" file \u{feff}"), " file");
-        assert_eq!(trim_fd_output_line("file\u{0085}"), "file\u{0085}");
+        assert_eq!(trim_javascript_whitespace(" file \u{feff}"), "file");
+        assert_eq!(trim_javascript_whitespace("file\u{0085}"), "file\u{0085}");
     }
 
     #[test]

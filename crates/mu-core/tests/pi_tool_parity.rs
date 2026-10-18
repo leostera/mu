@@ -1103,6 +1103,18 @@ async fn pi_find_stops_parent_gitignore_rules_at_nested_repository_boundaries() 
 }
 
 #[tokio::test]
+async fn pi_find_parses_newline_filenames_like_fd_readline_output() {
+    let dir = temp_dir("find-newline-name");
+    fs::write(dir.join("first \n second.txt"), "content").unwrap();
+
+    let result = execute(&dir, "find", &json!({"pattern":"*.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "first\nsecond.txt");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_keeps_fd_root_marker_when_a_name_trims_to_empty() {
     let dir = temp_dir("find-whitespace-only-name");
     fs::write(dir.join("   "), "content").unwrap();
