@@ -855,6 +855,19 @@ async fn pi_find_matches_path_globs_from_nested_roots_and_absolute_patterns() {
 }
 
 #[tokio::test]
+async fn pi_grep_ignores_an_empty_glob_filter() {
+    let dir = temp_dir("grep-empty-glob");
+    fs::write(dir.join("match.txt"), "needle\n").unwrap();
+    fs::write(dir.join("other.md"), "needle\n").unwrap();
+
+    let result = execute(&dir, "grep", &json!({"pattern":"needle","glob":""}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "match.txt:1: needle\nother.md:1: needle");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_optional_search_arguments_treat_null_like_pi_defaults() {
     let dir = temp_dir("search-null-defaults");
     fs::write(dir.join("match.txt"), "needle\n").unwrap();

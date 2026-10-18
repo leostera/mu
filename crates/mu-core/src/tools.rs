@@ -1107,6 +1107,7 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
     };
     let glob = match object.get("glob") {
         None | Some(Value::Null) => None,
+        Some(Value::String(glob)) if glob.is_empty() => None,
         Some(Value::String(glob)) => Some(
             Glob::new(glob)
                 .map_err(|error| ToolError::Command(format!("rg: {error}")))?
