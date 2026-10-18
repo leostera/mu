@@ -1307,16 +1307,44 @@ async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let timeout = shell_timeout(args)?;
     let started_at = Instant::now();
     let command = string_arg(args, "command")?;
-    #[cfg(windows)]
-    let mut process = tokio::process::Command::new("cmd");
-    #[cfg(windows)]
-    process.args(["/C", command]);
-    #[cfg(not(windows))]
-    let mut process = tokio::process::Command::new("sh");
-    #[cfg(not(windows))]
+    let shell = default_bash_shell()?;
+    let mut process = tokio::process::Command::new(shell);
     process.args(["-c", command]);
     let output = run_shell_process(cwd, process, timeout).await?;
     Ok(shell_result(output, started_at))
+}
+
+fn default_bash_shell() -> Result<PathBuf, ToolError> {
+    #[cfg(not(windows))]
+    {
+        if Path::new("/bin/bash").is_file() {
+            return Ok(PathBuf::from("/bin/bash"));
+        }
+        Ok(PathBuf::from("bash"))
+    }
+    #[cfg(windows)]
+    {
+        let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+        let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+        let known_locations = program_files
+            .into_iter()
+            .chain(program_files_x86)
+            .map(|directory| directory.join("Git/bin/bash.exe"));
+        if let Some(shell) = known_locations.into_iter().find(|path| path.is_file()) {
+            return Ok(shell);
+        }
+        if let Some(shell) = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(std::env::split_paths)
+            .map(|directory| directory.join("bash.exe"))
+            .find(|path| path.is_file())
+        {
+            return Ok(shell);
+        }
+        Err(ToolError::Command(
+            "No bash shell found. Install Git for Windows or add bash.exe to PATH.".into(),
+        ))
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -2018,6 +2046,24 @@ mod tests {
                 .to_string()
                 .contains("Command timed out after 0.05 seconds")
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_runs_with_bash_semantics_instead_of_posix_sh() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result = execute(
+            &dir,
+            "bash",
+            &json!({"command":"[[ -n bash ]] && printf bash-version"}),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.content.starts_with("bash-version"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
