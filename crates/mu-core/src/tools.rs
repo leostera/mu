@@ -877,6 +877,10 @@ fn parse_list_directory_input(cwd: &Path, args: &Value) -> Result<ListDirectoryI
     Ok(ListDirectoryInput { path, limit })
 }
 
+fn sort_directory_entries(entries: &mut [String]) {
+    entries.sort_by_key(|entry| entry.to_lowercase());
+}
+
 fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let ListDirectoryInput { path, limit } = parse_list_directory_input(cwd, args)?;
     if !path.exists() {
@@ -897,11 +901,7 @@ fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         .map_err(|error| ToolError::Arguments(format!("Cannot read directory: {error}")))?
         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
         .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by(|left, right| {
-        left.to_lowercase()
-            .cmp(&right.to_lowercase())
-            .then_with(|| left.cmp(right))
-    });
+    sort_directory_entries(&mut entries);
 
     let mut names = Vec::new();
     let mut limit_reached = false;
@@ -1979,6 +1979,18 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_sort_preserves_case_variant_order_like_stable_locale_compare() {
+        let mut entries = vec![
+            "a".to_owned(),
+            "A".to_owned(),
+            "b".to_owned(),
+            "B".to_owned(),
+        ];
+        sort_directory_entries(&mut entries);
+        assert_eq!(entries, ["a", "A", "b", "B"]);
+    }
 
     #[test]
     fn edit_permission_errors_match_pi_access_error() {
