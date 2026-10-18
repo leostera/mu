@@ -6,6 +6,56 @@ pub fn canonicalize_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
 }
 
+/// Return the path relative to `cwd` when its lexical resolution stays inside it.
+pub fn cwd_relative_path(file_path: &Path, cwd: &Path) -> Option<PathBuf> {
+    let cwd = absolute_cwd(cwd);
+    resolve_lexically(file_path, &cwd)
+        .strip_prefix(cwd)
+        .ok()
+        .map(Path::to_owned)
+}
+
+/// Format a path relative to the working directory when possible, otherwise absolute.
+pub fn format_path_relative_to_cwd_or_absolute(file_path: &Path, cwd: &Path) -> String {
+    let cwd = absolute_cwd(cwd);
+    let absolute_path = resolve_lexically(file_path, &cwd);
+    let display_path = match absolute_path.strip_prefix(&cwd) {
+        Ok(relative) if relative.as_os_str().is_empty() => PathBuf::from("."),
+        Ok(relative) => relative.to_owned(),
+        Err(_) => absolute_path,
+    };
+    display_path.to_string_lossy().replace('\\', "/")
+}
+
+fn absolute_cwd(cwd: &Path) -> PathBuf {
+    let current_dir = std::env::current_dir().unwrap_or_default();
+    resolve_lexically(cwd, &current_dir)
+}
+
+fn resolve_lexically(path: &Path, cwd: &Path) -> PathBuf {
+    let absolute_path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        cwd.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute_path.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                resolved.push(component.as_os_str());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !resolved.pop() && !absolute_path.is_absolute() {
+                    resolved.push(component.as_os_str());
+                }
+            }
+            std::path::Component::Normal(_) => resolved.push(component.as_os_str()),
+        }
+    }
+    resolved
+}
+
 /// Whether a source reference is local, matching Pi's extension path rules.
 pub fn is_local_path(value: &str) -> bool {
     let value = value.trim();
@@ -60,6 +110,25 @@ mod tests {
         }
         assert_eq!(canonicalize_path(&missing), missing);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cwd_relative_formatting_uses_lexically_resolved_paths() {
+        let cwd = Path::new("/workspace/project");
+        assert_eq!(
+            cwd_relative_path(Path::new("src/../README.md"), cwd),
+            Some(PathBuf::from("README.md"))
+        );
+        assert_eq!(cwd_relative_path(Path::new("."), cwd), Some(PathBuf::new()));
+        assert_eq!(cwd_relative_path(Path::new("../sibling/file"), cwd), None);
+        assert_eq!(
+            format_path_relative_to_cwd_or_absolute(Path::new("."), cwd),
+            "."
+        );
+        assert_eq!(
+            format_path_relative_to_cwd_or_absolute(Path::new("../sibling/file"), cwd),
+            "/workspace/sibling/file"
+        );
     }
 
     #[test]
