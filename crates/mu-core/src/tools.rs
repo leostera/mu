@@ -1390,6 +1390,7 @@ async fn finish_capture(
 async fn run_shell_process(
     cwd: &Path,
     shell_name: &str,
+    temp_file_prefix: &str,
     mut process: tokio::process::Command,
     timeout: Option<Duration>,
     environment: &HashMap<String, String>,
@@ -1429,15 +1430,32 @@ async fn run_shell_process(
                 terminate_process_tree(&mut child).await;
                 let _ = child.wait().await;
                 finish_capture(capture, &mut updates_receiver).await;
-                let partial = String::from_utf8_lossy(&captured.lock().await).into_owned();
-                let partial = sanitize_shell_output(&partial);
-                let timeout_message =
-                    format!("Command timed out after {} seconds", timeout.as_secs_f64());
-                let message = if partial.is_empty() {
-                    timeout_message
-                } else {
-                    format!("{partial}\n\n{timeout_message}")
-                };
+                let full_output =
+                    sanitize_shell_output(&String::from_utf8_lossy(&captured.lock().await));
+                let (mut message, truncation) = truncate_shell_output(
+                    &full_output,
+                    BASH_OUTPUT_MAX_LINES,
+                    TOOL_OUTPUT_MAX_BYTES,
+                );
+                if let Some(truncation) = truncation {
+                    let path = std::env::temp_dir()
+                        .join(format!("{temp_file_prefix}-{}.txt", uuid::Uuid::new_v4()));
+                    if std::fs::write(&path, &full_output).is_ok() {
+                        append_shell_truncation_notice(
+                            &mut message,
+                            &truncation,
+                            &full_output,
+                            &path.to_string_lossy(),
+                        );
+                    }
+                }
+                if message.is_empty() {
+                    message.push_str("(no output)");
+                }
+                message.push_str(&format!(
+                    "\n\nCommand timed out after {} seconds",
+                    timeout.as_secs_f64()
+                ));
                 return Err(ToolError::Command(message));
             }
         },
@@ -1462,7 +1480,7 @@ async fn run_bash(
     let shell = default_bash_shell()?;
     let mut process = tokio::process::Command::new(shell);
     process.args(["-c", command]);
-    let output = run_shell_process(cwd, "bash", process, timeout, environment).await?;
+    let output = run_shell_process(cwd, "bash", "pi-bash", process, timeout, environment).await?;
     Ok(shell_result(output, started_at, "pi-bash"))
 }
 
@@ -1605,7 +1623,15 @@ async fn run_powershell(
             "-Command",
             &command,
         ]);
-        let output = run_shell_process(cwd, "PowerShell", process, timeout, environment).await?;
+        let output = run_shell_process(
+            cwd,
+            "PowerShell",
+            "pi-powershell",
+            process,
+            timeout,
+            environment,
+        )
+        .await?;
         Ok(shell_result(output, started_at, "pi-powershell"))
     }
 }
@@ -2470,6 +2496,46 @@ mod tests {
                 .ends_with("Command terminated without an exit code")
         );
         assert!(result.structured_content.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_timeout_persists_full_truncated_output_like_pi() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = execute(
+            &dir,
+            "bash",
+            &json!({"command":"i=0; while [ $i -lt 3000 ]; do printf 'line\\n'; i=$((i + 1)); done; while :; do :; done","timeout":1}),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Command timed out after 1 seconds"));
+        assert!(
+            message.contains("Showing lines 1001-3000 of 3000"),
+            "{message}"
+        );
+        let full_path = message
+            .split("Full output: ")
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap();
+        assert!(
+            Path::new(full_path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("pi-bash-")
+        );
+        assert_eq!(
+            std::fs::read_to_string(full_path).unwrap().lines().count(),
+            3000
+        );
+        std::fs::remove_file(full_path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
