@@ -967,6 +967,16 @@ fn is_javascript_trim_whitespace(character: char) -> bool {
     )
 }
 
+fn node_stat_error(path: &Path, error: std::io::Error) -> String {
+    let (code, message) = match error.kind() {
+        std::io::ErrorKind::NotFound => ("ENOENT", "no such file or directory"),
+        std::io::ErrorKind::PermissionDenied => ("EACCES", "permission denied"),
+        std::io::ErrorKind::NotADirectory => ("ENOTDIR", "not a directory"),
+        _ => return error.to_string(),
+    };
+    format!("{code}: {message}, stat '{}'", path.display())
+}
+
 fn node_scandir_error(path: &Path, error: std::io::Error) -> String {
     let (code, message) = match error.kind() {
         std::io::ErrorKind::NotFound => ("ENOENT", "no such file or directory"),
@@ -1075,7 +1085,8 @@ fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             path.display()
         )));
     }
-    let metadata = std::fs::metadata(&path)?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| ToolError::Command(node_stat_error(&path, error)))?;
     if !metadata.is_dir() {
         return Err(ToolError::Command(format!(
             "Not a directory: {}",
@@ -2257,6 +2268,15 @@ mod tests {
     fn find_output_trim_matches_javascript_bom_whitespace_behavior() {
         assert_eq!(trim_javascript_whitespace(" file \u{feff}"), "file");
         assert_eq!(trim_javascript_whitespace("file\u{0085}"), "file\u{0085}");
+    }
+
+    #[test]
+    fn ls_stat_errors_match_node_common_error_codes() {
+        let error = node_stat_error(
+            Path::new("private-dir"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        assert_eq!(error, "EACCES: permission denied, stat 'private-dir'");
     }
 
     #[test]
