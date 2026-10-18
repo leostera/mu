@@ -741,24 +741,33 @@ fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         return Ok(ToolResult::text("(empty directory)"));
     }
 
-    let (mut output, truncated) = truncate_tool_output(&names.join("\n"));
+    let raw_output = names.join("\n");
+    let (mut output, truncated) = truncate_tool_output(&raw_output);
+    let mut details = serde_json::Map::new();
     let mut notices = Vec::new();
     if limit_reached {
         notices.push(format!(
             "{limit} entries limit reached. Use limit={} for more",
             limit * 2.0
         ));
+        details.insert("entryLimitReached".into(), json!(limit));
     }
     if truncated {
         notices.push(format!(
             "{} limit reached",
             format_size(TOOL_OUTPUT_MAX_BYTES)
         ));
+        details.insert(
+            "truncation".into(),
+            tool_truncation_details(&raw_output, &output, TOOL_OUTPUT_MAX_BYTES),
+        );
     }
     if !notices.is_empty() {
         output.push_str(&format!("\n\n[{}]", notices.join(". ")));
     }
-    Ok(ToolResult::text(output))
+    let mut result = ToolResult::text(output);
+    result.details = (!details.is_empty()).then_some(Value::Object(details));
+    Ok(result)
 }
 
 fn truncate_tool_output(content: &str) -> (String, bool) {
@@ -1069,7 +1078,6 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     }
 
     let mut results = Vec::new();
-    let mut limit_reached = false;
     let mut walker = WalkBuilder::new(&path);
     walker.hidden(false).require_git(false);
     for entry in walker.build() {
@@ -1090,7 +1098,6 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             continue;
         }
         if results.len() >= limit {
-            limit_reached = true;
             break;
         }
         if entry.file_type().is_some_and(|kind| kind.is_dir()) {
@@ -1102,24 +1109,31 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         return Ok(ToolResult::text("No files found matching pattern"));
     }
 
-    let (mut output, byte_truncated) = truncate_tool_output(&results.join("\n"));
+    let limit_reached = results.len() >= limit;
+    let raw_output = results.join("\n");
+    let (mut output, byte_truncated) = truncate_tool_output(&raw_output);
+    let mut details = serde_json::Map::new();
     let mut notices = Vec::new();
     if limit_reached {
-        notices.push(format!(
-            "{limit} results limit reached. Use limit={} for more, or refine pattern",
-            limit.saturating_mul(2)
-        ));
+        notices.push(format!("{limit} results limit reached"));
+        details.insert("resultLimitReached".into(), json!(limit));
     }
     if byte_truncated {
         notices.push(format!(
             "{} limit reached",
             format_size(TOOL_OUTPUT_MAX_BYTES)
         ));
+        details.insert(
+            "truncation".into(),
+            tool_truncation_details(&raw_output, &output, TOOL_OUTPUT_MAX_BYTES),
+        );
     }
     if !notices.is_empty() {
         output.push_str(&format!("\n\n[{}]", notices.join(". ")));
     }
-    Ok(ToolResult::text(output))
+    let mut result = ToolResult::text(output);
+    result.details = (!details.is_empty()).then_some(Value::Object(details));
+    Ok(result)
 }
 
 async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
@@ -1591,6 +1605,10 @@ mod tests {
         assert_eq!(
             result.content,
             "alpha\nbeta\n\n[2 entries limit reached. Use limit=4 for more]"
+        );
+        assert_eq!(
+            result.details.as_ref().unwrap()["entryLimitReached"].as_f64(),
+            Some(2.0)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

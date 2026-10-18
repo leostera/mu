@@ -294,6 +294,24 @@ async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
     cleanup(&dir);
 }
 
+// Pi source: packages/coding-agent/test/tools.test.ts, find result-limit cases.
+#[tokio::test]
+async fn pi_find_preserves_result_limit_details() {
+    let dir = temp_dir("find-limit");
+    fs::write(dir.join("one.txt"), "one").unwrap();
+    fs::write(dir.join("two.txt"), "two").unwrap();
+    let result = execute(
+        &dir,
+        "find",
+        &json!({"pattern":"*.txt","path":".","limit":1}),
+    )
+    .await
+    .unwrap();
+    assert!(result.content.contains("[1 results limit reached]"));
+    assert_eq!(result.details.as_ref().unwrap()["resultLimitReached"], 1);
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts, grep limit cases.
 #[tokio::test]
 async fn pi_grep_reports_a_limit_only_when_an_additional_match_exists() {

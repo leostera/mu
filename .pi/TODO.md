@@ -47,8 +47,8 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 ### Search and listing tools
 
 - [ ] Complete `grep` parity: Mu now supports regex/literal search, ignore-case, glob, `--`-safe patterns, `.gitignore`/hidden traversal, context, exact next-match limit detection, and match/line-truncation details; align ripgrep edge behavior, byte-truncation metadata, execution-context cwd, and cancellation.
-- [ ] Complete `find` parity: Mu now supports hidden files, `.gitignore`, basic glob/path matching, relative POSIX output, and result/byte limits; align fd's nested-repository and glob semantics, deterministic ordering, structured limit/truncation details, execution-context cwd, and cancellation.
-- [ ] Complete `ls` parity: Mu now lists dotfiles, marks directories, sorts entries, and handles basic limits/errors; add Pi's structured truncation/entry-limit details, execution-context cwd override, cancellation, and remaining error/path semantics.
+- [ ] Complete `find` parity: Mu now supports hidden files, `.gitignore`, basic glob/path matching, normalized cwd paths, relative POSIX output, and Pi-shaped result-limit details; align fd's nested-repository/glob semantics, deterministic ordering, byte-truncation details, execution-context cwd, and cancellation.
+- [ ] Complete `ls` parity: Mu now lists dotfiles, marks directories, sorts entries, resolves normalized cwd paths, and returns entry-limit details; add structured byte-truncation details, execution-context cwd override, cancellation, and remaining error/path semantics.
 - [ ] Use injectable filesystem/search operations for deterministic tests; do not make required parity tests depend on downloads, network access, or installed `rg`/`fd` binaries.
 - [ ] Port every relevant case in pinned `tools.test.ts`, `edit-tool-legacy-input.test.ts`, `path-utils.test.ts`, `default-tools-setting.test.ts`, `builtin-tool-strict-mode.test.ts`, `tool-system-prompt-contributions.test.ts`, `tool-result-images.test.ts`, `powershell-tool.test.ts`, plus focused Bash/process/renderer suites. Activate ignored Mu specs only when implementation and assertions match.
 
