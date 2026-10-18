@@ -26,7 +26,7 @@ pub enum ToolError {
     Arguments(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
-    #[error("command failed: {0}")]
+    #[error("{0}")]
     Command(String),
 }
 

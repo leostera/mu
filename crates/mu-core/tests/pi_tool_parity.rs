@@ -652,10 +652,13 @@ async fn pi_bash_reports_a_missing_working_directory_before_spawn() {
     let error = execute(&missing, "bash", &json!({"command":"true"}))
         .await
         .unwrap_err();
-    assert!(error.to_string().contains(&format!(
-        "Working directory does not exist: {}\nCannot execute bash commands.",
-        missing.display()
-    )));
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Working directory does not exist: {}\nCannot execute bash commands.",
+            missing.display()
+        )
+    );
     cleanup(missing.parent().unwrap());
 }
 
