@@ -3,14 +3,16 @@ mod terminal;
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    future::Future,
     io,
     ops::{Deref, DerefMut},
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use mu_core::{AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior};
+use mu_core::{AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -1039,14 +1041,32 @@ impl App {
             agent.provider().to_owned(),
             agent.session_path().display().to_string(),
         );
-        app.prompt_queue = agent.prompt_queue();
-        app.hide_thinking = agent.hide_thinking_block();
-        app.models = agent.model_choices().to_vec();
-        app.model_selection = app
+        app.apply_agent_metadata(agent);
+        app
+    }
+
+    fn apply_agent_metadata(&mut self, agent: &MuAgent) {
+        self.model = agent.model().to_owned();
+        self.provider = agent.provider().to_owned();
+        self.session_path = agent.session_path().display().to_string();
+        self.prompt_queue = agent.prompt_queue();
+        self.hide_thinking = agent.hide_thinking_block();
+        self.models = agent.model_choices().to_vec();
+        self.model_selection = self
             .models
             .iter()
             .position(|model| model == agent.model())
             .unwrap_or(0);
+    }
+
+    fn starting() -> Self {
+        let mut app = Self::from_metadata(
+            "Starting…".into(),
+            "mu".into(),
+            "Loading settings and session…".into(),
+        );
+        app.loading = true;
+        app.retry_status = Some("Starting Mu…".into());
         app
     }
 
@@ -1295,24 +1315,66 @@ impl App {
     }
 }
 
+type StartupFuture = Pin<Box<dyn Future<Output = Result<MuAgent, AgentError>> + Send>>;
+
 pub async fn run(agent: MuAgent) -> Result<(), Box<dyn std::error::Error>> {
+    run_loop(Some(agent), None).await
+}
+
+pub async fn run_starting<F>(startup: F) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: Future<Output = Result<MuAgent, AgentError>> + Send + 'static,
+{
+    run_loop(None, Some(Box::pin(startup))).await
+}
+
+async fn run_loop(
+    initial_agent: Option<MuAgent>,
+    startup: Option<StartupFuture>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _terminal_session = terminal::TerminalSession::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut app = App::new(&agent);
-    let agent = Arc::new(Mutex::new(agent));
+    let mut app = initial_agent.as_ref().map_or_else(App::starting, App::new);
+    let mut agent = initial_agent.map(|agent| Arc::new(Mutex::new(agent)));
     let (tx, mut rx) = mpsc::unbounded_channel();
 
+    // Draw the startup shell before doing configuration, session, provider, or skill setup.
+    terminal.draw(|frame| render(frame, &mut app))?;
+    let mut startup_task = startup.map(tokio::spawn);
     loop {
         terminal.draw(|frame| render(frame, &mut app))?;
         if app.quit {
             break;
         }
         tokio::select! {
+            result = async {
+                startup_task
+                    .as_mut()
+                    .expect("startup branch only runs while initialization is pending")
+                    .await
+            }, if agent.is_none() && startup_task.is_some() => {
+                startup_task = None;
+                let loaded_agent = match result {
+                    Ok(Ok(agent)) => agent,
+                    Ok(Err(error)) => return Err(Box::new(error)),
+                    Err(error) => return Err(Box::new(error)),
+                };
+                app.apply_agent_metadata(&loaded_agent);
+                app.loading = false;
+                app.retry_status = None;
+                agent = Some(Arc::new(Mutex::new(loaded_agent)));
+            },
             event = next_event() => if let Some(event) = event {
                 match event {
-                    Event::Key(key) => handle_key(key, &mut app, Arc::clone(&agent), tx.clone()),
+                    Event::Key(key) => {
+                        if let Some(agent) = agent.as_ref() {
+                            handle_key(key, &mut app, Arc::clone(agent), tx.clone());
+                        } else {
+                            handle_startup_key(key, &mut app);
+                        }
+                    },
                     Event::Mouse(mouse) => handle_mouse(mouse.kind, &mut app),
-                    Event::Paste(text) if !app.model_selector_open => {
+                    Event::Paste(text) if !app.model_selector_open && agent.is_some() => {
                         app.composer.insert_text(&text);
                         app.command_selection = 0;
                     },
@@ -1320,18 +1382,32 @@ pub async fn run(agent: MuAgent) -> Result<(), Box<dyn std::error::Error>> {
                     _ => {},
                 }
             },
-            event = rx.recv(), if app.loading => if let Some(event) = event {
+            event = rx.recv(), if app.loading && agent.is_some() => if let Some(event) = event {
                 let finished = matches!(&event, UiEvent::Finished(_));
                 app.apply(event);
                 if finished {
-                    if let Some((prompt, behavior)) = app.prompt_queue.take_next() {
-                        app.submit_queued_prompt(prompt, behavior, Arc::clone(&agent), tx.clone());
+                    if let (Some(agent), Some((prompt, behavior))) =
+                        (agent.as_ref(), app.prompt_queue.take_next())
+                    {
+                        app.submit_queued_prompt(prompt, behavior, Arc::clone(agent), tx.clone());
                     }
                 }
             },
         }
     }
+    if let Some(startup_task) = startup_task {
+        startup_task.abort();
+    }
     Ok(())
+}
+
+fn handle_startup_key(key: KeyEvent, app: &mut App) {
+    if key.code == KeyCode::Esc
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        || (key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        app.quit = true;
+    }
 }
 
 async fn next_event() -> Option<Event> {
@@ -2110,13 +2186,35 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 mod tests {
     use super::{
         AgentEvent, App, Composer, ComposerAction, Message, Role, UiEvent, filtered_commands,
-        handle_key, handle_mouse, insert_char, render,
+        handle_key, handle_mouse, handle_startup_key, insert_char, render,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use mu_core::{MuAgent, PromptBehavior};
     use ratatui::{Terminal, backend::TestBackend};
     use std::sync::Arc;
     use tokio::sync::{Mutex, mpsc};
+
+    #[test]
+    fn startup_shell_renders_before_agent_metadata_is_available() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut app = App::starting();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..24)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Starting…"));
+        assert!(screen.contains("Starting Mu…"));
+        assert!(app.loading);
+        assert!(app.messages.is_empty());
+
+        handle_startup_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut app,
+        );
+        assert!(app.quit);
+    }
 
     #[tokio::test]
     async fn retry_status_is_visible_and_cancel_marks_the_turn_interrupted() {

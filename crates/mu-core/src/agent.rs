@@ -37,6 +37,7 @@ pub struct SessionOptions {
     pub directory: Option<PathBuf>,
     pub id: Option<String>,
     pub id_prefix: Option<String>,
+    pub continue_latest: bool,
 }
 
 struct Config {
@@ -1021,8 +1022,14 @@ fn resolve_session_options(
         directory,
         id,
         id_prefix,
+        continue_latest,
     } = options;
     let requested_path = path
+        .or_else(|| {
+            continue_latest.then(|| {
+                latest_session_path(&config.agent_dir, &config.cwd, directory.as_deref())
+            })?
+        })
         .or_else(|| {
             id.as_deref().and_then(|id| {
                 find_session_id_path(
@@ -1988,6 +1995,16 @@ mod tests {
         .unwrap();
         assert_eq!(opened_path, new_path);
         assert_eq!(opened_session.header().unwrap().id.as_str(), "requested-id");
+        let (continued_path, _, _) = resolve_session_options(
+            &config,
+            SessionOptions {
+                directory: Some(session_dir.clone()),
+                continue_latest: true,
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(continued_path, new_path);
         assert!(
             resolve_session_options(
                 &config,

@@ -96,33 +96,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.mode != OutputMode::Text {
         return Err(format!("--mode {:?} is not implemented yet", cli.mode).into());
     }
-    let (session_file, session_selector) = if cli.continue_session {
-        (
-            Some(
-                mu_core::latest_session_for_current_cwd(cli.session_dir.as_deref())?.ok_or(
-                    "--continue requested, but no previous session exists for this working directory",
-                )?,
-            ),
-            None,
-        )
-    } else {
-        match cli.session {
-            Some(selector)
-                if selector.contains('/')
-                    || selector.contains('\\')
-                    || selector.ends_with(".jsonl") =>
-            {
-                (Some(PathBuf::from(selector)), None)
-            }
-            Some(selector) => (None, Some(selector)),
-            None => (None, None),
+    let (session_file, session_selector) = match cli.session {
+        Some(selector)
+            if selector.contains('/')
+                || selector.contains('\\')
+                || selector.ends_with(".jsonl") =>
+        {
+            (Some(PathBuf::from(selector)), None)
         }
+        Some(selector) => (None, Some(selector)),
+        None => (None, None),
     };
     let session_options = mu_core::SessionOptions {
         path: session_file,
         directory: cli.session_dir,
         id: cli.session_id,
         id_prefix: session_selector,
+        continue_latest: cli.continue_session,
     };
 
     if cli.print || !cli.prompt.is_empty() || !is_terminal {
@@ -138,7 +128,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    tui::run(mu_core::MuAgent::connect_with_options(session_options).await?).await
+    tui::run_starting(async move { mu_core::MuAgent::connect_with_options(session_options).await })
+        .await
 }
 
 fn read_stdin_prompt(is_terminal: bool) -> Result<String, std::io::Error> {
@@ -196,6 +187,16 @@ mod tests {
         assert_eq!(
             session_dir.session_dir,
             Some(PathBuf::from("/tmp/sessions"))
+        );
+        assert!(
+            Cli::try_parse_from([
+                "mu",
+                "--session-id",
+                "my-session",
+                "--session",
+                "partial-id"
+            ])
+            .is_err()
         );
     }
 
