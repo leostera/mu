@@ -10,6 +10,7 @@ use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -292,59 +293,7 @@ fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         })
         .collect::<Vec<_>>();
 
-    let mut replacements = Vec::with_capacity(normalized_edits.len());
-    for (index, edit) in normalized_edits.iter().enumerate() {
-        if edit.old_text.is_empty() {
-            return Err(ToolError::Arguments(format!(
-                "edits[{index}].oldText must not be empty in {}.",
-                path.display()
-            )));
-        }
-        let matches = normalized
-            .match_indices(&edit.old_text)
-            .map(|(start, _)| start)
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [] => {
-                return Err(ToolError::Arguments(format!(
-                    "Could not find edits[{index}] in {}. The oldText must match exactly including all whitespace and newlines.",
-                    path.display()
-                )));
-            }
-            [start] => {
-                replacements.push((*start, edit.old_text.len(), edit.new_text.as_str(), index))
-            }
-            _ => {
-                return Err(ToolError::Arguments(format!(
-                    "Found {} occurrences of edits[{index}] in {}. Each oldText must be unique. Please provide more context to make it unique.",
-                    matches.len(),
-                    path.display()
-                )));
-            }
-        }
-    }
-    replacements.sort_by_key(|(start, _, _, _)| *start);
-    for pair in replacements.windows(2) {
-        let (start, length, _, index) = pair[0];
-        let (next_start, _, _, next_index) = pair[1];
-        if start + length > next_start {
-            return Err(ToolError::Arguments(format!(
-                "edits[{index}] and edits[{next_index}] overlap in {}. Merge them into one edit or target disjoint regions.",
-                path.display()
-            )));
-        }
-    }
-
-    let mut updated = normalized.clone();
-    for (start, length, replacement, _) in replacements.into_iter().rev() {
-        updated.replace_range(start..start + length, replacement);
-    }
-    if updated == normalized {
-        return Err(ToolError::Arguments(format!(
-            "No changes made to {}. The replacements produced identical content.",
-            path.display()
-        )));
-    }
+    let updated = apply_edits(&normalized, &normalized_edits, &path)?;
     let restored = if line_ending == "\r\n" {
         updated.replace('\n', "\r\n")
     } else {
@@ -356,6 +305,217 @@ fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         normalized_edits.len(),
         path.display()
     )))
+}
+
+#[derive(Clone)]
+struct MatchedEdit {
+    edit_index: usize,
+    start: usize,
+    length: usize,
+    replacement: String,
+}
+
+struct EditLineGroup {
+    first_line: usize,
+    last_line_exclusive: usize,
+    edits: Vec<MatchedEdit>,
+}
+
+fn apply_edits(content: &str, edits: &[TextEdit], path: &Path) -> Result<String, ToolError> {
+    let fuzzy = edits.iter().any(|edit| !content.contains(&edit.old_text));
+    let replacement_base = if fuzzy {
+        normalize_for_fuzzy_match(content)
+    } else {
+        content.to_owned()
+    };
+    let mut matches = Vec::with_capacity(edits.len());
+
+    for (edit_index, edit) in edits.iter().enumerate() {
+        if edit.old_text.is_empty() {
+            let error = if edits.len() == 1 {
+                format!("oldText must not be empty in {}.", path.display())
+            } else {
+                format!(
+                    "edits[{edit_index}].oldText must not be empty in {}.",
+                    path.display()
+                )
+            };
+            return Err(ToolError::Arguments(error));
+        }
+        let fuzzy_old_text = normalize_for_fuzzy_match(&edit.old_text);
+        let search_text = if replacement_base.contains(&edit.old_text) {
+            edit.old_text.as_str()
+        } else {
+            fuzzy_old_text.as_str()
+        };
+        let positions = replacement_base
+            .match_indices(search_text)
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        if positions.is_empty() {
+            let error = if edits.len() == 1 {
+                format!(
+                    "Could not find the exact text in {}. The old text must match exactly including all whitespace and newlines.",
+                    path.display()
+                )
+            } else {
+                format!(
+                    "Could not find edits[{edit_index}] in {}. The oldText must match exactly including all whitespace and newlines.",
+                    path.display()
+                )
+            };
+            return Err(ToolError::Arguments(error));
+        }
+        let normalized_base = normalize_for_fuzzy_match(&replacement_base);
+        let occurrences = normalized_base.match_indices(&fuzzy_old_text).count();
+        if occurrences > 1 {
+            let error = if edits.len() == 1 {
+                format!(
+                    "Found {occurrences} occurrences of the text in {}. The text must be unique. Please provide more context to make it unique.",
+                    path.display()
+                )
+            } else {
+                format!(
+                    "Found {occurrences} occurrences of edits[{edit_index}] in {}. Each oldText must be unique. Please provide more context to make it unique.",
+                    path.display()
+                )
+            };
+            return Err(ToolError::Arguments(error));
+        }
+        let [start] = positions.as_slice() else {
+            continue;
+        };
+        matches.push(MatchedEdit {
+            edit_index,
+            start: *start,
+            length: search_text.len(),
+            replacement: edit.new_text.clone(),
+        });
+    }
+
+    matches.sort_by_key(|edit| edit.start);
+    for pair in matches.windows(2) {
+        if pair[0].start + pair[0].length > pair[1].start {
+            return Err(ToolError::Arguments(format!(
+                "edits[{}] and edits[{}] overlap in {}. Merge them into one edit or target disjoint regions.",
+                pair[0].edit_index,
+                pair[1].edit_index,
+                path.display()
+            )));
+        }
+    }
+
+    let updated = if fuzzy {
+        apply_fuzzy_edits_preserving_untouched_lines(content, &replacement_base, &matches)
+    } else {
+        apply_matched_edits(&replacement_base, &matches)
+    };
+    if updated == content {
+        let error = if edits.len() == 1 {
+            format!(
+                "No changes made to {}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.",
+                path.display()
+            )
+        } else {
+            format!(
+                "No changes made to {}. The replacements produced identical content.",
+                path.display()
+            )
+        };
+        return Err(ToolError::Arguments(error));
+    }
+    Ok(updated)
+}
+
+fn normalize_for_fuzzy_match(text: &str) -> String {
+    text.nfkc()
+        .collect::<String>()
+        .split('\n')
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .chars()
+        .map(|character| match character {
+            '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => '\'',
+            '\u{201c}' | '\u{201d}' | '\u{201e}' | '\u{201f}' => '"',
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+            '\u{00a0}' | '\u{2002}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}' => ' ',
+            character => character,
+        })
+        .collect()
+}
+
+fn apply_matched_edits(content: &str, edits: &[MatchedEdit]) -> String {
+    let mut updated = content.to_owned();
+    for edit in edits.iter().rev() {
+        updated.replace_range(edit.start..edit.start + edit.length, &edit.replacement);
+    }
+    updated
+}
+
+fn apply_fuzzy_edits_preserving_untouched_lines(
+    original: &str,
+    fuzzy_content: &str,
+    edits: &[MatchedEdit],
+) -> String {
+    let line_starts = line_start_offsets(fuzzy_content);
+    let original_line_starts = line_start_offsets(original);
+    let mut groups: Vec<EditLineGroup> = Vec::new();
+    for edit in edits {
+        let first_line = line_index_at(&line_starts, edit.start);
+        let last_line = line_index_at(&line_starts, edit.start + edit.length - 1);
+        if let Some(group) = groups.last_mut()
+            && first_line < group.last_line_exclusive
+        {
+            group.last_line_exclusive = group.last_line_exclusive.max(last_line + 1);
+            group.edits.push(edit.clone());
+        } else {
+            groups.push(EditLineGroup {
+                first_line,
+                last_line_exclusive: last_line + 1,
+                edits: vec![edit.clone()],
+            });
+        }
+    }
+
+    let mut output = String::new();
+    let mut original_offset = 0;
+    for group in groups {
+        let start = line_starts[group.first_line];
+        let end = line_starts
+            .get(group.last_line_exclusive)
+            .copied()
+            .unwrap_or(fuzzy_content.len());
+        let original_start = original_line_starts[group.first_line];
+        let original_end = original_line_starts
+            .get(group.last_line_exclusive)
+            .copied()
+            .unwrap_or(original.len());
+        output.push_str(&original[original_offset..original_start]);
+        let mut changed_lines = fuzzy_content[start..end].to_owned();
+        for edit in group.edits.iter().rev() {
+            let local_start = edit.start - start;
+            changed_lines.replace_range(local_start..local_start + edit.length, &edit.replacement);
+        }
+        output.push_str(&changed_lines);
+        original_offset = original_end;
+    }
+    output.push_str(&original[original_offset..]);
+    output
+}
+
+fn line_start_offsets(content: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (index, byte) in content.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(index + 1);
+        }
+    }
+    starts
+}
+
+fn line_index_at(line_starts: &[usize], offset: usize) -> usize {
+    line_starts.partition_point(|start| *start <= offset) - 1
 }
 
 const LS_DEFAULT_LIMIT: usize = 500;
@@ -1012,7 +1172,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(missing.to_string().contains("Could not find edits[0]"));
+        assert!(
+            missing
+                .to_string()
+                .contains("Could not find the exact text")
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\nafter\n");
 
         let empty = execute(
@@ -1022,11 +1186,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
-            empty
-                .to_string()
-                .contains("edits[0].oldText must not be empty")
-        );
+        assert!(empty.to_string().contains("oldText must not be empty"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\nafter\n");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1086,6 +1246,90 @@ mod tests {
         .await
         .unwrap_err();
         assert!(missing.to_string().contains("Could not find edits[1]"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_fuzzy_matches_unicode_and_preserves_untouched_lines() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        let original = "keep before  \nline one   \nline two  \nkeep after  \n";
+        std::fs::write(&path, original).unwrap();
+
+        execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","edits":[{"oldText":"line one\nline two\n","newText":"replaced\n"}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "keep before  \nreplaced\nkeep after  \n"
+        );
+
+        std::fs::write(&path, "ＡＢＣ１２３\ncafe\u{0301}\n").unwrap();
+        execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","edits":[{"oldText":"ABC123\ncafé\n","newText":"XYZ789\ncoffee\n"}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "XYZ789\ncoffee\n");
+
+        std::fs::write(
+            &path,
+            "console.log(‘hello’);\nrange: 1–5\nhello\u{00a0}world\n",
+        )
+        .unwrap();
+        execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","edits":[
+                {"oldText":"console.log('hello');\n","newText":"console.log('world');\n"},
+                {"oldText":"range: 1-5\n","newText":"range: 10-50\n"},
+                {"oldText":"hello world\n","newText":"hello universe\n"}
+            ]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "console.log('world');\nrange: 10-50\nhello universe\n"
+        );
+
+        std::fs::write(&path, "replace me   \nafter   \n").unwrap();
+        execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","edits":[{"oldText":"replace me\n","newText":"after\n"}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\nafter   \n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_fuzzy_matching_rejects_normalized_duplicates_without_mutation() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file");
+        let original = "hello world  \nhello world\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error = execute(
+            &dir,
+            "edit",
+            &json!({"path":"file","oldText":"hello world","newText":"replacement"}),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Found 2 occurrences"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         std::fs::remove_dir_all(dir).unwrap();
     }

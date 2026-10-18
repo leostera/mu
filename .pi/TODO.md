@@ -34,7 +34,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 - [ ] Implement `read` image parity: MIME detection by file magic, JPEG/PNG/GIF/WebP/BMP support, BMP conversion, unsupported/corrupt image behavior, resize/model limits, vision-capability handling, and ordered image/text blocks.
 - [ ] Complete `write` behavior and success/error messages; share cancellation-safe canonical per-path mutation serialization with `edit` (same-path order, distinct-path concurrency, symlink aliases, queued/in-flight aborts).
 - [ ] Finish `edit` argument compatibility: JSON-stringified arrays, object-shaped edits, mixed legacy fields, malformed input, and exact Pi errors; match no-op failures.
-- [ ] Finish `edit` fuzzy matching (NFKC, trailing whitespace, smart quotes/dashes, special spaces), normalized duplicate detection, untouched-line preservation, and exact-vs-fuzzy preference.
+- [x] Implement `edit` fuzzy matching (NFKC, trailing whitespace, smart quotes/dashes, special spaces), normalized duplicate detection, untouched-line preservation, and exact-first matching; deterministic unit tests cover each category.
 - [ ] Finish `edit` outputs: unified patch, collapsed display diff, first changed line, diff preview, access/permission errors, and no partial writes. Existing subset: exact multi-edit, overlap/uniqueness checks, legacy pair, BOM/CRLF preservation.
 
 ### Shell tools
