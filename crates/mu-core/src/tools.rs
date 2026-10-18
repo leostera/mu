@@ -1966,6 +1966,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn edit_permission_errors_match_pi_access_error() {
+        assert_eq!(
+            edit_file_io_message(
+                Path::new("private.txt"),
+                std::io::ErrorKind::PermissionDenied.into()
+            ),
+            "Could not edit file: private.txt. Error code: EACCES."
+        );
+    }
+
+    #[test]
     fn read_access_errors_match_node_common_error_codes() {
         let path = Path::new("/tmp/private.txt");
         let missing = read_file_io_error(path, std::io::ErrorKind::NotFound.into());
