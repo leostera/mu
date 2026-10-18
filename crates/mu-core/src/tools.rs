@@ -405,13 +405,13 @@ async fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     )))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TextEdit {
+pub struct TextEdit {
     #[serde(rename = "oldText")]
-    old_text: String,
+    pub old_text: String,
     #[serde(rename = "newText")]
-    new_text: String,
+    pub new_text: String,
 }
 
 fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
@@ -510,20 +510,61 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
 }
 
 fn edit_file_io_error(path: &Path, error: std::io::Error) -> ToolError {
+    ToolError::Command(edit_file_io_message(path, error))
+}
+
+fn edit_file_io_message(path: &Path, error: std::io::Error) -> String {
     let code = match error.kind() {
         std::io::ErrorKind::NotFound => "ENOENT",
         std::io::ErrorKind::PermissionDenied => "EACCES",
         _ => {
-            return ToolError::Arguments(format!(
-                "Could not edit file: {}. {error}.",
-                path.display()
-            ));
+            return format!("Could not edit file: {}. {error}.", path.display());
         }
     };
-    ToolError::Arguments(format!(
+    format!(
         "Could not edit file: {}. Error code: {code}.",
         path.display()
-    ))
+    )
+}
+
+/// Compute a non-mutating edit preview, matching Pi's `computeEditsDiff` result shape.
+/// Returns `{ diff, firstChangedLine }` on success or `{ error }` on failure.
+pub fn compute_edit_diff(cwd: &Path, requested_path: &str, edits: &[TextEdit]) -> Value {
+    let path = match resolve_input_path(cwd, requested_path) {
+        Ok(path) => path,
+        Err(error) => return json!({"error": error.to_string()}),
+    };
+    let original = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            return json!({"error": edit_file_io_message(Path::new(requested_path), error)});
+        }
+    };
+    let content = original
+        .strip_prefix('\u{feff}')
+        .unwrap_or(original.as_str());
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized_edits = edits
+        .iter()
+        .cloned()
+        .map(|mut edit| {
+            edit.old_text = edit.old_text.replace("\r\n", "\n").replace('\r', "\n");
+            edit.new_text = edit.new_text.replace("\r\n", "\n").replace('\r', "\n");
+            edit
+        })
+        .collect::<Vec<_>>();
+    let updated = match apply_edits(&normalized, &normalized_edits, Path::new(requested_path)) {
+        Ok(updated) => updated,
+        Err(ToolError::Arguments(message)) | Err(ToolError::Command(message)) => {
+            return json!({"error":message});
+        }
+        Err(ToolError::Io(error)) => return json!({"error":error.to_string()}),
+    };
+    let details = edit_details(&normalized, &updated, Path::new(requested_path));
+    json!({
+        "diff": details["diff"],
+        "firstChangedLine": details["firstChangedLine"],
+    })
 }
 
 fn edit_details(old_content: &str, new_content: &str, path: &Path) -> Value {
@@ -603,7 +644,7 @@ fn apply_edits(content: &str, edits: &[TextEdit], path: &Path) -> Result<String,
                     path.display()
                 )
             };
-            return Err(ToolError::Arguments(error));
+            return Err(ToolError::Command(error));
         }
         let fuzzy_old_text = normalize_for_fuzzy_match(&edit.old_text);
         let search_text = if replacement_base.contains(&edit.old_text) {
@@ -627,7 +668,7 @@ fn apply_edits(content: &str, edits: &[TextEdit], path: &Path) -> Result<String,
                     path.display()
                 )
             };
-            return Err(ToolError::Arguments(error));
+            return Err(ToolError::Command(error));
         }
         let normalized_base = normalize_for_fuzzy_match(&replacement_base);
         let occurrences = normalized_base.match_indices(&fuzzy_old_text).count();
@@ -643,7 +684,7 @@ fn apply_edits(content: &str, edits: &[TextEdit], path: &Path) -> Result<String,
                     path.display()
                 )
             };
-            return Err(ToolError::Arguments(error));
+            return Err(ToolError::Command(error));
         }
         let [start] = positions.as_slice() else {
             continue;
@@ -659,7 +700,7 @@ fn apply_edits(content: &str, edits: &[TextEdit], path: &Path) -> Result<String,
     matches.sort_by_key(|edit| edit.start);
     for pair in matches.windows(2) {
         if pair[0].start + pair[0].length > pair[1].start {
-            return Err(ToolError::Arguments(format!(
+            return Err(ToolError::Command(format!(
                 "edits[{}] and edits[{}] overlap in {}. Merge them into one edit or target disjoint regions.",
                 pair[0].edit_index,
                 pair[1].edit_index,
@@ -685,7 +726,7 @@ fn apply_edits(content: &str, edits: &[TextEdit], path: &Path) -> Result<String,
                 path.display()
             )
         };
-        return Err(ToolError::Arguments(error));
+        return Err(ToolError::Command(error));
     }
     Ok(updated)
 }
@@ -2456,12 +2497,12 @@ mod tests {
         let result = execute(
             &dir,
             "bash",
-            &json!({"command":"(sleep 0.08; printf a; sleep 0.08; printf b; sleep 0.08; printf c; sleep 0.08; printf d) &"}),
+            &json!({"command":"(for i in {1..30}; do sleep 0.01; printf x; done) &"}),
         )
         .await
         .unwrap();
 
-        assert_eq!(result.structured_content.unwrap()["output"], "abcd");
+        assert_eq!(result.structured_content.unwrap()["output"], "x".repeat(30));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

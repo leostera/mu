@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use mu_core::tools::{definitions, execute};
+use mu_core::tools::{TextEdit, compute_edit_diff, definitions, execute};
 use serde_json::{Value, json};
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -146,13 +146,34 @@ async fn pi_edit_reports_enoent_with_the_requested_path() {
     .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "invalid arguments: Could not edit file: missing.txt. Error code: ENOENT."
+        "Could not edit file: missing.txt. Error code: ENOENT."
     );
     assert!(!dir.join("missing.txt").exists());
     cleanup(&dir);
 }
 
 // Pi source: packages/coding-agent/test/edit-tool-legacy-input.test.ts.
+#[tokio::test]
+async fn pi_edit_application_errors_are_returned_without_mu_prefixes() {
+    let dir = temp_dir("edit-apply-error");
+    let path = dir.join("file.txt");
+    fs::write(&path, "original content").unwrap();
+    let error = execute(
+        &dir,
+        "edit",
+        &json!({"path":"file.txt","edits":[{"oldText":"missing","newText":"replacement"}]}),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "Could not find the exact text in file.txt. The old text must match exactly including all whitespace and newlines."
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "original content");
+    cleanup(&dir);
+}
+
 #[tokio::test]
 async fn pi_edit_accepts_legacy_mixed_object_and_stringified_edits() {
     let dir = temp_dir("edit-legacy-input");
@@ -215,6 +236,42 @@ async fn pi_edit_accepts_legacy_mixed_object_and_stringified_edits() {
 }
 
 // Pi source: packages/coding-agent/test/tools.test.ts, edit diff cases.
+#[test]
+fn pi_edit_preview_is_non_mutating_and_returns_the_renderer_result_shape() {
+    let dir = temp_dir("edit-preview");
+    let original = "\u{feff}before\r\nafter\r\n";
+    fs::write(dir.join("preview.txt"), original).unwrap();
+    let preview = compute_edit_diff(
+        &dir,
+        "preview.txt",
+        &[TextEdit {
+            old_text: "before".into(),
+            new_text: "changed".into(),
+        }],
+    );
+
+    assert_eq!(preview["firstChangedLine"], 1);
+    assert!(preview["diff"].as_str().unwrap().contains("changed"));
+    assert_eq!(
+        fs::read_to_string(dir.join("preview.txt")).unwrap(),
+        original
+    );
+
+    let missing = compute_edit_diff(
+        &dir,
+        "missing.txt",
+        &[TextEdit {
+            old_text: "old".into(),
+            new_text: "new".into(),
+        }],
+    );
+    assert_eq!(
+        missing["error"],
+        "Could not edit file: missing.txt. Error code: ENOENT."
+    );
+    cleanup(&dir);
+}
+
 #[tokio::test]
 async fn pi_edit_diff_collapses_large_unchanged_gaps() {
     let dir = temp_dir("edit-diff-gaps");
