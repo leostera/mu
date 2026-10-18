@@ -287,6 +287,24 @@ impl SessionDocument {
         }
     }
 
+    pub fn fork_with_id(
+        &self,
+        cwd: impl Into<String>,
+        id: impl Into<String>,
+        parent_session: impl Into<String>,
+    ) -> Option<Self> {
+        let mut fork = self.clone();
+        let header = fork.records.iter_mut().find_map(|record| match record {
+            SessionRecord::Header(header) => Some(header),
+            SessionRecord::Entry(_) => None,
+        })?;
+        header.id = SessionId(id.into());
+        header.timestamp = now_timestamp();
+        header.cwd = cwd.into();
+        header.parent_session = Some(parent_session.into());
+        Some(fork)
+    }
+
     pub fn append_user_text(&mut self, text: impl Into<String>) {
         let message_timestamp = chrono::Utc::now().timestamp_millis();
         self.append_message(serde_json::json!({
@@ -866,6 +884,27 @@ mod tests {
         AssistantTurnResponse, CURRENT_SESSION_VERSION, MessageCost, MessageUsage, ParentReference,
         SessionDocument, SessionRecord,
     };
+
+    #[test]
+    fn forking_preserves_entries_and_replaces_only_session_header_identity() {
+        let mut source = SessionDocument::new_with_id("/source", "source-id");
+        source.append_user_text("keep this history");
+        source.append_custom_entry("custom-state", serde_json::json!({"count":3}));
+        let source_entries = source.active_branch_entries();
+
+        let fork = source
+            .fork_with_id("/target", "fork-id", "/sessions/source.jsonl")
+            .expect("source document has a header");
+        let header = fork.header().unwrap();
+        assert_eq!(header.id.as_str(), "fork-id");
+        assert_eq!(header.cwd, "/target");
+        assert_eq!(
+            header.parent_session.as_deref(),
+            Some("/sessions/source.jsonl")
+        );
+        assert_eq!(fork.active_branch_entries(), source_entries);
+        assert_eq!(source.header().unwrap().id.as_str(), "source-id");
+    }
 
     #[test]
     fn creates_pi_compatible_linked_message_records() {

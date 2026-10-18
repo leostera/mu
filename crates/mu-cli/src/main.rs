@@ -31,7 +31,8 @@ struct Cli {
             "session",
             "session_id",
             "session_dir",
-            "no_session"
+            "no_session",
+            "fork"
         ]
     )]
     demo: bool,
@@ -71,6 +72,13 @@ struct Cli {
     /// Keep the session in memory without writing it to disk.
     #[arg(long)]
     no_session: bool,
+
+    /// Fork a session file or local session ID/prefix into a new session.
+    #[arg(
+        long,
+        conflicts_with_all = ["session", "continue_session", "resume", "no_session"]
+    )]
+    fork: Option<String>,
 
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
@@ -135,8 +143,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.resume && resumed_file.is_none() {
         return Ok(());
     }
+    let fork_from = if let Some(source) = cli.fork.as_deref() {
+        Some(resolve_session_source(source, cli.session_dir.as_deref())?)
+    } else {
+        None
+    };
     let (session_file, session_selector) = if let Some(path) = resumed_file {
         (Some(path), None)
+    } else if cli.fork.is_some() {
+        (None, None)
     } else {
         match cli.session {
             Some(selector)
@@ -157,6 +172,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         id_prefix: session_selector,
         continue_latest: cli.continue_session,
         no_session: cli.no_session,
+        fork_from,
     };
 
     if cli.print || !is_terminal {
@@ -178,6 +194,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         initial_prompt,
     )
     .await
+}
+
+fn resolve_session_source(
+    selector: &str,
+    session_dir: Option<&std::path::Path>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if selector.contains('/') || selector.contains('\\') || selector.ends_with(".jsonl") {
+        return Ok(PathBuf::from(selector));
+    }
+    let sessions = mu_core::list_sessions_for_current_cwd(session_dir)?;
+    sessions
+        .into_iter()
+        .find(|session| session.id == selector || session.id.starts_with(selector))
+        .map(|session| session.path)
+        .ok_or_else(|| {
+            format!("No session found matching '{selector}' in this working directory").into()
+        })
 }
 
 fn select_session(
@@ -302,6 +335,10 @@ mod tests {
         let no_session =
             Cli::try_parse_from(["mu", "--no-session"]).expect("parse ephemeral session option");
         assert!(no_session.no_session);
+        let fork =
+            Cli::try_parse_from(["mu", "--fork", "/tmp/source.jsonl"]).expect("parse session fork");
+        assert_eq!(fork.fork.as_deref(), Some("/tmp/source.jsonl"));
+        assert!(Cli::try_parse_from(["mu", "--fork", "source", "--continue"]).is_err());
     }
 
     #[test]
@@ -352,6 +389,7 @@ mod tests {
         assert!(help.contains("--session-id"));
         assert!(help.contains("--session-dir"));
         assert!(help.contains("--no-session"));
+        assert!(help.contains("--fork"));
         assert!(help.contains("PROMPT"));
     }
 }

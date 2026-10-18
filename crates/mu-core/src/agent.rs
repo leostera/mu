@@ -46,6 +46,7 @@ pub struct SessionOptions {
     pub id_prefix: Option<String>,
     pub continue_latest: bool,
     pub no_session: bool,
+    pub fork_from: Option<PathBuf>,
 }
 
 struct Config {
@@ -1033,8 +1034,41 @@ fn resolve_session_options(
         id,
         id_prefix,
         continue_latest,
-        no_session: _,
+        no_session,
+        fork_from,
     } = options;
+    if let Some(source_path) = fork_from {
+        let (source, _) = load_session(&source_path)?;
+        let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        validate_session_id(&id)?;
+        if find_session_id_path(
+            &config.agent_dir,
+            &config.cwd,
+            directory.as_deref(),
+            &id,
+            false,
+        )
+        .is_some()
+        {
+            return Err(AgentError::Session(format!(
+                "Session already exists with id '{id}'"
+            )));
+        }
+        let parent_session = source_path.to_string_lossy().into_owned();
+        let session = source
+            .fork_with_id(
+                config.cwd.to_string_lossy().into_owned(),
+                id,
+                parent_session,
+            )
+            .ok_or_else(|| AgentError::Session("source session has no header".into()))?;
+        let path = session_path(config, directory.as_deref());
+        if !no_session {
+            write_session(&session, &path)?;
+        }
+        let history = session_history(&session);
+        return Ok((path, session, history));
+    }
     let requested_path = path
         .or_else(|| {
             continue_latest.then(|| {
@@ -2046,6 +2080,50 @@ mod tests {
             )
             .is_err()
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn forking_a_session_creates_a_new_header_and_preserves_source_history() {
+        let root = std::env::temp_dir().join(format!("mu-session-fork-{}", uuid::Uuid::new_v4()));
+        let source_path = root.join("source.jsonl");
+        let target_cwd = root.join("target");
+        let session_dir = root.join("forks");
+        std::fs::create_dir_all(&target_cwd).unwrap();
+        let mut source = SessionDocument::new_with_id("/source", "source-id");
+        source.append_user_text("forked context");
+        source.append_custom_entry("custom-state", serde_json::json!({"value":7}));
+        source.write_atomic(&source_path).unwrap();
+        let config = Config {
+            agent_dir: root.join("agent"),
+            cwd: target_cwd.clone(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+        };
+
+        let (fork_path, fork, history) = resolve_session_options(
+            &config,
+            SessionOptions {
+                directory: Some(session_dir.clone()),
+                id: Some("fork-id".into()),
+                fork_from: Some(source_path.clone()),
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        let header = fork.header().unwrap();
+        assert_eq!(header.id.as_str(), "fork-id");
+        assert_eq!(header.cwd, target_cwd.to_string_lossy());
+        assert_eq!(
+            header.parent_session.as_deref(),
+            Some(source_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(history[0]["content"][0]["text"], "forked context");
+        assert!(fork_path.exists());
+        assert_eq!(source.header().unwrap().id.as_str(), "source-id");
         std::fs::remove_dir_all(root).unwrap();
     }
 
