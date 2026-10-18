@@ -799,7 +799,7 @@ async fn execute_independent_tool(
         Some(Err(error)) => Err(error),
         None => crate::tools::execute(cwd, &call.name, &call.arguments)
             .await
-            .map(|result| (result.content, false, None))
+            .map(|result| (result.content, result.is_error, None))
             .map_err(|error| error.to_string()),
     }
 }
@@ -1303,7 +1303,7 @@ impl MuAgent {
                         None => self
                             .execute_tool(&call.name, &call.arguments)
                             .await
-                            .map(|result| (result.content, false, None))
+                            .map(|result| (result.content, result.is_error, None))
                             .map_err(|error| error.to_string()),
                     }
                 };

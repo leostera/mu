@@ -213,13 +213,23 @@ async fn pi_ls_lists_dotfiles_and_marks_directories() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, bash nonzero-exit case.
 #[tokio::test]
-#[ignore = "Mu bash still returns an error instead of Pi's structured error result"]
 async fn pi_bash_nonzero_exit_is_returned_as_an_error_tool_result() {
     let dir = temp_dir("bash-exit");
     let result = execute(&dir, "bash", &json!({"command":"echo out; exit 3"}))
         .await
         .unwrap();
     assert_eq!(result.content, "out\n\n\nCommand exited with code 3");
+    assert!(result.is_error);
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["output"],
+        "out\n"
+    );
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["truncated"],
+        false
+    );
+    assert_eq!(result.structured_content.as_ref().unwrap()["exit_code"], 3);
+    assert!(result.structured_content.as_ref().unwrap()["wall_time_seconds"].is_number());
     cleanup(&dir);
 }
 

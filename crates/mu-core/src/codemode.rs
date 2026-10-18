@@ -94,7 +94,9 @@ pub(crate) async fn execute(
                     .map_err(|error| CodeModeError::ExecuteCode {
                         reason: error.to_string(),
                     })?;
-                Ok(Value::String(result.content))
+                Ok(result
+                    .structured_content
+                    .unwrap_or_else(|| Value::String(result.content)))
             }
         })
         .add_function("search_tools", move |args: Value| {

@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    time::Instant,
 };
 
 use globset::{Glob, GlobMatcher};
@@ -22,7 +23,22 @@ pub enum ToolError {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolResult {
+    /// Plain model-facing text until the agent's content-block bridge is complete.
     pub content: String,
+    pub details: Option<Value>,
+    pub structured_content: Option<Value>,
+    pub is_error: bool,
+}
+
+impl ToolResult {
+    fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            details: None,
+            structured_content: None,
+            is_error: false,
+        }
+    }
 }
 
 /// Pi's default coding tool set. Schemas use the same names and argument shapes.
@@ -130,7 +146,7 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     } else {
         truncated_by
     };
-    Ok(ToolResult { content })
+    Ok(ToolResult::text(content))
 }
 
 /// Apply Pi's head truncation to complete lines only, using UTF-8 byte counts.
@@ -189,9 +205,10 @@ fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, content)?;
-    Ok(ToolResult {
-        content: format!("Successfully wrote to {}", path.display()),
-    })
+    Ok(ToolResult::text(format!(
+        "Successfully wrote to {}",
+        path.display()
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,13 +351,11 @@ fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         updated
     };
     std::fs::write(&path, format!("{bom}{restored}"))?;
-    Ok(ToolResult {
-        content: format!(
-            "Successfully replaced {} block(s) in {}.",
-            normalized_edits.len(),
-            path.display()
-        ),
-    })
+    Ok(ToolResult::text(format!(
+        "Successfully replaced {} block(s) in {}.",
+        normalized_edits.len(),
+        path.display()
+    )))
 }
 
 const LS_DEFAULT_LIMIT: usize = 500;
@@ -417,9 +432,7 @@ fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         }
     }
     if names.is_empty() {
-        return Ok(ToolResult {
-            content: "(empty directory)".into(),
-        });
+        return Ok(ToolResult::text("(empty directory)"));
     }
 
     let (mut output, truncated) = truncate_tool_output(&names.join("\n"));
@@ -439,7 +452,7 @@ fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     if !notices.is_empty() {
         output.push_str(&format!("\n\n[{}]", notices.join(". ")));
     }
-    Ok(ToolResult { content: output })
+    Ok(ToolResult::text(output))
 }
 
 fn truncate_tool_output(content: &str) -> (String, bool) {
@@ -603,9 +616,7 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     }
 
     if match_count == 0 {
-        return Ok(ToolResult {
-            content: "No matches found".into(),
-        });
+        return Ok(ToolResult::text("No matches found"));
     }
     let (mut output, byte_truncated) = truncate_tool_output(&formatted_matches.join("\n"));
     let mut notices = Vec::new();
@@ -630,7 +641,7 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     if !notices.is_empty() {
         output.push_str(&format!("\n\n[{}]", notices.join(". ")));
     }
-    Ok(ToolResult { content: output })
+    Ok(ToolResult::text(output))
 }
 
 fn collect_search_files(path: &Path, is_directory: bool) -> Vec<PathBuf> {
@@ -757,9 +768,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         results.push(display);
     }
     if results.is_empty() {
-        return Ok(ToolResult {
-            content: "No files found matching pattern".into(),
-        });
+        return Ok(ToolResult::text("No files found matching pattern"));
     }
 
     let (mut output, byte_truncated) = truncate_tool_output(&results.join("\n"));
@@ -779,10 +788,12 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     if !notices.is_empty() {
         output.push_str(&format!("\n\n[{}]", notices.join(". ")));
     }
-    Ok(ToolResult { content: output })
+    Ok(ToolResult::text(output))
 }
 
 async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    const STRUCTURED_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
+    let started_at = Instant::now();
     let command = string_arg(args, "command")?;
     #[cfg(windows)]
     let mut process = tokio::process::Command::new("cmd");
@@ -798,15 +809,42 @@ async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         .stderr(Stdio::piped())
         .output()
         .await?;
-    let mut content = String::from_utf8_lossy(&output.stdout).into_owned();
-    content.push_str(&String::from_utf8_lossy(&output.stderr));
-    if !output.status.success() {
-        return Err(ToolError::Command(format!(
-            "exit {}\n{content}",
-            output.status
-        )));
+    let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
+    full_output.push_str(&String::from_utf8_lossy(&output.stderr));
+    let exit_code = output.status.code().unwrap_or(1);
+    let (structured_output, truncated) = truncate_utf8(&full_output, STRUCTURED_OUTPUT_MAX_BYTES);
+    let wall_time_seconds = (started_at.elapsed().as_millis() as f64 / 100.0).round() / 10.0;
+    let mut content = if full_output.is_empty() {
+        "(no output)".to_owned()
+    } else {
+        full_output.clone()
+    };
+    let is_error = exit_code != 0;
+    if is_error {
+        content.push_str(&format!("\n\nCommand exited with code {exit_code}"));
     }
-    Ok(ToolResult { content })
+    Ok(ToolResult {
+        content,
+        details: None,
+        structured_content: Some(json!({
+            "output": structured_output,
+            "truncated": truncated,
+            "exit_code": exit_code,
+            "wall_time_seconds": wall_time_seconds,
+        })),
+        is_error,
+    })
+}
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_owned(), false);
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), true)
 }
 
 #[cfg(test)]
@@ -1112,7 +1150,9 @@ mod tests {
         let empty = execute(&dir, "bash", &json!({"command":"true"}))
             .await
             .unwrap();
-        assert!(empty.content.is_empty());
+        assert_eq!(empty.content, "(no output)");
+        assert_eq!(empty.structured_content.as_ref().unwrap()["output"], "");
+        assert_eq!(empty.structured_content.as_ref().unwrap()["exit_code"], 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1136,22 +1176,43 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn bash_failure_preserves_stdout_and_stderr_in_the_error() {
+    async fn bash_caps_structured_output_at_one_megabyte() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let error = execute(
+        let result = execute(&dir, "bash", &json!({"command":"yes x | head -c 1048577"}))
+            .await
+            .unwrap();
+
+        let structured = result.structured_content.unwrap();
+        assert!(structured["truncated"].as_bool().unwrap());
+        assert!(structured["output"].as_str().unwrap().len() <= 1024 * 1024);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_error_result_preserves_stdout_and_stderr() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result = execute(
             &dir,
             "bash",
             &json!({"command":"printf stdout; printf stderr >&2; exit 7"}),
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-        let text = error.to_string();
-        assert!(text.contains("command failed: exit"));
-        assert!(text.contains("stdout"));
-        assert!(text.contains("stderr"));
+        assert!(result.is_error);
+        assert!(result.content.contains("Command exited with code 7"));
+        assert!(result.content.contains("stdout"));
+        assert!(result.content.contains("stderr"));
+        assert_eq!(result.structured_content.as_ref().unwrap()["exit_code"], 7);
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["truncated"],
+            false
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
