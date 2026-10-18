@@ -165,6 +165,7 @@ const READ_MAX_LINES: usize = 2000;
 const READ_MAX_BYTES: usize = 50 * 1024;
 
 fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let requested_path = string_arg(args, "path")?;
     let path = resolve_read_path(cwd, args)?;
     let text = std::fs::read_to_string(&path)?;
     let offset = args
@@ -198,7 +199,7 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         format!(
             "[Line {start_line} is {first_line_size}, exceeds {} limit. Use bash: sed -n '{start_line}p' {} | head -c {}]",
             format_size(READ_MAX_BYTES),
-            path.display(),
+            requested_path,
             READ_MAX_BYTES
         )
     } else if let Some(limit_name) = truncated {
@@ -301,6 +302,7 @@ fn format_size(bytes: usize) -> String {
 }
 
 fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let requested_path = string_arg(args, "path")?;
     let path = resolve(cwd, args)?;
     let content = string_arg(args, "content")?;
     if let Some(parent) = path.parent() {
@@ -308,8 +310,7 @@ fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     }
     std::fs::write(&path, content)?;
     Ok(ToolResult::text(format!(
-        "Successfully wrote to {}",
-        path.display()
+        "Successfully wrote to {requested_path}"
     )))
 }
 
@@ -374,6 +375,8 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
 }
 
 fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let requested_path = string_arg(args, "path")?;
+    let display_path = Path::new(requested_path);
     let path = resolve(cwd, args)?;
     let edits = parse_edits(args)?;
     let original = std::fs::read_to_string(&path)?;
@@ -394,8 +397,8 @@ fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         })
         .collect::<Vec<_>>();
 
-    let updated = apply_edits(&normalized, &normalized_edits, &path)?;
-    let details = edit_details(&normalized, &updated, &path);
+    let updated = apply_edits(&normalized, &normalized_edits, display_path)?;
+    let details = edit_details(&normalized, &updated, display_path);
     let restored = if line_ending == "\r\n" {
         updated.replace('\n', "\r\n")
     } else {
@@ -405,7 +408,7 @@ fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let mut result = ToolResult::text(format!(
         "Successfully replaced {} block(s) in {}.",
         normalized_edits.len(),
-        path.display()
+        display_path.display()
     ));
     result.details = Some(details);
     Ok(result)
@@ -1217,13 +1220,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
         let write = json!({"path":"nested/file.txt","content":"one\ntwo\n"});
         let result = execute(&dir, "write", &write).await.unwrap();
-        assert_eq!(
-            result.content,
-            format!(
-                "Successfully wrote to {}",
-                dir.join("nested/file.txt").display()
-            )
-        );
+        assert_eq!(result.content, "Successfully wrote to nested/file.txt");
         let read = execute(&dir, "read", &json!({"path":"nested/file.txt","offset":2}))
             .await
             .unwrap();
