@@ -429,6 +429,16 @@ fn canonical_mutation_path(path: &Path) -> PathBuf {
 }
 
 fn write_file_io_error(path: &Path, operation: &str, error: std::io::Error) -> ToolError {
+    if operation == "mkdir"
+        && error.kind() == std::io::ErrorKind::NotADirectory
+        && path.exists()
+        && !path.is_dir()
+    {
+        return ToolError::Command(format!(
+            "EEXIST: file already exists, mkdir '{}'",
+            path.display()
+        ));
+    }
     let (code, message) = match error.kind() {
         std::io::ErrorKind::NotFound => ("ENOENT", "no such file or directory"),
         std::io::ErrorKind::PermissionDenied => ("EACCES", "permission denied"),

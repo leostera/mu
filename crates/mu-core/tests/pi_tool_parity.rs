@@ -194,6 +194,28 @@ async fn pi_write_formats_directory_target_errors_like_node_fs_open() {
 }
 
 #[tokio::test]
+async fn pi_write_matches_recursive_mkdir_error_for_file_ancestor() {
+    let dir = temp_dir("write-mkdir-file-ancestor");
+    fs::write(dir.join("file-parent"), "file").unwrap();
+
+    let error = execute(
+        &dir,
+        "write",
+        &json!({"path":"file-parent/child.txt","content":"content"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "EEXIST: file already exists, mkdir '{}'",
+            dir.join("file-parent").display()
+        )
+    );
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_write_formats_parent_creation_errors_like_node_fs_mkdir() {
     let dir = temp_dir("write-mkdir-error");
     fs::write(dir.join("blocker"), "file").unwrap();
