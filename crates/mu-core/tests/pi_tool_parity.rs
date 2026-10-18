@@ -342,6 +342,57 @@ async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
     cleanup(&dir);
 }
 
+// Pi source: packages/coding-agent/test/tools.test.ts, read boundary and empty-file cases.
+#[tokio::test]
+async fn pi_read_matches_empty_file_and_trailing_newline_boundaries() {
+    let dir = temp_dir("read-empty-boundaries");
+    fs::write(dir.join("empty.txt"), "").unwrap();
+    fs::write(dir.join("trailing-newline.txt"), "one\n").unwrap();
+
+    assert_eq!(
+        execute(&dir, "read", &json!({"path":"empty.txt"}))
+            .await
+            .unwrap()
+            .content,
+        ""
+    );
+    assert_eq!(
+        execute(&dir, "read", &json!({"path":"empty.txt","offset":1}))
+            .await
+            .unwrap()
+            .content,
+        ""
+    );
+    assert_eq!(
+        execute(
+            &dir,
+            "read",
+            &json!({"path":"trailing-newline.txt","offset":2})
+        )
+        .await
+        .unwrap()
+        .content,
+        ""
+    );
+    let beyond_empty = execute(&dir, "read", &json!({"path":"empty.txt","offset":2}))
+        .await
+        .unwrap_err();
+    assert!(
+        beyond_empty
+            .to_string()
+            .contains("Offset 2 is beyond end of file (1 lines total)")
+    );
+
+    let zero_limit = execute(&dir, "read", &json!({"path":"empty.txt","limit":0}))
+        .await
+        .unwrap();
+    assert_eq!(
+        zero_limit.content,
+        "\n\n[1 more lines in file. Use offset=1 to continue.]"
+    );
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts, find result-limit cases.
 #[tokio::test]
 async fn pi_find_preserves_result_limit_details() {
