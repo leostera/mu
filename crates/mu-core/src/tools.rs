@@ -782,6 +782,29 @@ fn truncate_tool_output(content: &str) -> (String, bool) {
     (output.join("\n"), truncated)
 }
 
+fn tool_truncation_details(content: &str, truncated_content: &str, max_bytes: usize) -> Value {
+    let count_lines = |text: &str| {
+        if text.is_empty() {
+            0
+        } else {
+            text.split('\n').count() - usize::from(text.ends_with('\n'))
+        }
+    };
+    json!({
+        "content": truncated_content,
+        "truncated": true,
+        "truncatedBy": "bytes",
+        "totalLines": count_lines(content),
+        "totalBytes": content.len(),
+        "outputLines": count_lines(truncated_content),
+        "outputBytes": truncated_content.len(),
+        "lastLinePartial": false,
+        "firstLineExceedsLimit": false,
+        "maxLines": 9_007_199_254_740_991u64,
+        "maxBytes": max_bytes,
+    })
+}
+
 const GREP_DEFAULT_LIMIT: usize = 100;
 const GREP_MAX_LINE_CHARS: usize = 500;
 
@@ -931,7 +954,9 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     if match_count == 0 {
         return Ok(ToolResult::text("No matches found"));
     }
-    let (mut output, byte_truncated) = truncate_tool_output(&formatted_matches.join("\n"));
+    let raw_output = formatted_matches.join("\n");
+    let (mut output, byte_truncated) = truncate_tool_output(&raw_output);
+    let mut details = serde_json::Map::new();
     let mut notices = Vec::new();
     if match_limit_reached {
         notices.push(format!(
@@ -939,22 +964,30 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             input.limit,
             input.limit.saturating_mul(2)
         ));
+        details.insert("matchLimitReached".into(), json!(input.limit));
     }
     if byte_truncated {
         notices.push(format!(
             "{} limit reached",
             format_size(TOOL_OUTPUT_MAX_BYTES)
         ));
+        details.insert(
+            "truncation".into(),
+            tool_truncation_details(&raw_output, &output, TOOL_OUTPUT_MAX_BYTES),
+        );
     }
     if lines_truncated {
         notices.push(format!(
             "Some lines truncated to {GREP_MAX_LINE_CHARS} chars. Use read tool to see full lines"
         ));
+        details.insert("linesTruncated".into(), json!(true));
     }
     if !notices.is_empty() {
         output.push_str(&format!("\n\n[{}]", notices.join(". ")));
     }
-    Ok(ToolResult::text(output))
+    let mut result = ToolResult::text(output);
+    result.details = (!details.is_empty()).then_some(Value::Object(details));
+    Ok(result)
 }
 
 fn collect_search_files(path: &Path, is_directory: bool) -> Vec<PathBuf> {

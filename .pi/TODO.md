@@ -46,7 +46,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ### Search and listing tools
 
-- [ ] Complete `grep` parity: Mu now supports regex/literal search, ignore-case, glob, `--`-safe patterns, `.gitignore`/hidden traversal, context, exact next-match limit detection, and basic line/byte truncation; align ripgrep edge behavior, structured truncation details, execution-context cwd, and cancellation.
+- [ ] Complete `grep` parity: Mu now supports regex/literal search, ignore-case, glob, `--`-safe patterns, `.gitignore`/hidden traversal, context, exact next-match limit detection, and match/line-truncation details; align ripgrep edge behavior, byte-truncation metadata, execution-context cwd, and cancellation.
 - [ ] Complete `find` parity: Mu now supports hidden files, `.gitignore`, basic glob/path matching, relative POSIX output, and result/byte limits; align fd's nested-repository and glob semantics, deterministic ordering, structured limit/truncation details, execution-context cwd, and cancellation.
 - [ ] Complete `ls` parity: Mu now lists dotfiles, marks directories, sorts entries, and handles basic limits/errors; add Pi's structured truncation/entry-limit details, execution-context cwd override, cancellation, and remaining error/path semantics.
 - [ ] Use injectable filesystem/search operations for deterministic tests; do not make required parity tests depend on downloads, network access, or installed `rg`/`fd` binaries.

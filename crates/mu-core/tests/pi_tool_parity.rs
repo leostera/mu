@@ -222,6 +222,7 @@ async fn pi_grep_obeys_global_limit_and_context_without_returning_later_matches(
             .content
             .contains("[1 matches limit reached. Use limit=2 for more, or refine pattern]")
     );
+    assert_eq!(result.details.as_ref().unwrap()["matchLimitReached"], 1);
     assert!(!result.content.contains("match two"));
     cleanup(&dir);
 }
