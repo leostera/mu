@@ -393,6 +393,26 @@ async fn pi_read_matches_empty_file_and_trailing_newline_boundaries() {
     cleanup(&dir);
 }
 
+#[tokio::test]
+async fn pi_read_preserves_numeric_slice_semantics_for_fractional_ranges() {
+    let dir = temp_dir("read-fractional-ranges");
+    fs::write(dir.join("file.txt"), "one\ntwo\nthree").unwrap();
+
+    let result = execute(
+        &dir,
+        "read",
+        &json!({"path":"file.txt","offset":1.5,"limit":1.5}),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.content,
+        "one\ntwo\n\n[1 more lines in file. Use offset=3 to continue.]"
+    );
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts, find result-limit cases.
 #[tokio::test]
 async fn pi_find_preserves_result_limit_details() {

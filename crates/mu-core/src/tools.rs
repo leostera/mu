@@ -172,32 +172,36 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let path = resolve_read_path(cwd, args)?;
     let text = std::fs::read_to_string(&path)?;
-    let offset = args
-        .get("offset")
-        .and_then(Value::as_u64)
-        .unwrap_or(1)
-        .max(1) as usize;
+    let offset = read_number_argument(args, "offset", 1.0)?;
+    let start_line = if offset == 0.0 {
+        0.0
+    } else {
+        (offset - 1.0).max(0.0)
+    };
     let all_lines = text.split('\n').collect::<Vec<_>>();
-    if offset > all_lines.len() {
+    if start_line >= all_lines.len() as f64 {
         return Err(ToolError::Arguments(format!(
-            "Offset {offset} is beyond end of file ({} lines total)",
+            "Offset {} is beyond end of file ({} lines total)",
+            format_json_number(offset),
             all_lines.len()
         )));
     }
 
-    let start = offset - 1;
+    let start = js_slice_index(start_line, all_lines.len());
     let limit = args
         .get("limit")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize);
-    let end = limit.map_or(all_lines.len(), |limit| {
-        start.saturating_add(limit).min(all_lines.len())
+        .map(|_| read_number_argument(args, "limit", 0.0))
+        .transpose()?;
+    let end_line = limit.map_or(all_lines.len() as f64, |limit| {
+        (start_line + limit).min(all_lines.len() as f64)
     });
+    let end = js_slice_index(end_line, all_lines.len()).max(start);
     let selected = all_lines[start..end].join("\n");
     let total_file_lines = all_lines.len();
+    let user_limited_lines = end_line - start_line;
     let (truncated, truncated_by, output_lines, first_line_exceeds_limit) =
         truncate_read_head(&selected);
-    let start_line = start + 1;
+    let start_line = start_line + 1.0;
     let content = if first_line_exceeds_limit {
         let first_line_size = format_size(all_lines[start].len());
         format!(
@@ -207,25 +211,33 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             READ_MAX_BYTES
         )
     } else if let Some(limit_name) = truncated {
-        let end_line = start_line + output_lines - 1;
-        let next_offset = end_line + 1;
+        let end_line = start_line + output_lines as f64 - 1.0;
+        let next_offset = end_line + 1.0;
         let mut output = truncated_by.clone();
         if limit_name == "bytes" {
             output.push_str(&format!(
-                "\n\n[Showing lines {start_line}-{end_line} of {total_file_lines} ({} limit). Use offset={next_offset} to continue.]",
-                format_size(READ_MAX_BYTES)
+                "\n\n[Showing lines {}-{} of {total_file_lines} ({} limit). Use offset={} to continue.]",
+                format_json_number(start_line),
+                format_json_number(end_line),
+                format_size(READ_MAX_BYTES),
+                format_json_number(next_offset)
             ));
         } else {
             output.push_str(&format!(
-                "\n\n[Showing lines {start_line}-{end_line} of {total_file_lines}. Use offset={next_offset} to continue.]"
+                "\n\n[Showing lines {}-{} of {total_file_lines}. Use offset={} to continue.]",
+                format_json_number(start_line),
+                format_json_number(end_line),
+                format_json_number(next_offset)
             ));
         }
         output
-    } else if let Some(limit) = limit.filter(|_| end < all_lines.len()) {
-        let remaining = all_lines.len() - end;
-        let next_offset = start + limit + 1;
+    } else if limit.is_some() && start_line - 1.0 + user_limited_lines < all_lines.len() as f64 {
+        let remaining = all_lines.len() as f64 - (start_line - 1.0 + user_limited_lines);
+        let next_offset = start_line - 1.0 + user_limited_lines + 1.0;
         format!(
-            "{truncated_by}\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+            "{truncated_by}\n\n[{} more lines in file. Use offset={} to continue.]",
+            format_json_number(remaining),
+            format_json_number(next_offset)
         )
     } else {
         truncated_by.clone()
@@ -254,6 +266,29 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let mut result = ToolResult::text(content);
     result.details = details;
     Ok(result)
+}
+
+fn read_number_argument(args: &Value, name: &str, default: f64) -> Result<f64, ToolError> {
+    let Some(value) = args.get(name) else {
+        return Ok(default);
+    };
+    value
+        .as_f64()
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| ToolError::Arguments(format!("`{name}` must be a finite number")))
+}
+
+fn format_json_number(number: f64) -> String {
+    number.to_string()
+}
+
+fn js_slice_index(index: f64, length: usize) -> usize {
+    let integer = index.trunc();
+    if integer < 0.0 {
+        (length as f64 + integer).max(0.0) as usize
+    } else {
+        integer.min(length as f64) as usize
+    }
 }
 
 /// Apply Pi's head truncation to complete lines only, using UTF-8 byte counts.
