@@ -906,6 +906,23 @@ async fn pi_find_treats_flag_like_patterns_as_globs_and_reports_invalid_globs() 
         .await
         .unwrap_err();
     assert!(!error.to_string().is_empty());
+    assert!(!error.to_string().starts_with("invalid arguments:"));
+    cleanup(&dir);
+}
+
+#[tokio::test]
+async fn pi_search_tools_return_raw_regex_and_glob_errors() {
+    let dir = temp_dir("search-parse-errors");
+
+    let regex_error = execute(&dir, "grep", &json!({"pattern":"("}))
+        .await
+        .unwrap_err();
+    assert!(!regex_error.to_string().starts_with("invalid arguments:"));
+
+    let glob_error = execute(&dir, "grep", &json!({"pattern":"needle","glob":"{"}))
+        .await
+        .unwrap_err();
+    assert!(!glob_error.to_string().starts_with("invalid arguments:"));
     cleanup(&dir);
 }
 
