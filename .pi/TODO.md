@@ -5,7 +5,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 ## Agent loop and AI/provider behavior
 
 - [x] Continue tool-call rounds until the model stops or the request is cancelled; Mu no longer applies a fixed 8-round limit.
-- [ ] Handle incomplete, interrupted, refused, and length-truncated provider outputs; do not execute truncated tool arguments.
+- [ ] Handle interrupted/refused provider outputs and all incomplete response cases. Mu now recognizes `response.incomplete` and rejects tool calls when `incomplete_details.reason` is `max_output_tokens`, returning Pi's retry-the-call error as a tool result.
 - [ ] Match Pi steering/follow-up interleavings at request, tool-call, error, and cancellation boundaries; current queue is FIFO per lane, but broader interleaving tests are needed.
 - [ ] Add finish-turn/prepare-request/prepare-next-turn hooks and their ordering/cancellation semantics.
 - [ ] Match tool approval, validation, before/after tool hooks, progress updates, and tool termination behavior.

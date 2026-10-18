@@ -219,6 +219,7 @@ struct Reply {
     cache_write: u64,
     reasoning: Option<u64>,
     total_tokens: u64,
+    incomplete_reason: Option<String>,
 }
 
 fn config() -> Result<Config, AgentError> {
@@ -656,6 +657,7 @@ impl Provider {
                 cache_write: 0,
                 reasoning: None,
                 total_tokens: 0,
+                incomplete_reason: None,
             });
         }
         let ProviderTransport::OpenCode {
@@ -695,6 +697,7 @@ impl Provider {
         let mut thinking_signature = None;
         let mut output_items = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut incomplete_reason = None;
         let (mut input_tokens, mut output_tokens) = (0, 0);
         let (mut cache_read, mut cache_write, mut reasoning, mut total_tokens) = (0, 0, None, 0);
         while let Some(chunk) = stream.next().await {
@@ -744,7 +747,11 @@ impl Provider {
                                 }
                             }
                         }
-                        "response.completed" => {
+                        "response.completed" | "response.incomplete" => {
+                            incomplete_reason = event
+                                .pointer("/response/incomplete_details/reason")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
                             if let Some(items) =
                                 event.pointer("/response/output").and_then(Value::as_array)
                             {
@@ -779,7 +786,17 @@ impl Provider {
                                     ) else {
                                         continue;
                                     };
-                                    if let Ok(arguments) = serde_json::from_str(raw_arguments) {
+                                    let arguments = serde_json::from_str(raw_arguments)
+                                        .unwrap_or_else(|_| {
+                                            if incomplete_reason.as_deref()
+                                                == Some("max_output_tokens")
+                                            {
+                                                Value::String(raw_arguments.to_owned())
+                                            } else {
+                                                Value::Null
+                                            }
+                                        });
+                                    if !arguments.is_null() {
                                         tool_calls.push(FunctionCall {
                                             call_id: call_id.to_owned(),
                                             name: name.to_owned(),
@@ -852,6 +869,7 @@ impl Provider {
             cache_write,
             reasoning,
             total_tokens,
+            incomplete_reason,
         })
     }
 }
@@ -1811,6 +1829,8 @@ impl MuAgent {
                 break;
             }
             let api = api_name(&self.provider.transport);
+            let truncated_tool_arguments =
+                reply.incomplete_reason.as_deref() == Some("max_output_tokens");
             let calls = std::mem::take(&mut reply.tool_calls);
             let records = calls
                 .iter()
@@ -1845,9 +1865,10 @@ impl MuAgent {
                     arguments: call.arguments.clone(),
                 });
             }
-            let mut parallel_results = if calls
-                .iter()
-                .all(|call| !matches!(call.name.as_str(), "tool_search" | "codemode"))
+            let mut parallel_results = if !truncated_tool_arguments
+                && calls
+                    .iter()
+                    .all(|call| !matches!(call.name.as_str(), "tool_search" | "codemode"))
             {
                 Some(
                     execute_in_parallel(
@@ -1862,7 +1883,12 @@ impl MuAgent {
                 None
             };
             for call in calls {
-                let result = if let Some(results) = parallel_results.as_mut() {
+                let result = if truncated_tool_arguments {
+                    Err(format!(
+                        "Tool call \"{}\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
+                        call.name
+                    ))
+                } else if let Some(results) = parallel_results.as_mut() {
                     results.next().expect("one result per tool call")
                 } else if call.name == "tool_search" {
                     let query = call
@@ -2554,6 +2580,7 @@ mod tests {
                     cache_write: 0,
                     reasoning: None,
                     total_tokens: 0,
+                    incomplete_reason: None,
                 }),
                 Ok(Reply {
                     text: "saved file".into(),
@@ -2567,6 +2594,7 @@ mod tests {
                     cache_write: 0,
                     reasoning: None,
                     total_tokens: 0,
+                    incomplete_reason: None,
                 }),
             ])));
         agent.provider.transport = super::ProviderTransport::Scripted(replies);
@@ -2616,6 +2644,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn output_token_limited_tool_arguments_are_reported_but_never_executed() {
+        let root = std::env::temp_dir().join(format!("mu-truncated-tool-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.clone(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).unwrap();
+        let arguments = serde_json::json!({"path":"truncated.txt","content":"must not be written"});
+        let replies = std::collections::VecDeque::from([
+            Ok(Reply {
+                text: String::new(),
+                thinking: String::new(),
+                thinking_signature: None,
+                output_items: vec![serde_json::json!({
+                    "type":"function_call",
+                    "call_id":"truncated-call",
+                    "name":"write",
+                    "arguments":arguments.to_string()
+                })],
+                tool_calls: vec![FunctionCall {
+                    call_id: "truncated-call".into(),
+                    name: "write".into(),
+                    arguments,
+                }],
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: None,
+                total_tokens: 0,
+                incomplete_reason: Some("max_output_tokens".into()),
+            }),
+            Ok(Reply {
+                text: "I will retry with a complete tool call".into(),
+                thinking: String::new(),
+                thinking_signature: None,
+                output_items: Vec::new(),
+                tool_calls: Vec::new(),
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: None,
+                total_tokens: 0,
+                incomplete_reason: None,
+            }),
+        ]);
+        agent.provider.transport =
+            super::ProviderTransport::Scripted(std::sync::Arc::new(std::sync::Mutex::new(replies)));
+        let mut events = Vec::new();
+
+        agent
+            .submit("write a file".into(), &mut |event| events.push(event))
+            .await
+            .unwrap();
+
+        assert!(!root.join("truncated.txt").exists());
+        assert!(events.contains(&super::AgentEvent::ToolFinished {
+            call_id: "truncated-call".into(),
+            output: "Tool call \"write\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.".into(),
+            is_error: true,
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn scripted_provider_can_complete_more_than_eight_tool_rounds() {
         let root =
             std::env::temp_dir().join(format!("mu-many-tool-rounds-{}", uuid::Uuid::new_v4()));
@@ -2656,6 +2757,7 @@ mod tests {
                 cache_write: 0,
                 reasoning: None,
                 total_tokens: 0,
+                incomplete_reason: None,
             }));
         }
         scripted.push_back(Ok(Reply {
@@ -2670,6 +2772,7 @@ mod tests {
             cache_write: 0,
             reasoning: None,
             total_tokens: 0,
+            incomplete_reason: None,
         }));
         agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
             std::sync::Mutex::new(scripted),
@@ -2724,6 +2827,7 @@ mod tests {
                     cache_write: 0,
                     reasoning: None,
                     total_tokens: 0,
+                    incomplete_reason: None,
                 }),
             ])),
         ));
@@ -2801,6 +2905,7 @@ mod tests {
                     cache_write: 0,
                     reasoning: None,
                     total_tokens: 0,
+                    incomplete_reason: None,
                 }),
             ])),
         ));
