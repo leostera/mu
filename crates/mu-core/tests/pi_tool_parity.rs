@@ -1131,6 +1131,27 @@ async fn pi_find_preserves_backslashes_in_unix_filenames() {
     cleanup(&dir);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_find_relativizes_absolute_newline_fragments_from_the_search_root() {
+    let dir = temp_dir("find-newline-absolute-fragment");
+    fs::create_dir(dir.join("first\n")).unwrap();
+    fs::write(dir.join("first\n/inside.txt"), "content").unwrap();
+    let parent_components = dir
+        .components()
+        .filter(|part| matches!(part, std::path::Component::Normal(_)))
+        .count();
+
+    let result = execute(&dir, "find", &json!({"pattern":"*.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.content,
+        format!("first\n{}inside.txt", "../".repeat(parent_components))
+    );
+    cleanup(&dir);
+}
+
 #[tokio::test]
 async fn pi_find_parses_newline_filenames_like_fd_readline_output() {
     let dir = temp_dir("find-newline-name");

@@ -977,6 +977,59 @@ fn node_scandir_error(path: &Path, error: std::io::Error) -> String {
     format!("{code}: {message}, scandir '{}'", path.display())
 }
 
+fn relative_find_path(search_root: &Path, result_path: &Path) -> PathBuf {
+    if let Ok(relative) = result_path.strip_prefix(search_root) {
+        return relative.to_owned();
+    }
+    if !search_root.is_absolute() || !result_path.is_absolute() {
+        return result_path.to_owned();
+    }
+
+    let search_prefix = search_root
+        .components()
+        .find_map(|component| match component {
+            std::path::Component::Prefix(prefix) => Some(prefix.as_os_str()),
+            _ => None,
+        });
+    let result_prefix = result_path
+        .components()
+        .find_map(|component| match component {
+            std::path::Component::Prefix(prefix) => Some(prefix.as_os_str()),
+            _ => None,
+        });
+    if search_prefix != result_prefix {
+        return result_path.to_owned();
+    }
+
+    let root_components = search_root
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let result_components = result_path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let common = root_components
+        .iter()
+        .zip(&result_components)
+        .take_while(|(root, result)| root == result)
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in common..root_components.len() {
+        relative.push("..");
+    }
+    for component in &result_components[common..] {
+        relative.push(component);
+    }
+    relative
+}
+
 fn relativize_fd_find_output(
     entry_path: &Path,
     search_root: &Path,
@@ -997,9 +1050,9 @@ fn relativize_fd_find_output(
             let had_trailing_separator = line.ends_with('/') || line.ends_with('\\');
             let path = Path::new(line);
             let relative = if path.is_absolute() {
-                path.strip_prefix(search_root).unwrap_or(path)
+                relative_find_path(search_root, path)
             } else {
-                path
+                path.to_owned()
             };
             let mut result = find_path_to_posix(&relative.to_string_lossy());
             if had_trailing_separator && !result.ends_with('/') {
@@ -2190,6 +2243,15 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn find_relative_path_matches_node_for_absolute_results_outside_root() {
+        assert_eq!(
+            relative_find_path(Path::new("/workspace/project"), Path::new("/outside.txt")),
+            PathBuf::from("../../outside.txt")
+        );
+    }
 
     #[test]
     fn find_output_trim_matches_javascript_bom_whitespace_behavior() {
