@@ -940,6 +940,17 @@ fn trim_javascript_whitespace(line: &str) -> &str {
     line.trim_matches(is_javascript_trim_whitespace)
 }
 
+fn find_path_to_posix(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        path.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_owned()
+    }
+}
+
 fn is_javascript_trim_whitespace(character: char) -> bool {
     matches!(
         character,
@@ -990,7 +1001,7 @@ fn relativize_fd_find_output(
             } else {
                 path
             };
-            let mut result = relative.to_string_lossy().replace('\\', "/");
+            let mut result = find_path_to_posix(&relative.to_string_lossy());
             if had_trailing_separator && !result.ends_with('/') {
                 result.push('/');
             }
@@ -1530,10 +1541,10 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     candidates.sort();
     for entry_path in candidates {
         let relative = entry_path.strip_prefix(&path).unwrap_or(&entry_path);
-        let mut display = relative.to_string_lossy().replace('\\', "/");
+        let mut display = find_path_to_posix(&relative.to_string_lossy());
         let matches = if match_full_path {
             if match_absolute_path {
-                pattern.is_match(entry_path.to_string_lossy().replace('\\', "/"))
+                pattern.is_match(find_path_to_posix(&entry_path.to_string_lossy()))
             } else {
                 pattern.is_match(&display)
             }

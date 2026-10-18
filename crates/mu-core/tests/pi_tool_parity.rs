@@ -1102,6 +1102,19 @@ async fn pi_find_stops_parent_gitignore_rules_at_nested_repository_boundaries() 
     cleanup(&dir);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_find_preserves_backslashes_in_unix_filenames() {
+    let dir = temp_dir("find-backslash-name");
+    fs::write(dir.join("a\\b.txt"), "content").unwrap();
+
+    let result = execute(&dir, "find", &json!({"pattern":"*"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "a\\b.txt");
+    cleanup(&dir);
+}
+
 #[tokio::test]
 async fn pi_find_parses_newline_filenames_like_fd_readline_output() {
     let dir = temp_dir("find-newline-name");
