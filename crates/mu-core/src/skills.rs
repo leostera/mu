@@ -194,7 +194,8 @@ fn add_skill(parsed: ParsedSkill, catalog: &mut SkillCatalog, names: &mut HashSe
 
 fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let mut lines = text.lines();
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let mut lines = text.lines().peekable();
     if lines.next() != Some("---") {
         return Err("missing YAML frontmatter".into());
     }
@@ -202,7 +203,7 @@ fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
     let mut description = None;
     let mut disabled = false;
     let mut closed = false;
-    for line in lines {
+    while let Some(line) = lines.next() {
         if line.trim() == "---" {
             closed = true;
             break;
@@ -212,8 +213,29 @@ fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
         };
         let value = value.trim().trim_matches(['\"', '\'']);
         match key.trim() {
-            "name" => name = Some(value.to_owned()),
-            "description" => description = Some(value.to_owned()),
+            "name" => {
+                name = line
+                    .split_once(':')
+                    .and_then(|(_, raw)| parse_frontmatter_string(raw));
+            }
+            "description" if matches!(value, "|" | "|-" | "|+" | ">" | ">-" | ">+") => {
+                let folded = value.starts_with('>');
+                let mut block_lines = Vec::new();
+                while lines
+                    .peek()
+                    .is_some_and(|next| next.trim().is_empty() || next.starts_with([' ', '\t']))
+                {
+                    let block_line = lines.next().expect("peeked description block line");
+                    block_lines.push(block_line.trim_start().to_owned());
+                }
+                let separator = if folded { " " } else { "\n" };
+                description = Some(block_lines.join(separator).trim().to_owned());
+            }
+            "description" => {
+                description = line
+                    .split_once(':')
+                    .and_then(|(_, raw)| parse_frontmatter_string(raw));
+            }
             "disable-model-invocation" => {
                 disabled = line
                     .split_once(':')
@@ -269,6 +291,45 @@ fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
         },
         warnings,
     })
+}
+
+fn parse_frontmatter_string(raw_value: &str) -> Option<String> {
+    let value = strip_yaml_comment(raw_value).trim();
+    if value.is_empty() || matches!(value, "~" | "null" | "Null" | "NULL" | "true" | "false") {
+        return None;
+    }
+    if let Some(value) = value.strip_prefix('\'') {
+        return value
+            .strip_suffix('\'')
+            .map(|value| value.replace("''", "'"));
+    }
+    if value.starts_with('"') {
+        return serde_json::from_str(value).ok();
+    }
+    if value.parse::<f64>().is_ok() || value.starts_with(['[', '{']) {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn strip_yaml_comment(value: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        match (quote, character) {
+            (Some('"'), '\\') if !escaped => escaped = true,
+            (Some(active), current) if active == current && !escaped => quote = None,
+            (None, '\'' | '"') => quote = Some(character),
+            (None, '#') if index == 0 || value[..index].ends_with(char::is_whitespace) => {
+                return &value[..index];
+            }
+            _ => escaped = false,
+        }
+        if character != '\\' {
+            escaped = false;
+        }
+    }
+    value
 }
 
 fn escape_xml(value: &str) -> String {
@@ -387,6 +448,37 @@ mod tests {
             .map(|skill| skill.name.as_str())
             .collect::<HashSet<_>>();
         assert_eq!(names, HashSet::from(["visible", "kept"]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_scalar_quotes_and_ignores_only_unquoted_yaml_comments() {
+        assert_eq!(
+            parse_frontmatter_string(" 'it''s # literal' # comment"),
+            Some("it's # literal".into())
+        );
+        assert_eq!(
+            parse_frontmatter_string("\"quoted # literal\" # comment"),
+            Some("quoted # literal".into())
+        );
+    }
+
+    #[test]
+    fn parses_bom_crlf_and_folded_yaml_descriptions() {
+        let root = std::env::temp_dir().join(format!("mu-skills-yaml-{}", Uuid::new_v4()));
+        let skill_dir = root.join(".pi/skills");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "\u{feff}---\r\nname: yaml-skill # comment\r\ndescription: >-\r\n  first line\r\n  second line\r\ndisable-model-invocation: true\r\n---\r\nbody",
+        )
+        .unwrap();
+
+        let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].name, "yaml-skill");
+        assert_eq!(catalog.skills[0].description, "first line second line");
+        assert!(catalog.skills[0].disable_model_invocation);
         std::fs::remove_dir_all(root).unwrap();
     }
 
