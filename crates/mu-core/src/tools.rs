@@ -936,6 +936,10 @@ fn parse_list_directory_input(cwd: &Path, args: &Value) -> Result<ListDirectoryI
     Ok(ListDirectoryInput { path, limit })
 }
 
+fn trim_fd_output_line(line: &str) -> &str {
+    line.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}')
+}
+
 fn sort_directory_entries(entries: &mut [String]) {
     entries.sort_by_key(|entry| entry.to_lowercase());
 }
@@ -1436,7 +1440,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         if std::fs::symlink_metadata(&entry_path).is_ok_and(|metadata| metadata.is_dir()) {
             display.push('/');
         }
-        results.push(display.trim().to_owned());
+        results.push(trim_fd_output_line(&display).to_owned());
     }
     if results.is_empty() {
         return Ok(ToolResult::text("No files found matching pattern"));
@@ -2049,6 +2053,11 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_output_trim_matches_javascript_bom_whitespace_behavior() {
+        assert_eq!(trim_fd_output_line("\u{feff} file \u{feff}"), "file");
+    }
 
     #[test]
     fn directory_sort_preserves_case_variant_order_like_stable_locale_compare() {
