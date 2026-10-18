@@ -107,11 +107,31 @@ fn resolve_input_path(cwd: &Path, input: &str) -> Result<PathBuf, ToolError> {
     } else {
         PathBuf::from(normalized)
     };
-    Ok(if path.is_absolute() {
+    let absolute = if path.is_absolute() {
         path
     } else {
         cwd.join(path)
-    })
+    };
+    Ok(normalize_absolute_path(absolute))
+}
+
+fn normalize_absolute_path(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                normalized.push(component.as_os_str());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            std::path::Component::Normal(_) => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn normalize_path_input(input: &str) -> String {
@@ -407,6 +427,7 @@ fn write_file_io_error(path: &Path, operation: &str, error: std::io::Error) -> T
         std::io::ErrorKind::NotFound => ("ENOENT", "no such file or directory"),
         std::io::ErrorKind::PermissionDenied => ("EACCES", "permission denied"),
         std::io::ErrorKind::NotADirectory => ("ENOTDIR", "not a directory"),
+        std::io::ErrorKind::IsADirectory => ("EISDIR", "illegal operation on a directory"),
         std::io::ErrorKind::AlreadyExists => ("EEXIST", "file already exists"),
         _ => return ToolError::Io(error),
     };
@@ -2150,6 +2171,10 @@ mod tests {
         assert_eq!(
             resolve_input_path(cwd, "@folder\u{00a0}name/file.txt").unwrap(),
             cwd.join("folder name/file.txt")
+        );
+        assert_eq!(
+            resolve_input_path(cwd, "nested/.././file.txt").unwrap(),
+            cwd.join("file.txt")
         );
     }
 

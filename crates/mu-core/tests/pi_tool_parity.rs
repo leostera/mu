@@ -178,6 +178,22 @@ async fn pi_edit_applies_disjoint_edits_in_one_atomic_call() {
 }
 
 #[tokio::test]
+async fn pi_write_formats_directory_target_errors_like_node_fs_open() {
+    let dir = temp_dir("write-directory-error");
+    let error = execute(&dir, "write", &json!({"path":".","content":"content"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "EISDIR: illegal operation on a directory, open '{}'",
+            dir.display()
+        )
+    );
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_write_formats_parent_creation_errors_like_node_fs_mkdir() {
     let dir = temp_dir("write-mkdir-error");
     fs::write(dir.join("blocker"), "file").unwrap();
