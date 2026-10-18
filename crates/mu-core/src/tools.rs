@@ -916,7 +916,10 @@ fn tool_truncation_details(content: &str, truncated_content: &str, max_bytes: us
         "outputLines": count_lines(truncated_content),
         "outputBytes": truncated_content.len(),
         "lastLinePartial": false,
-        "firstLineExceedsLimit": false,
+        "firstLineExceedsLimit": content
+            .split('\n')
+            .next()
+            .is_some_and(|line| line.len() > max_bytes),
         "maxLines": 9_007_199_254_740_991u64,
         "maxBytes": max_bytes,
     })
@@ -2255,6 +2258,20 @@ mod tests {
             "the killed child must not write after timeout"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn search_tool_truncation_details_match_pi_byte_boundaries() {
+        let first_line = "x".repeat(TOOL_OUTPUT_MAX_BYTES + 1);
+        let content = format!("{first_line}\nsecond line");
+        let (truncated, was_truncated) = truncate_tool_output(&content);
+        assert!(was_truncated);
+        assert!(truncated.is_empty());
+        let details = tool_truncation_details(&content, &truncated, TOOL_OUTPUT_MAX_BYTES);
+        assert_eq!(details["firstLineExceedsLimit"], true);
+        assert_eq!(details["truncatedBy"], "bytes");
+        assert_eq!(details["outputBytes"], 0);
+        assert_eq!(details["totalBytes"], content.len());
     }
 
     #[test]
