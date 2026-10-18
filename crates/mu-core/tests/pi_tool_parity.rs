@@ -1102,12 +1102,21 @@ async fn pi_search_tools_return_runtime_path_errors_without_mu_argument_prefixes
     let expected_missing = format!("Path not found: {}", missing.display());
     for (tool, arguments) in [
         ("grep", json!({"path":"missing","pattern":"needle"})),
-        ("find", json!({"path":"missing","pattern":"*.txt"})),
         ("ls", json!({"path":"missing"})),
     ] {
         let error = execute(&dir, tool, &arguments).await.unwrap_err();
         assert_eq!(error.to_string(), expected_missing, "{tool}");
     }
+    let missing_find = execute(&dir, "find", &json!({"path":"missing","pattern":"*.txt"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        missing_find.to_string(),
+        format!(
+            "[fd error]: Search path '{}' is not a directory.\n[fd error]: No valid search paths given.",
+            missing.display()
+        )
+    );
 
     let file = dir.join("file.txt");
     fs::write(&file, "content").unwrap();

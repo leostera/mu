@@ -1467,12 +1467,6 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         match_absolute_path,
         match_full_path,
     } = parse_find_input(cwd, args)?;
-    if !path.exists() {
-        return Err(ToolError::Command(format!(
-            "Path not found: {}",
-            path.display()
-        )));
-    }
     if !path.is_dir() {
         return Err(ToolError::Command(format!(
             "[fd error]: Search path '{}' is not a directory.\n[fd error]: No valid search paths given.",
