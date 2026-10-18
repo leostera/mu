@@ -219,6 +219,20 @@ async fn pi_edit_accepts_legacy_mixed_object_and_stringified_edits() {
     assert!(mixed.content.contains("Successfully replaced 2 block(s)"));
     assert_eq!(fs::read_to_string(&path).unwrap(), "one TWO THREE");
 
+    let legacy_over_invalid_edits = execute(
+        &dir,
+        "edit",
+        &json!({"path":"input.txt","edits":"not an array","oldText":"one","newText":"ONE"}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        legacy_over_invalid_edits
+            .content
+            .contains("Successfully replaced 1 block(s)")
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "ONE TWO THREE");
+
     let malformed = execute(
         &dir,
         "edit",
@@ -238,12 +252,11 @@ async fn pi_edit_accepts_legacy_mixed_object_and_stringified_edits() {
     )
     .await
     .unwrap_err();
-    assert!(
-        malformed_object
-            .to_string()
-            .contains("Edit tool input is invalid. edits must contain at least one replacement.")
+    assert_eq!(
+        malformed_object.to_string(),
+        "Edit tool input is invalid. edits must contain at least one replacement."
     );
-    assert_eq!(fs::read_to_string(&path).unwrap(), "one TWO THREE");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "ONE TWO THREE");
     cleanup(&dir);
 }
 

@@ -416,9 +416,11 @@ pub struct TextEdit {
 
 fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
     let mut args = args.clone();
-    let object = args
-        .as_object_mut()
-        .ok_or_else(|| ToolError::Arguments("edit arguments must be an object".into()))?;
+    let object = args.as_object_mut().ok_or_else(|| {
+        ToolError::Command(
+            "Edit tool input is invalid. edits must contain at least one replacement.".into(),
+        )
+    })?;
 
     // Pi accepts legacy oldText/newText fields and a few model-emitted edits forms.
     if let Some(edits) = object.get_mut("edits") {
@@ -451,11 +453,8 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
                 edits.push(legacy);
                 object.insert("edits".into(), Value::Array(edits));
             }
-            Some(Value::Null) | None => {
+            Some(_) | None => {
                 object.insert("edits".into(), Value::Array(vec![legacy]));
-            }
-            Some(_) => {
-                return Err(ToolError::Arguments("`edits` must be an array".into()));
             }
         }
     }
@@ -465,7 +464,7 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
         .and_then(Value::as_array)
         .filter(|edits| !edits.is_empty())
         .ok_or_else(|| {
-            ToolError::Arguments(
+            ToolError::Command(
                 "Edit tool input is invalid. edits must contain at least one replacement.".into(),
             )
         })?;
