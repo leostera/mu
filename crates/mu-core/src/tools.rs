@@ -1,6 +1,8 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     time::Instant,
 };
 
@@ -59,8 +61,8 @@ pub fn definitions() -> Vec<Value> {
 pub async fn execute(cwd: &Path, name: &str, arguments: &Value) -> Result<ToolResult, ToolError> {
     match name {
         "read" => read_file(cwd, arguments),
-        "write" => write_file(cwd, arguments),
-        "edit" => edit_file(cwd, arguments),
+        "write" => write_file(cwd, arguments).await,
+        "edit" => edit_file(cwd, arguments).await,
         "bash" => run_bash(cwd, arguments).await,
         "ls" => list_directory(cwd, arguments),
         "grep" => grep_files(cwd, arguments),
@@ -301,10 +303,48 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
-fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+// Coordinate write/edit by canonical path without retaining unused locks forever.
+static FILE_MUTATION_LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
+
+fn mutation_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let key = canonical_mutation_path(path);
+    let locks = FILE_MUTATION_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+fn canonical_mutation_path(path: &Path) -> PathBuf {
+    let mut ancestor = path.to_owned();
+    let mut missing_components = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            break;
+        };
+        missing_components.push(name.to_owned());
+        if !ancestor.pop() {
+            break;
+        }
+    }
+    let mut canonical = std::fs::canonicalize(&ancestor).unwrap_or(ancestor);
+    for component in missing_components.iter().rev() {
+        canonical.push(component);
+    }
+    canonical
+}
+
+async fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let path = resolve(cwd, args)?;
     let content = string_arg(args, "content")?;
+    let lock = mutation_lock(&path);
+    let _guard = lock.lock().await;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -374,11 +414,13 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
         .collect()
 }
 
-fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let display_path = Path::new(requested_path);
     let path = resolve(cwd, args)?;
     let edits = parse_edits(args)?;
+    let lock = mutation_lock(&path);
+    let _guard = lock.lock().await;
     let original = std::fs::read_to_string(&path)?;
     let (bom, content) = original
         .strip_prefix('\u{feff}')
@@ -1195,6 +1237,26 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_locks_share_symlink_aliases_and_separate_distinct_paths() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("mu-mutation-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target.txt");
+        let alias = dir.join("alias.txt");
+        std::fs::write(&target, "content").unwrap();
+        symlink(&target, &alias).unwrap();
+
+        let target_lock = mutation_lock(&target);
+        let alias_lock = mutation_lock(&alias);
+        let other_lock = mutation_lock(&dir.join("other.txt"));
+        assert!(Arc::ptr_eq(&target_lock, &alias_lock));
+        assert!(!Arc::ptr_eq(&target_lock, &other_lock));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn path_inputs_expand_tilde_strip_at_prefix_and_normalize_unicode_spaces() {
