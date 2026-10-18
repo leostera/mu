@@ -566,7 +566,7 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         updated
     };
     std::fs::write(&path, format!("{bom}{restored}"))
-        .map_err(|error| edit_file_io_error(display_path, error))?;
+        .map_err(|error| write_file_io_error(&path, "open", error))?;
     let mut result = ToolResult::text(format!(
         "Successfully replaced {} block(s) in {}.",
         normalized_edits.len(),
@@ -574,10 +574,6 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     ));
     result.details = Some(details);
     Ok(result)
-}
-
-fn edit_file_io_error(path: &Path, error: std::io::Error) -> ToolError {
-    ToolError::Command(edit_file_io_message(path, error))
 }
 
 fn edit_read_io_message(
@@ -2058,6 +2054,19 @@ mod tests {
         ];
         sort_directory_entries(&mut entries);
         assert_eq!(entries, ["a", "A", "b", "B"]);
+    }
+
+    #[test]
+    fn write_permission_errors_match_node_fs_open() {
+        assert_eq!(
+            write_file_io_error(
+                Path::new("private.txt"),
+                "open",
+                std::io::ErrorKind::PermissionDenied.into()
+            )
+            .to_string(),
+            "EACCES: permission denied, open 'private.txt'"
+        );
     }
 
     #[test]
