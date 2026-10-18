@@ -46,8 +46,8 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ### Search and listing tools
 
-- [ ] Implement `grep` with ripgrep-compatible regex/literal, ignore-case, glob, `--` pattern handling, `.gitignore`/hidden behavior, match/context formatting, global limit, long-line/byte truncation, error handling, and cancellation.
-- [ ] Implement `find` with fd-compatible glob semantics, hidden files, Git ignore behavior (including nested repositories), path-containing globs, Windows separators, relative POSIX output, result/byte limits, parse errors, and cancellation.
+- [ ] Complete `grep` parity: Mu now supports regex/literal search, ignore-case, glob, `--`-safe patterns, `.gitignore`/hidden traversal, context, match limits, and basic line/byte truncation; align exact ripgrep edge behavior, structured truncation details, execution-context cwd, and cancellation.
+- [ ] Complete `find` parity: Mu now supports hidden files, `.gitignore`, basic glob/path matching, relative POSIX output, and result/byte limits; align fd's nested-repository and glob semantics, deterministic ordering, structured limit/truncation details, execution-context cwd, and cancellation.
 - [ ] Complete `ls` parity: Mu now lists dotfiles, marks directories, sorts entries, and handles basic limits/errors; add Pi's structured truncation/entry-limit details, execution-context cwd override, cancellation, and remaining error/path semantics.
 - [ ] Use injectable filesystem/search operations for deterministic tests; do not make required parity tests depend on downloads, network access, or installed `rg`/`fd` binaries.
 - [ ] Port every relevant case in pinned `tools.test.ts`, `edit-tool-legacy-input.test.ts`, `path-utils.test.ts`, `default-tools-setting.test.ts`, `builtin-tool-strict-mode.test.ts`, `tool-system-prompt-contributions.test.ts`, `tool-result-images.test.ts`, `powershell-tool.test.ts`, plus focused Bash/process/renderer suites. Activate ignored Mu specs only when implementation and assertions match.

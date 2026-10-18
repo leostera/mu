@@ -3,6 +3,9 @@ use std::{
     process::Stdio,
 };
 
+use globset::{Glob, GlobMatcher};
+use ignore::WalkBuilder;
+use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -30,6 +33,8 @@ pub fn definitions() -> Vec<Value> {
         json!({"type":"function","name":"edit","description":"Edit a single file using exact text replacements. Each edits[].oldText must match a unique, non-overlapping region of the original file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false}}),
         json!({"type":"function","name":"bash","description":"Run a shell command in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}),
         json!({"type":"function","name":"ls","description":"List directory contents, including dotfiles. Entries are sorted alphabetically; directories have a trailing slash.","parameters":{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"number","description":"Maximum number of entries to return (default: 500)"}},"additionalProperties":false}}),
+        json!({"type":"function","name":"grep","description":"Search file contents for a pattern. Respects .gitignore and returns matching lines with file paths and line numbers.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},"context":{"type":"number"},"limit":{"type":"number"}},"required":["pattern"],"additionalProperties":false}}),
+        json!({"type":"function","name":"find","description":"Find files by glob pattern. Includes hidden files and respects .gitignore.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"limit":{"type":"number"}},"required":["pattern"],"additionalProperties":false}}),
     ]
 }
 
@@ -40,6 +45,8 @@ pub async fn execute(cwd: &Path, name: &str, arguments: &Value) -> Result<ToolRe
         "edit" => edit_file(cwd, arguments),
         "bash" => run_bash(cwd, arguments).await,
         "ls" => list_directory(cwd, arguments),
+        "grep" => grep_files(cwd, arguments),
+        "find" => find_files(cwd, arguments),
         other => Err(ToolError::Arguments(format!("unknown tool `{other}`"))),
     }
 }
@@ -449,6 +456,330 @@ fn truncate_tool_output(content: &str) -> (String, bool) {
     }
     let truncated = output.len() < lines.len();
     (output.join("\n"), truncated)
+}
+
+const GREP_DEFAULT_LIMIT: usize = 100;
+const GREP_MAX_LINE_CHARS: usize = 500;
+
+struct GrepInput {
+    regex: Regex,
+    path: PathBuf,
+    glob: Option<GlobMatcher>,
+    context: usize,
+    limit: usize,
+}
+
+fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| ToolError::Arguments("grep arguments must be an object".into()))?;
+    let pattern = object
+        .get("pattern")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::Arguments("`pattern` must be a string".into()))?
+        .to_owned();
+    let path = match object.get("path") {
+        None => PathBuf::from("."),
+        Some(Value::String(path)) => PathBuf::from(path),
+        Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
+    };
+    let glob = match object.get("glob") {
+        None => None,
+        Some(Value::String(glob)) => Some(
+            Glob::new(glob)
+                .map_err(|error| ToolError::Arguments(error.to_string()))?
+                .compile_matcher(),
+        ),
+        Some(_) => return Err(ToolError::Arguments("`glob` must be a string".into())),
+    };
+    let ignore_case = match object.get("ignoreCase") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ToolError::Arguments(
+                "`ignoreCase` must be a boolean".into(),
+            ));
+        }
+    };
+    let literal = match object.get("literal") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(ToolError::Arguments("`literal` must be a boolean".into())),
+    };
+    let context = optional_nonnegative_integer(object.get("context"), "context")?.unwrap_or(0);
+    let limit = optional_nonnegative_integer(object.get("limit"), "limit")?
+        .unwrap_or(GREP_DEFAULT_LIMIT)
+        .max(1);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    let pattern = if literal {
+        regex::escape(&pattern)
+    } else {
+        pattern
+    };
+    let regex = RegexBuilder::new(&pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .map_err(|error| ToolError::Arguments(error.to_string()))?;
+    Ok(GrepInput {
+        regex,
+        path,
+        glob,
+        context,
+        limit,
+    })
+}
+
+fn optional_nonnegative_integer(
+    value: Option<&Value>,
+    name: &str,
+) -> Result<Option<usize>, ToolError> {
+    value
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|number| usize::try_from(number).ok())
+                .ok_or_else(|| {
+                    ToolError::Arguments(format!("`{name}` must be a non-negative integer"))
+                })
+        })
+        .transpose()
+}
+
+fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let input = parse_grep_input(cwd, args)?;
+    let is_directory = input.path.is_dir();
+    if !is_directory && !input.path.is_file() {
+        return Err(ToolError::Arguments(format!(
+            "Path not found: {}",
+            input.path.display()
+        )));
+    }
+    let regex = input.regex;
+    let files = collect_search_files(&input.path, is_directory);
+    let mut formatted_matches = Vec::new();
+    let mut match_count = 0;
+    let mut lines_truncated = false;
+
+    'files: for file in files {
+        let display_path = search_display_path(&input.path, &file, is_directory);
+        if input.glob.as_ref().is_some_and(|glob| {
+            let basename = file.file_name().unwrap_or_default();
+            !glob.is_match(&display_path) && !glob.is_match(Path::new(basename))
+        }) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let lines = content
+            .split_terminator('\n')
+            .map(|line| line.trim_end_matches('\r'))
+            .collect::<Vec<_>>();
+        for (index, line) in lines.iter().enumerate() {
+            if !regex.is_match(line) {
+                continue;
+            }
+            match_count += 1;
+            let first = index.saturating_sub(input.context);
+            let last = (index + input.context).min(lines.len().saturating_sub(1));
+            for (context_index, text) in lines.iter().enumerate().take(last + 1).skip(first) {
+                let (text, was_truncated) = truncate_grep_line(text);
+                lines_truncated |= was_truncated;
+                let line_number = context_index + 1;
+                if context_index == index {
+                    formatted_matches.push(format!("{display_path}:{line_number}: {text}"));
+                } else {
+                    formatted_matches.push(format!("{display_path}-{line_number}- {text}"));
+                }
+            }
+            if match_count >= input.limit {
+                break 'files;
+            }
+        }
+    }
+
+    if match_count == 0 {
+        return Ok(ToolResult {
+            content: "No matches found".into(),
+        });
+    }
+    let (mut output, byte_truncated) = truncate_tool_output(&formatted_matches.join("\n"));
+    let mut notices = Vec::new();
+    if match_count >= input.limit {
+        notices.push(format!(
+            "{} matches limit reached. Use limit={} for more, or refine pattern",
+            input.limit,
+            input.limit.saturating_mul(2)
+        ));
+    }
+    if byte_truncated {
+        notices.push(format!(
+            "{} limit reached",
+            format_size(TOOL_OUTPUT_MAX_BYTES)
+        ));
+    }
+    if lines_truncated {
+        notices.push(format!(
+            "Some lines truncated to {GREP_MAX_LINE_CHARS} chars. Use read tool to see full lines"
+        ));
+    }
+    if !notices.is_empty() {
+        output.push_str(&format!("\n\n[{}]", notices.join(". ")));
+    }
+    Ok(ToolResult { content: output })
+}
+
+fn collect_search_files(path: &Path, is_directory: bool) -> Vec<PathBuf> {
+    if !is_directory {
+        return vec![path.to_owned()];
+    }
+    let mut walker = WalkBuilder::new(path);
+    walker.hidden(false).require_git(false);
+    walker
+        .build()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
+fn search_display_path(root: &Path, file: &Path, is_directory: bool) -> String {
+    if is_directory {
+        file.strip_prefix(root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/")
+    } else {
+        file.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn truncate_grep_line(line: &str) -> (String, bool) {
+    let mut chars = line.chars();
+    let truncated = chars.clone().count() > GREP_MAX_LINE_CHARS;
+    let text = if truncated {
+        format!(
+            "{}... [truncated]",
+            chars.by_ref().take(GREP_MAX_LINE_CHARS).collect::<String>()
+        )
+    } else {
+        line.to_owned()
+    };
+    (text, truncated)
+}
+
+const FIND_DEFAULT_LIMIT: usize = 1000;
+
+struct FindInput {
+    pattern: GlobMatcher,
+    path: PathBuf,
+    limit: usize,
+}
+
+fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| ToolError::Arguments("find arguments must be an object".into()))?;
+    let pattern = object
+        .get("pattern")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolError::Arguments("`pattern` must be a string".into()))?;
+    let pattern = Glob::new(pattern)
+        .map_err(|error| ToolError::Arguments(error.to_string()))?
+        .compile_matcher();
+    let path = match object.get("path") {
+        None => PathBuf::from("."),
+        Some(Value::String(path)) => PathBuf::from(path),
+        Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
+    };
+    let limit =
+        optional_nonnegative_integer(object.get("limit"), "limit")?.unwrap_or(FIND_DEFAULT_LIMIT);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    Ok(FindInput {
+        pattern,
+        path,
+        limit,
+    })
+}
+
+fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let FindInput {
+        pattern,
+        path,
+        limit,
+    } = parse_find_input(cwd, args)?;
+    if !path.is_dir() {
+        return Err(ToolError::Arguments(format!(
+            "Path not found: {}",
+            path.display()
+        )));
+    }
+
+    let mut results = Vec::new();
+    let mut limit_reached = false;
+    let mut walker = WalkBuilder::new(&path);
+    walker.hidden(false).require_git(false);
+    for entry in walker.build() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let entry_path = entry.path();
+        if entry_path == path {
+            continue;
+        }
+        let relative = entry_path.strip_prefix(&path).unwrap_or(entry_path);
+        let mut display = relative.to_string_lossy().replace('\\', "/");
+        let matches = pattern.is_match(&display)
+            || relative
+                .file_name()
+                .is_some_and(|name| pattern.is_match(Path::new(name)));
+        if !matches {
+            continue;
+        }
+        if results.len() >= limit {
+            limit_reached = true;
+            break;
+        }
+        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+            display.push('/');
+        }
+        results.push(display);
+    }
+    if results.is_empty() {
+        return Ok(ToolResult {
+            content: "No files found matching pattern".into(),
+        });
+    }
+
+    let (mut output, byte_truncated) = truncate_tool_output(&results.join("\n"));
+    let mut notices = Vec::new();
+    if limit_reached {
+        notices.push(format!(
+            "{limit} results limit reached. Use limit={} for more, or refine pattern",
+            limit.saturating_mul(2)
+        ));
+    }
+    if byte_truncated {
+        notices.push(format!(
+            "{} limit reached",
+            format_size(TOOL_OUTPUT_MAX_BYTES)
+        ));
+    }
+    if !notices.is_empty() {
+        output.push_str(&format!("\n\n[{}]", notices.join(". ")));
+    }
+    Ok(ToolResult { content: output })
 }
 
 async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {

@@ -30,7 +30,10 @@ fn current_builtin_definitions_are_valid_json_schemas() {
         .filter_map(|definition| definition.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
     names.sort_unstable();
-    assert_eq!(names, ["bash", "edit", "ls", "read", "write"]);
+    assert_eq!(
+        names,
+        ["bash", "edit", "find", "grep", "ls", "read", "write"]
+    );
 
     for definition in definitions {
         let schema = &definition["parameters"];
@@ -42,7 +45,7 @@ fn current_builtin_definitions_are_valid_json_schemas() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts and test/default-tools-setting.test.ts.
 #[tokio::test]
-#[ignore = "Mu has not implemented Pi's grep, find, ls, or powershell tools"]
+#[ignore = "Mu has not implemented Pi's PowerShell tool"]
 async fn pi_default_builtin_tool_set_contains_all_eight_tools() {
     let definitions = definitions();
     let mut names = definitions
@@ -96,7 +99,6 @@ async fn pi_edit_applies_disjoint_edits_in_one_atomic_call() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, grep tool cases.
 #[tokio::test]
-#[ignore = "Mu has not implemented grep"]
 async fn pi_grep_obeys_global_limit_and_context_without_returning_later_matches() {
     let dir = temp_dir("grep-context");
     fs::write(
@@ -125,9 +127,42 @@ async fn pi_grep_obeys_global_limit_and_context_without_returning_later_matches(
     cleanup(&dir);
 }
 
+#[tokio::test]
+async fn pi_grep_treats_flag_like_patterns_as_search_text_and_supports_literal_mode() {
+    let dir = temp_dir("grep-patterns");
+    fs::write(dir.join("sample.txt"), "-flag value\nNeedle\nliteral.dot\n").unwrap();
+
+    let flag = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":"-flag","path":"sample.txt"}),
+    )
+    .await
+    .unwrap();
+    assert!(flag.content.contains("sample.txt:1: -flag value"));
+
+    let case_insensitive = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":"needle","path":"sample.txt","ignoreCase":true}),
+    )
+    .await
+    .unwrap();
+    assert!(case_insensitive.content.contains("sample.txt:2: Needle"));
+
+    let literal = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":".","path":"sample.txt","literal":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(literal.content, "sample.txt:3: literal.dot");
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts, find and ls cases.
 #[tokio::test]
-#[ignore = "Mu has not implemented find"]
 async fn pi_find_includes_hidden_files_and_respects_gitignore() {
     let dir = temp_dir("find");
     fs::create_dir_all(dir.join(".secret")).unwrap();
@@ -143,6 +178,23 @@ async fn pi_find_includes_hidden_files_and_respects_gitignore() {
     assert!(result.content.contains("visible.txt"));
     assert!(result.content.contains(".secret/hidden.txt"));
     assert!(!result.content.contains("ignored.txt"));
+    cleanup(&dir);
+}
+
+#[tokio::test]
+async fn pi_find_treats_flag_like_patterns_as_globs_and_reports_invalid_globs() {
+    let dir = temp_dir("find-flags");
+    fs::write(dir.join("-report.txt"), "report").unwrap();
+
+    let found = execute(&dir, "find", &json!({"pattern":"-report.txt","path":"."}))
+        .await
+        .unwrap();
+    assert_eq!(found.content, "-report.txt");
+
+    let error = execute(&dir, "find", &json!({"pattern":"{invalid","path":"."}))
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().is_empty());
     cleanup(&dir);
 }
 
