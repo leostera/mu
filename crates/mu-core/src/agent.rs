@@ -465,9 +465,6 @@ fn tool_prompt_guidelines(name: &str) -> &'static [&'static str] {
             "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
         ],
         "write" => &["Use write only for new files or complete rewrites."],
-        "bash" | "powershell" => {
-            &["You can inspect PI_* environment variables for current model and session details."]
-        }
         _ => &[],
     }
 }
@@ -2843,6 +2840,7 @@ mod tests {
             &[serde_json::json!({"name":"bash"})],
         );
         assert!(shell_only.contains("Use bash for file operations like ls, rg, find"));
+        assert!(!shell_only.contains("PI_* environment variables"));
         let shell_with_search = super::instructions_for_tools(
             "base instructions",
             &[
