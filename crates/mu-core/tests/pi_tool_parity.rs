@@ -175,6 +175,30 @@ async fn pi_edit_application_errors_are_returned_without_mu_prefixes() {
 }
 
 #[tokio::test]
+async fn pi_edit_diff_line_number_width_counts_trailing_empty_line() {
+    let dir = temp_dir("edit-diff-line-width");
+    let path = dir.join("nine-lines.txt");
+    let original = (1..=9)
+        .map(|line| format!("line{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&path, &original).unwrap();
+
+    let result = execute(
+        &dir,
+        "edit",
+        &json!({"path":"nine-lines.txt","edits":[{"oldText":"line9","newText":"changed"}]}),
+    )
+    .await
+    .unwrap();
+    let diff = result.details.unwrap()["diff"].as_str().unwrap().to_owned();
+    assert!(diff.contains("- 9 line9"), "{diff}");
+    assert!(diff.contains("+ 9 changed"), "{diff}");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_edit_rejects_noop_replacements_with_single_and_multi_edit_errors() {
     let dir = temp_dir("edit-noop");
     let path = dir.join("same.txt");

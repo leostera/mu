@@ -581,8 +581,10 @@ pub fn compute_edit_diff(cwd: &Path, requested_path: &str, edits: &[TextEdit]) -
 
 fn edit_details(old_content: &str, new_content: &str, path: &Path) -> Value {
     let diff = TextDiff::from_lines(old_content, new_content);
-    let old_lines = old_content.lines().count().max(1);
-    let new_lines = new_content.lines().count().max(1);
+    // Pi numbers against `String.split("\\n")`, which keeps the trailing empty
+    // segment when content ends in a newline. `str::lines` drops that segment.
+    let old_lines = old_content.split('\n').count();
+    let new_lines = new_content.split('\n').count();
     let line_number_width = old_lines.max(new_lines).to_string().len();
     let mut display_lines = Vec::new();
     let mut first_changed_line = None;

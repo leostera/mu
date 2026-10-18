@@ -35,7 +35,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 - [ ] Complete `write` behavior/error parity: success text now uses the requested path; writes and edits share canonical-path async serialization, including symlink aliases. Still port Pi-specific filesystem errors and deterministic same-path/queued-cancellation tests.
 - [ ] Finish `edit` argument/error parity: Mu now accepts JSON-stringified arrays, valid object-shaped edits, mixed legacy fields even when a prior `edits` value is malformed, and reports Pi-shaped ENOENT/EACCES codes and raw operation errors without Mu prefixes; still port remaining exact invalid-input failure cases.
 - [x] Implement `edit` fuzzy matching (NFKC, trailing whitespace, smart quotes/dashes, special spaces), normalized duplicate detection, untouched-line preservation, and exact-first matching; deterministic unit tests cover each category.
-- [ ] Finish `edit` output/error parity: execution now returns unified patch, collapsed display diff, first changed line, and preserves no-partial-write behavior; `compute_edit_diff` now provides Pi's non-mutating `{ diff, firstChangedLine }` / `{ error }` preview contract; still port EACCES/custom-operation errors and applicable-patch/failure edge tests.
+- [ ] Finish `edit` output/error parity: execution now returns unified patch, collapsed display diff, first changed line (including Pi's trailing-empty-line numbering), and preserves no-partial-write behavior; `compute_edit_diff` now provides Pi's non-mutating `{ diff, firstChangedLine }` / `{ error }` preview contract; still port EACCES/custom-operation errors and applicable-patch/failure edge tests.
 
 ### Shell tools
 
