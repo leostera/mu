@@ -99,6 +99,8 @@ fn resolve(cwd: &Path, args: &Value) -> Result<PathBuf, ToolError> {
 
 fn resolve_input_path(cwd: &Path, input: &str) -> Result<PathBuf, ToolError> {
     let normalized = normalize_path_input(input);
+    #[cfg(windows)]
+    let normalized = crate::path_utils::normalize_windows_shell_path(&normalized);
     let path = if normalized.starts_with("file://") {
         url::Url::parse(&normalized)
             .ok()
