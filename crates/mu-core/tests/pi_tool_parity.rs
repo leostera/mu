@@ -231,6 +231,18 @@ async fn pi_edit_accepts_legacy_mixed_object_and_stringified_edits() {
             .to_string()
             .contains("Edit tool input is invalid. edits must contain at least one replacement.")
     );
+    let malformed_object = execute(
+        &dir,
+        "edit",
+        &json!({"path":"input.txt","edits":{"unexpected":"shape"}}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        malformed_object
+            .to_string()
+            .contains("Edit tool input is invalid. edits must contain at least one replacement.")
+    );
     assert_eq!(fs::read_to_string(&path).unwrap(), "one TWO THREE");
     cleanup(&dir);
 }

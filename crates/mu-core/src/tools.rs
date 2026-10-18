@@ -427,12 +427,25 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
                 *edits = parsed;
             }
         }
-        if edits.is_object() {
+        if edits.get("oldText").and_then(Value::as_str).is_some()
+            && edits.get("newText").and_then(Value::as_str).is_some()
+        {
             *edits = Value::Array(vec![edits.take()]);
         }
     }
-    if let (Some(old), Some(new)) = (object.remove("oldText"), object.remove("newText")) {
-        let legacy = json!({"oldText":old,"newText":new});
+    let legacy = match (
+        object.get("oldText").and_then(Value::as_str),
+        object.get("newText").and_then(Value::as_str),
+    ) {
+        (Some(old), Some(new)) => {
+            let legacy = json!({"oldText":old,"newText":new});
+            object.remove("oldText");
+            object.remove("newText");
+            Some(legacy)
+        }
+        _ => None,
+    };
+    if let Some(legacy) = legacy {
         match object.remove("edits") {
             Some(Value::Array(mut edits)) => {
                 edits.push(legacy);
