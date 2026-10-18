@@ -904,6 +904,17 @@ async fn pi_optional_search_arguments_treat_null_like_pi_defaults() {
 }
 
 #[tokio::test]
+async fn pi_find_empty_pattern_matches_all_entries_like_fd() {
+    let dir = temp_dir("find-empty-pattern");
+    fs::create_dir(dir.join("folder")).unwrap();
+    fs::write(dir.join("file.txt"), "").unwrap();
+
+    let result = execute(&dir, "find", &json!({"pattern":""})).await.unwrap();
+    assert_eq!(result.content, "file.txt\nfolder/");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_preserves_fd_numeric_limit_parse_errors() {
     let dir = temp_dir("find-invalid-limit");
     fs::write(dir.join("one.txt"), "").unwrap();

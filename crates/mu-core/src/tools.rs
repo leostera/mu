@@ -1375,7 +1375,9 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
     };
     let match_full_path = pattern.contains('/');
     let match_absolute_path = match_full_path && Path::new(pattern).is_absolute();
-    let effective_pattern = if match_full_path
+    let effective_pattern = if pattern.is_empty() {
+        "**".to_owned()
+    } else if match_full_path
         && !match_absolute_path
         && !pattern.starts_with("**/")
         && pattern != "**"
