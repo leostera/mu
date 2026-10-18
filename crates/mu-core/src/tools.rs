@@ -13,6 +13,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use similar::{ChangeTag, TextDiff};
 use thiserror::Error;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    sync::Mutex as AsyncMutex,
+    task::JoinHandle,
+};
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Error)]
@@ -1287,6 +1292,32 @@ fn shell_timeout(args: &Value) -> Result<Option<Duration>, ToolError> {
         .map_err(|_| ToolError::Arguments("Invalid timeout: invalid duration".into()))
 }
 
+async fn capture_stream<R>(mut stream: R, captured: Arc<AsyncMutex<Vec<u8>>>)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut chunk = [0; 8192];
+    loop {
+        let bytes_read = match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(bytes_read) => bytes_read,
+        };
+        captured
+            .lock()
+            .await
+            .extend_from_slice(&chunk[..bytes_read]);
+    }
+}
+
+async fn finish_capture(mut capture: JoinHandle<()>) {
+    if tokio::time::timeout(Duration::from_millis(250), &mut capture)
+        .await
+        .is_err()
+    {
+        capture.abort();
+    }
+}
+
 async fn run_shell_process(
     cwd: &Path,
     mut process: tokio::process::Command,
@@ -1304,19 +1335,48 @@ async fn run_shell_process(
         .envs(environment)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = process.output();
-    match timeout {
-        Some(timeout) => tokio::time::timeout(timeout, output)
-            .await
-            .map_err(|_| {
-                ToolError::Command(format!(
-                    "Command timed out after {} seconds",
-                    timeout.as_secs_f64()
-                ))
-            })?
-            .map_err(ToolError::Io),
-        None => output.await.map_err(ToolError::Io),
-    }
+    let mut child = process.spawn().map_err(ToolError::Io)?;
+    let stdout = Arc::new(AsyncMutex::new(Vec::new()));
+    let stderr = Arc::new(AsyncMutex::new(Vec::new()));
+    let stdout_capture = tokio::spawn(capture_stream(
+        child.stdout.take().expect("stdout is piped"),
+        Arc::clone(&stdout),
+    ));
+    let stderr_capture = tokio::spawn(capture_stream(
+        child.stderr.take().expect("stderr is piped"),
+        Arc::clone(&stderr),
+    ));
+
+    let status = match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status.map_err(ToolError::Io)?,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                finish_capture(stdout_capture).await;
+                finish_capture(stderr_capture).await;
+                let mut partial = String::from_utf8_lossy(&stdout.lock().await).into_owned();
+                partial.push_str(&String::from_utf8_lossy(&stderr.lock().await));
+                let partial = sanitize_shell_output(&partial);
+                let timeout_message =
+                    format!("Command timed out after {} seconds", timeout.as_secs_f64());
+                let message = if partial.is_empty() {
+                    timeout_message
+                } else {
+                    format!("{partial}\n\n{timeout_message}")
+                };
+                return Err(ToolError::Command(message));
+            }
+        },
+        None => child.wait().await.map_err(ToolError::Io)?,
+    };
+    finish_capture(stdout_capture).await;
+    finish_capture(stderr_capture).await;
+    Ok(Output {
+        status,
+        stdout: stdout.lock().await.clone(),
+        stderr: stderr.lock().await.clone(),
+    })
 }
 
 async fn run_bash(
@@ -2120,15 +2180,16 @@ mod tests {
         let timeout = execute(
             &dir,
             "bash",
-            &json!({"command":"while :; do :; done","timeout":0.05}),
+            &json!({"command":"printf 'started'; while :; do :; done","timeout":0.5}),
         )
         .await
         .unwrap_err();
         assert!(
             timeout
                 .to_string()
-                .contains("Command timed out after 0.05 seconds")
+                .contains("Command timed out after 0.5 seconds")
         );
+        assert!(timeout.to_string().contains("started\n\n"), "{timeout}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
