@@ -1361,10 +1361,17 @@ async fn finish_capture(mut capture: JoinHandle<()>) {
 
 async fn run_shell_process(
     cwd: &Path,
+    shell_name: &str,
     mut process: tokio::process::Command,
     timeout: Option<Duration>,
     environment: &HashMap<String, String>,
 ) -> Result<Output, ToolError> {
+    if !cwd.exists() {
+        return Err(ToolError::Command(format!(
+            "Working directory does not exist: {}\nCannot execute {shell_name} commands.",
+            cwd.display()
+        )));
+    }
     process
         .current_dir(cwd)
         .kill_on_drop(true)
@@ -1432,7 +1439,7 @@ async fn run_bash(
     let shell = default_bash_shell()?;
     let mut process = tokio::process::Command::new(shell);
     process.args(["-c", command]);
-    let output = run_shell_process(cwd, process, timeout, environment).await?;
+    let output = run_shell_process(cwd, "bash", process, timeout, environment).await?;
     Ok(shell_result(output, started_at))
 }
 
@@ -1551,7 +1558,7 @@ async fn run_powershell(
             "-Command",
             &command,
         ]);
-        let output = run_shell_process(cwd, process, timeout, environment).await?;
+        let output = run_shell_process(cwd, "PowerShell", process, timeout, environment).await?;
         Ok(shell_result(output, started_at))
     }
 }

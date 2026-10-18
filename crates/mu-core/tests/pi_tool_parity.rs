@@ -646,6 +646,19 @@ async fn pi_bash_nonzero_exit_is_returned_as_an_error_tool_result() {
     cleanup(&dir);
 }
 
+#[tokio::test]
+async fn pi_bash_reports_a_missing_working_directory_before_spawn() {
+    let missing = temp_dir("bash-missing-cwd").join("missing");
+    let error = execute(&missing, "bash", &json!({"command":"true"}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(&format!(
+        "Working directory does not exist: {}\nCannot execute bash commands.",
+        missing.display()
+    )));
+    cleanup(missing.parent().unwrap());
+}
+
 #[cfg(not(windows))]
 #[tokio::test]
 async fn powershell_reports_its_windows_only_platform_requirement() {
