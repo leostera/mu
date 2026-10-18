@@ -1089,7 +1089,7 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
         None => None,
         Some(Value::String(glob)) => Some(
             Glob::new(glob)
-                .map_err(|error| ToolError::Command(error.to_string()))?
+                .map_err(|error| ToolError::Command(format!("rg: {error}")))?
                 .compile_matcher(),
         ),
         Some(_) => return Err(ToolError::Arguments("`glob` must be a string".into())),
@@ -1134,7 +1134,7 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
     let regex = RegexBuilder::new(&pattern)
         .case_insensitive(ignore_case)
         .build()
-        .map_err(|error| ToolError::Command(error.to_string()))?;
+        .map_err(|error| ToolError::Command(format!("rg: {error}")))?;
     Ok(GrepInput {
         regex,
         path,
@@ -1347,7 +1347,7 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::Arguments("`pattern` must be a string".into()))?;
     let pattern = Glob::new(pattern)
-        .map_err(|error| ToolError::Command(error.to_string()))?
+        .map_err(|error| ToolError::Command(format!("[fd error]: {error}")))?
         .compile_matcher();
     let path = match object.get("path") {
         None => cwd.to_owned(),

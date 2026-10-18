@@ -977,8 +977,11 @@ async fn pi_find_treats_flag_like_patterns_as_globs_and_reports_invalid_globs() 
     let error = execute(&dir, "find", &json!({"pattern":"{invalid","path":"."}))
         .await
         .unwrap_err();
-    assert!(!error.to_string().is_empty());
-    assert!(!error.to_string().starts_with("invalid arguments:"));
+    assert!(
+        error
+            .to_string()
+            .starts_with("[fd error]: error parsing glob")
+    );
     cleanup(&dir);
 }
 
@@ -989,12 +992,16 @@ async fn pi_search_tools_return_raw_regex_and_glob_errors() {
     let regex_error = execute(&dir, "grep", &json!({"pattern":"("}))
         .await
         .unwrap_err();
-    assert!(!regex_error.to_string().starts_with("invalid arguments:"));
+    assert!(
+        regex_error
+            .to_string()
+            .starts_with("rg: regex parse error:")
+    );
 
     let glob_error = execute(&dir, "grep", &json!({"pattern":"needle","glob":"{"}))
         .await
         .unwrap_err();
-    assert!(!glob_error.to_string().starts_with("invalid arguments:"));
+    assert!(glob_error.to_string().starts_with("rg: error parsing glob"));
     cleanup(&dir);
 }
 
