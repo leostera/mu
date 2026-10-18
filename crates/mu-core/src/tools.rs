@@ -1440,7 +1440,7 @@ async fn run_bash(
     let mut process = tokio::process::Command::new(shell);
     process.args(["-c", command]);
     let output = run_shell_process(cwd, "bash", process, timeout, environment).await?;
-    Ok(shell_result(output, started_at))
+    Ok(shell_result(output, started_at, "pi-bash"))
 }
 
 fn default_bash_shell() -> Result<PathBuf, ToolError> {
@@ -1559,7 +1559,7 @@ async fn run_powershell(
             &command,
         ]);
         let output = run_shell_process(cwd, "PowerShell", process, timeout, environment).await?;
-        Ok(shell_result(output, started_at))
+        Ok(shell_result(output, started_at, "pi-powershell"))
     }
 }
 
@@ -1622,7 +1622,7 @@ fn strip_string_sequence(
     }
 }
 
-fn shell_result(output: Output, started_at: Instant) -> ToolResult {
+fn shell_result(output: Output, started_at: Instant, temp_file_prefix: &str) -> ToolResult {
     const STRUCTURED_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
     let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
     full_output.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -1635,7 +1635,8 @@ fn shell_result(output: Output, started_at: Instant) -> ToolResult {
     let mut details = serde_json::Map::new();
     let mut full_output_path = None;
     if let Some(truncation) = truncation {
-        let path = std::env::temp_dir().join(format!("mu-bash-{}.txt", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("{temp_file_prefix}-{}.txt", uuid::Uuid::new_v4()));
         if std::fs::write(&path, &full_output).is_ok() {
             let path = path.to_string_lossy().into_owned();
             append_shell_truncation_notice(&mut content, &truncation, &full_output, &path);
@@ -2552,6 +2553,13 @@ mod tests {
         assert_eq!(details["truncation"]["outputLines"], 2000);
         assert_eq!(result.content.lines().count(), 2002);
         let full_path = PathBuf::from(details["fullOutputPath"].as_str().unwrap());
+        assert!(
+            full_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("pi-bash-")
+        );
         let full_output = std::fs::read_to_string(&full_path).unwrap();
         assert_eq!(full_output.lines().count(), 2001);
         assert_eq!(
