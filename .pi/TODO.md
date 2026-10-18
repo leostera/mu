@@ -23,7 +23,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 ### Shared tool contract and activation
 
 - [ ] Finish the built-in result contract: Mu now carries plain text plus optional `details`, `structured_content`, and `is_error`; still add ordered text/image content blocks, progress/cancellation, and render state, then preserve all fields through agent history and Pi session JSONL.
-- [ ] Expose all eight Pi built-ins (`read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `powershell`) with Pi-compatible JSON schemas; port `default-tools-setting.test.ts` and schema/invalid-input cases.
+- [ ] Complete built-in activation: all eight Pi tool schemas, including PowerShell, are exposed and the name/schema spec is active; still implement `defaultTools`/platform selection semantics and port default-tools-setting and full invalid-input cases.
 - [ ] Implement Pi tool loadouts (coding/read-only/all), `defaultTools`, `+name`/`-name` modifiers, explicit-option precedence, custom-tool activation, reload/resume restoration, and platform-specific Bash/PowerShell choice.
 - [ ] Port strict-sampling metadata and opt-outs for the matching built-ins; keep optional schema fields optional. Port per-tool prompt snippets/guidelines and cwd-from-execution-context behavior.
 
@@ -41,7 +41,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 - [ ] Complete Bash parity: Mu now returns Pi-style nonzero error results and 1 MiB-capped structured output with exit code/duration; still add streamed UTF-8 output, model-facing line/byte truncation and full-output persistence/path, progress coalescing, timeout, cancellation, and the remaining process lifecycle.
 - [ ] Match Bash timeout/abort output, invalid/missing cwd, spawn errors, signal/null-exit handling, process-tree termination, inherited-stdio late-child cleanup, shell path/transport/WSL behavior, command prefix, environment exposure, and spawn hooks.
-- [ ] Implement the PowerShell tool on the shared shell contract, including process-local UTF-8 setup and Windows execution-policy behavior.
+- [ ] Complete PowerShell parity: Mu now exposes the tool, uses `pwsh.exe`/`powershell.exe` with Pi's no-profile/non-interactive/bypass flags and process-local UTF-8 output, and shares structured shell results; still test Windows executable discovery/fallback and port remaining timeout, cancellation, hooks, and process lifecycle behavior.
 - [ ] Port the Bash/PowerShell lifecycle, truncation, progress, shell-selection, output persistence, and Windows tests using injectable operations/fakes where possible; keep live local process tests small and platform-gated.
 
 ### Search and listing tools

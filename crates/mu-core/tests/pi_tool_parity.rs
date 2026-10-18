@@ -32,7 +32,16 @@ fn current_builtin_definitions_are_valid_json_schemas() {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["bash", "edit", "find", "grep", "ls", "read", "write"]
+        [
+            "bash",
+            "edit",
+            "find",
+            "grep",
+            "ls",
+            "powershell",
+            "read",
+            "write",
+        ]
     );
 
     for definition in definitions {
@@ -45,7 +54,6 @@ fn current_builtin_definitions_are_valid_json_schemas() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts and test/default-tools-setting.test.ts.
 #[tokio::test]
-#[ignore = "Mu has not implemented Pi's PowerShell tool"]
 async fn pi_default_builtin_tool_set_contains_all_eight_tools() {
     let definitions = definitions();
     let mut names = definitions
@@ -420,9 +428,19 @@ async fn pi_bash_nonzero_exit_is_returned_as_an_error_tool_result() {
     cleanup(&dir);
 }
 
+#[cfg(not(windows))]
+#[tokio::test]
+async fn powershell_reports_its_windows_only_platform_requirement() {
+    let dir = temp_dir("powershell-platform");
+    let error = execute(&dir, "powershell", &json!({"command":"Get-Location"}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("only available on Windows"));
+    cleanup(&dir);
+}
+
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "Mu has not implemented the Pi PowerShell tool"]
 async fn pi_powershell_runs_with_process_local_utf8_configuration() {
     let dir = temp_dir("powershell");
     let result = execute(

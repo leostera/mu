@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Output, Stdio},
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
     time::Instant,
 };
@@ -52,6 +52,7 @@ pub fn definitions() -> Vec<Value> {
         json!({"type":"function","name":"write","description":"Write content to a file, creating parent directories as needed.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}}),
         json!({"type":"function","name":"edit","description":"Edit a single file using exact text replacements. Each edits[].oldText must match a unique, non-overlapping region of the original file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false}}),
         json!({"type":"function","name":"bash","description":"Run a shell command in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}),
+        json!({"type":"function","name":"powershell","description":"Execute PowerShell commands in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}),
         json!({"type":"function","name":"ls","description":"List directory contents, including dotfiles. Entries are sorted alphabetically; directories have a trailing slash.","parameters":{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"number","description":"Maximum number of entries to return (default: 500)"}},"additionalProperties":false}}),
         json!({"type":"function","name":"grep","description":"Search file contents for a pattern. Respects .gitignore and returns matching lines with file paths and line numbers.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},"context":{"type":"number"},"limit":{"type":"number"}},"required":["pattern"],"additionalProperties":false}}),
         json!({"type":"function","name":"find","description":"Find files by glob pattern. Includes hidden files and respects .gitignore.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"limit":{"type":"number"}},"required":["pattern"],"additionalProperties":false}}),
@@ -64,6 +65,7 @@ pub async fn execute(cwd: &Path, name: &str, arguments: &Value) -> Result<ToolRe
         "write" => write_file(cwd, arguments).await,
         "edit" => edit_file(cwd, arguments).await,
         "bash" => run_bash(cwd, arguments).await,
+        "powershell" => run_powershell(cwd, arguments).await,
         "ls" => list_directory(cwd, arguments),
         "grep" => grep_files(cwd, arguments),
         "find" => find_files(cwd, arguments),
@@ -1179,7 +1181,6 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
 }
 
 async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
-    const STRUCTURED_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
     let started_at = Instant::now();
     let command = string_arg(args, "command")?;
     #[cfg(windows)]
@@ -1196,6 +1197,60 @@ async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         .stderr(Stdio::piped())
         .output()
         .await?;
+    Ok(shell_result(output, started_at))
+}
+
+#[cfg(any(windows, test))]
+fn powershell_command_with_utf8_output(command: &str) -> String {
+    format!(
+        "try {{ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 }} catch {{}}\n{command}"
+    )
+}
+
+async fn run_powershell(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let command = string_arg(args, "command")?;
+    #[cfg(not(windows))]
+    {
+        let _ = (cwd, command);
+        Err(ToolError::Arguments(
+            "The powershell tool is only available on Windows.".into(),
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let started_at = Instant::now();
+        let command = powershell_command_with_utf8_output(command);
+        let powershell = ["pwsh.exe", "powershell.exe"]
+            .into_iter()
+            .find_map(|name| {
+                std::env::var_os("PATH")
+                    .into_iter()
+                    .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+                    .map(|path| path.join(name))
+                    .find(|path| path.is_file())
+            })
+            .unwrap_or_else(|| PathBuf::from("powershell.exe"));
+        let mut process = tokio::process::Command::new(powershell);
+        process.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &command,
+        ]);
+        let output = process
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        Ok(shell_result(output, started_at))
+    }
+}
+
+fn shell_result(output: Output, started_at: Instant) -> ToolResult {
+    const STRUCTURED_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
     let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
     full_output.push_str(&String::from_utf8_lossy(&output.stderr));
     let exit_code = output.status.code().unwrap_or(1);
@@ -1204,13 +1259,13 @@ async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let mut content = if full_output.is_empty() {
         "(no output)".to_owned()
     } else {
-        full_output.clone()
+        full_output
     };
     let is_error = exit_code != 0;
     if is_error {
         content.push_str(&format!("\n\nCommand exited with code {exit_code}"));
     }
-    Ok(ToolResult {
+    ToolResult {
         content,
         details: None,
         structured_content: Some(json!({
@@ -1220,7 +1275,7 @@ async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             "wall_time_seconds": wall_time_seconds,
         })),
         is_error,
-    })
+    }
 }
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
@@ -1256,6 +1311,14 @@ mod tests {
         assert!(Arc::ptr_eq(&target_lock, &alias_lock));
         assert!(!Arc::ptr_eq(&target_lock, &other_lock));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn powershell_sets_process_local_utf8_output_before_user_commands() {
+        assert_eq!(
+            powershell_command_with_utf8_output("Get-Location"),
+            "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}\nGet-Location"
+        );
     }
 
     #[test]
