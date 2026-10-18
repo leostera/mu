@@ -855,6 +855,29 @@ async fn pi_find_matches_path_globs_from_nested_roots_and_absolute_patterns() {
 }
 
 #[tokio::test]
+async fn pi_find_preserves_fd_numeric_limit_parse_errors() {
+    let dir = temp_dir("find-invalid-limit");
+    fs::write(dir.join("one.txt"), "").unwrap();
+
+    let negative = execute(&dir, "find", &json!({"pattern":"*.txt","limit":-1}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        negative.to_string(),
+        "error: a value is required for '--max-results <count>' but none was supplied\n\nFor more information, try '--help'."
+    );
+
+    let fractional = execute(&dir, "find", &json!({"pattern":"*.txt","limit":1.5}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        fractional.to_string(),
+        "error: invalid value '1.5' for '--max-results <count>': invalid digit found in string\n\nFor more information, try '--help'."
+    );
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_treats_zero_limit_as_unbounded_fd_results() {
     let dir = temp_dir("find-zero-limit");
     fs::write(dir.join("one.txt"), "1").unwrap();

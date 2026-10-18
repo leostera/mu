@@ -1164,22 +1164,6 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
     })
 }
 
-fn optional_nonnegative_integer(
-    value: Option<&Value>,
-    name: &str,
-) -> Result<Option<usize>, ToolError> {
-    value
-        .map(|value| {
-            value
-                .as_u64()
-                .and_then(|number| usize::try_from(number).ok())
-                .ok_or_else(|| {
-                    ToolError::Arguments(format!("`{name}` must be a non-negative integer"))
-                })
-        })
-        .transpose()
-}
-
 fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let input = parse_grep_input(cwd, args)?;
     let is_directory = input.path.is_dir();
@@ -1390,8 +1374,7 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         .build()
         .map_err(|error| ToolError::Command(format!("[fd error]: {error}")))?
         .compile_matcher();
-    let limit =
-        optional_nonnegative_integer(object.get("limit"), "limit")?.unwrap_or(FIND_DEFAULT_LIMIT);
+    let limit = parse_find_limit(object.get("limit"))?;
     Ok(FindInput {
         pattern,
         path,
@@ -1399,6 +1382,46 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         match_absolute_path,
         match_full_path,
     })
+}
+
+fn parse_find_limit(value: Option<&Value>) -> Result<usize, ToolError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(FIND_DEFAULT_LIMIT);
+    };
+    let Some(limit) = value.as_f64().filter(|limit| limit.is_finite()) else {
+        return Err(ToolError::Arguments(
+            "`limit` must be a finite number".into(),
+        ));
+    };
+    let rendered = value.to_string();
+    let fd_error = |message: &str| {
+        ToolError::Command(format!(
+            "error: {message}\n\nFor more information, try '--help'."
+        ))
+    };
+    if limit < 0.0 {
+        return Err(fd_error(
+            "a value is required for '--max-results <count>' but none was supplied",
+        ));
+    }
+    if limit.fract() != 0.0 {
+        return Err(fd_error(&format!(
+            "invalid value '{rendered}' for '--max-results <count>': invalid digit found in string"
+        )));
+    }
+    if let Some(integer) = value.as_u64() {
+        return usize::try_from(integer).map_err(|_| {
+            fd_error(&format!(
+                "invalid value '{rendered}' for '--max-results <count>': number too large to fit in target type"
+            ))
+        });
+    }
+    if limit >= u64::MAX as f64 || limit > usize::MAX as f64 {
+        return Err(fd_error(&format!(
+            "invalid value '{rendered}' for '--max-results <count>': number too large to fit in target type"
+        )));
+    }
+    Ok(limit as usize)
 }
 
 fn collect_candidates_with_nested_repositories(search_root: &Path) -> Vec<PathBuf> {
