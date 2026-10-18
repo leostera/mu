@@ -1008,7 +1008,7 @@ struct GrepInput {
     regex: Regex,
     path: PathBuf,
     glob: Option<GlobMatcher>,
-    context: usize,
+    context: f64,
     limit: f64,
 }
 
@@ -1049,7 +1049,16 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
         Some(Value::Bool(value)) => *value,
         Some(_) => return Err(ToolError::Arguments("`literal` must be a boolean".into())),
     };
-    let context = optional_nonnegative_integer(object.get("context"), "context")?.unwrap_or(0);
+    let context = match object.get("context") {
+        None => 0.0,
+        Some(value) => {
+            let context = value
+                .as_f64()
+                .filter(|context| context.is_finite())
+                .ok_or_else(|| ToolError::Arguments("`context` must be a finite number".into()))?;
+            context.max(0.0)
+        }
+    };
     let limit = match object.get("limit") {
         None => GREP_DEFAULT_LIMIT as f64,
         Some(value) => value
@@ -1143,31 +1152,37 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
                 break 'files;
             }
             match_count += 1;
-            let (first, last, formatted_lines) = if input.context == 0 {
-                (index, index, match_lines.as_slice())
-            } else {
-                let line_number = index + 1;
-                (
-                    line_number.saturating_sub(input.context).max(1) - 1,
-                    (line_number + input.context).min(context_lines.len()) - 1,
-                    context_lines.as_slice(),
-                )
-            };
-            for (context_index, text) in formatted_lines
-                .iter()
-                .enumerate()
-                .take(last + 1)
-                .skip(first)
-            {
+            if input.context == 0.0 {
+                let sanitized = line.replace('\r', "");
+                let (text, was_truncated) = truncate_grep_line(&sanitized);
+                lines_truncated |= was_truncated;
+                formatted_matches.push(format!("{display_path}:{}: {text}", index + 1));
+                continue;
+            }
+
+            let match_line = (index + 1) as f64;
+            let start_line = (match_line - input.context).max(1.0);
+            let end_line = (match_line + input.context).min(context_lines.len() as f64);
+            let mut current_line = start_line;
+            while current_line <= end_line {
+                let text = if current_line.fract() == 0.0 {
+                    context_lines
+                        .get(current_line as usize - 1)
+                        .map(String::as_str)
+                        .unwrap_or("")
+                } else {
+                    ""
+                };
                 let sanitized = text.replace('\r', "");
                 let (text, was_truncated) = truncate_grep_line(&sanitized);
                 lines_truncated |= was_truncated;
-                let line_number = context_index + 1;
-                if context_index == index {
+                let line_number = format_json_number(current_line);
+                if current_line == match_line {
                     formatted_matches.push(format!("{display_path}:{line_number}: {text}"));
                 } else {
                     formatted_matches.push(format!("{display_path}-{line_number}- {text}"));
                 }
+                current_line += 1.0;
             }
         }
     }

@@ -569,6 +569,18 @@ async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, read boundary and empty-file cases.
 #[tokio::test]
+async fn pi_grep_fractional_context_preserves_pi_number_and_array_index_semantics() {
+    let dir = temp_dir("grep-fractional-context");
+    fs::write(dir.join("input.txt"), "zero\nmatch\nafter\n").unwrap();
+
+    let result = execute(&dir, "grep", &json!({"pattern":"match","context":0.5}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "input.txt-1.5- \ninput.txt-2.5- ");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_grep_binary_context_uses_original_nul_containing_file_lines() {
     let dir = temp_dir("grep-nul-context");
     fs::write(dir.join("binary.txt"), b"left\0right\n").unwrap();
