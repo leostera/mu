@@ -2397,6 +2397,79 @@ mod tests {
     }
 
     #[test]
+    fn skill_reads_use_compact_labels_and_hide_success_contents_until_expanded() {
+        let skill_read = ToolActivity {
+            call_id: "skill-read".into(),
+            name: "read".into(),
+            arguments: serde_json::json!({"path":"/home/user/.pi/skills/rust/SKILL.md"}),
+            output: Some("private skill instructions".into()),
+            error: false,
+        };
+        assert_eq!(skill_name(&skill_read), Some("rust"));
+        assert_eq!(tool_label(&skill_read, false), "[skill] rust");
+        assert_eq!(tool_label(&skill_read, true), "read");
+        assert!(!tool_output_visible(&skill_read, false));
+        assert!(tool_output_visible(&skill_read, true));
+
+        let ordinary_read = ToolActivity {
+            arguments: serde_json::json!({"path":"/project/README.md"}),
+            ..skill_read.clone()
+        };
+        assert_eq!(skill_name(&ordinary_read), None);
+        assert!(tool_output_visible(&ordinary_read, false));
+
+        let failed_skill_read = ToolActivity {
+            error: true,
+            ..skill_read
+        };
+        assert!(tool_output_visible(&failed_skill_read, false));
+    }
+
+    #[test]
+    fn renders_skill_reads_compactly_then_expands_on_ctrl_o_state() {
+        let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
+        app.messages.push(Message {
+            role: Role::Assistant,
+            text: String::new(),
+            thinking: String::new(),
+            tools: vec![ToolActivity {
+                call_id: "skill-read".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path":"/project/.pi/skills/rust/SKILL.md"}),
+                output: Some("specialized instructions".into()),
+                error: false,
+            }],
+            error: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let compact = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(compact.contains("[skill] rust"));
+        assert!(compact.contains("ctrl+o to expand"));
+        assert!(!compact.contains("specialized instructions"));
+
+        app.tools_expanded = true;
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let expanded = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(expanded.contains("read"));
+        assert!(expanded.contains("SKILL.md"));
+        assert!(expanded.contains("specialized instructions"));
+    }
+
+    #[test]
     fn renders_streaming_thinking_and_tool_activity_in_the_assistant_turn() {
         let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
         app.messages.push(Message {
