@@ -1710,6 +1710,34 @@ fn isolate_process_group(process: &mut tokio::process::Command) {
     let _ = process;
 }
 
+struct ProcessGroupGuard {
+    process_id: Option<u32>,
+}
+
+impl ProcessGroupGuard {
+    fn new(process_id: Option<u32>) -> Self {
+        Self { process_id }
+    }
+
+    fn disarm(&mut self) {
+        self.process_id = None;
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(process_id) = self.process_id {
+            // An aborted tool future drops this guard; stop descendants with the shell.
+            unsafe {
+                libc::kill(-(process_id as i32), libc::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = self.process_id;
+    }
+}
+
 async fn terminate_process_tree(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(process_id) = child.id() {
@@ -1813,6 +1841,7 @@ async fn run_shell_process(
         .stderr(Stdio::piped());
     isolate_process_group(&mut process);
     let mut child = process.spawn().map_err(shell_spawn_error)?;
+    let mut process_group = ProcessGroupGuard::new(child.id());
     let captured = Arc::new(AsyncMutex::new(Vec::new()));
     let (updates_sender, mut updates_receiver) = tokio::sync::mpsc::unbounded_channel();
     let capture = tokio::spawn(capture_streams(
@@ -1828,6 +1857,7 @@ async fn run_shell_process(
             Err(_) => {
                 terminate_process_tree(&mut child).await;
                 let _ = child.wait().await;
+                process_group.disarm();
                 finish_capture(capture, &mut updates_receiver).await;
                 let full_output =
                     sanitize_shell_output(&String::from_utf8_lossy(&captured.lock().await));
@@ -1861,6 +1891,7 @@ async fn run_shell_process(
         None => child.wait().await.map_err(ToolError::Io)?,
     };
     finish_capture(capture, &mut updates_receiver).await;
+    process_group.disarm();
     Ok(Output {
         status,
         stdout: captured.lock().await.clone(),
@@ -3027,6 +3058,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    #[test]
+    fn dropping_process_group_guard_terminates_shell_and_descendants() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = std::process::Command::new("/bin/bash");
+        command.args(["-c", "sleep 60"]).process_group(0);
+        let mut child = command.spawn().expect("start bash process");
+        let process_id = child.id();
+        drop(ProcessGroupGuard::new(Some(process_id)));
+        child.wait().expect("reap terminated bash process");
+        assert_ne!(
+            unsafe { libc::kill(process_id as i32, 0) },
+            0,
+            "the process group signal must not report success for an already reaped shell"
+        );
+    }
+
     #[tokio::test]
     async fn bash_timeout_terminates_descendants_in_the_command_process_group() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
