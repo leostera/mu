@@ -1419,10 +1419,10 @@ async fn run_bash(
 fn default_bash_shell() -> Result<PathBuf, ToolError> {
     #[cfg(not(windows))]
     {
-        if Path::new("/bin/bash").is_file() {
-            return Ok(PathBuf::from("/bin/bash"));
-        }
-        Ok(PathBuf::from("bash"))
+        Ok(unix_bash_shell(
+            Path::new("/bin/bash").is_file(),
+            std::env::var_os("PATH"),
+        ))
     }
     #[cfg(windows)]
     {
@@ -1451,17 +1451,30 @@ fn default_bash_shell() -> Result<PathBuf, ToolError> {
     }
 }
 
-#[cfg(any(windows, test))]
-fn find_powershell_executable(path: Option<std::ffi::OsString>) -> Option<PathBuf> {
+fn find_executable_on_path(path: Option<std::ffi::OsString>, names: &[&str]) -> Option<PathBuf> {
     let directories = path
         .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
         .unwrap_or_default();
-    ["pwsh.exe", "powershell.exe"].into_iter().find_map(|name| {
+    names.iter().find_map(|name| {
         directories
             .iter()
             .map(|directory| directory.join(name))
             .find(|candidate| candidate.is_file())
     })
+}
+
+#[cfg(any(windows, test))]
+fn find_powershell_executable(path: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    find_executable_on_path(path, &["pwsh.exe", "powershell.exe"])
+}
+
+#[cfg(any(not(windows), test))]
+fn unix_bash_shell(bin_bash_exists: bool, path: Option<std::ffi::OsString>) -> PathBuf {
+    if bin_bash_exists {
+        PathBuf::from("/bin/bash")
+    } else {
+        find_executable_on_path(path, &["bash"]).unwrap_or_else(|| PathBuf::from("sh"))
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -1759,6 +1772,20 @@ mod tests {
         assert!(Arc::ptr_eq(&target_lock, &alias_lock));
         assert!(!Arc::ptr_eq(&target_lock, &other_lock));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unix_bash_discovery_matches_pi_resolution_order_and_sh_fallback() {
+        let root = std::env::temp_dir().join(format!("mu-bash-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bash = root.join("bash");
+        std::fs::write(&bash, "").unwrap();
+        let path = std::env::join_paths([&root]).unwrap();
+
+        assert_eq!(unix_bash_shell(true, None), PathBuf::from("/bin/bash"));
+        assert_eq!(unix_bash_shell(false, Some(path)), bash);
+        assert_eq!(unix_bash_shell(false, None), PathBuf::from("sh"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
