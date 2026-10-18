@@ -27,6 +27,7 @@ codemode = "0.3"
 futures-util = "0.3"
 globset = "0.4"
 ignore = "0.4"
+libc = "0.2"
 regex = "1"
 unicode-normalization = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }

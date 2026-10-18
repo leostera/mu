@@ -11,6 +11,7 @@ codemode.workspace = true
 futures-util.workspace = true
 globset.workspace = true
 ignore.workspace = true
+libc.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true
 mu-session = { path = "../mu-session" }

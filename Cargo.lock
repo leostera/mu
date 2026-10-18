@@ -1563,6 +1563,7 @@ dependencies = [
  "futures-util",
  "globset",
  "ignore",
+ "libc",
  "mu-session",
  "regex",
  "reqwest",

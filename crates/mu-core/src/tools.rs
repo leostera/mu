@@ -1292,6 +1292,24 @@ fn shell_timeout(args: &Value) -> Result<Option<Duration>, ToolError> {
         .map_err(|_| ToolError::Arguments("Invalid timeout: invalid duration".into()))
 }
 
+fn isolate_process_group(process: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    process.process_group(0);
+    #[cfg(not(unix))]
+    let _ = process;
+}
+
+async fn terminate_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(process_id) = child.id() {
+        // Each shell command runs in its own process group so descendants are killed too.
+        if unsafe { libc::kill(-(process_id as i32), libc::SIGKILL) } == 0 {
+            return;
+        }
+    }
+    let _ = child.kill().await;
+}
+
 async fn capture_stream<R>(mut stream: R, captured: Arc<AsyncMutex<Vec<u8>>>)
 where
     R: AsyncRead + Unpin,
@@ -1335,6 +1353,7 @@ async fn run_shell_process(
         .envs(environment)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    isolate_process_group(&mut process);
     let mut child = process.spawn().map_err(ToolError::Io)?;
     let stdout = Arc::new(AsyncMutex::new(Vec::new()));
     let stderr = Arc::new(AsyncMutex::new(Vec::new()));
@@ -1351,7 +1370,7 @@ async fn run_shell_process(
         Some(timeout) => match tokio::time::timeout(timeout, child.wait()).await {
             Ok(status) => status.map_err(ToolError::Io)?,
             Err(_) => {
-                let _ = child.kill().await;
+                terminate_process_tree(&mut child).await;
                 let _ = child.wait().await;
                 finish_capture(stdout_capture).await;
                 finish_capture(stderr_capture).await;
@@ -2190,6 +2209,26 @@ mod tests {
                 .contains("Command timed out after 2 seconds")
         );
         assert!(timeout.to_string().contains("started\n\n"), "{timeout}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_timeout_terminates_descendants_in_the_command_process_group() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("late-child-output");
+        let command = format!("(sleep 0.5; printf alive > '{}') & wait", marker.display());
+
+        let error = execute(&dir, "bash", &json!({"command":command,"timeout":0.1}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Command timed out"));
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        assert!(
+            !marker.exists(),
+            "the killed child must not write after timeout"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
