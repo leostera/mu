@@ -1333,20 +1333,29 @@ async fn terminate_process_tree(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
 }
 
-async fn capture_stream<R>(mut stream: R, captured: Arc<AsyncMutex<Vec<u8>>>)
-where
-    R: AsyncRead + Unpin,
+async fn capture_streams<Out, Err>(
+    mut stdout: Out,
+    mut stderr: Err,
+    captured: Arc<AsyncMutex<Vec<u8>>>,
+) where
+    Out: AsyncRead + Unpin,
+    Err: AsyncRead + Unpin,
 {
-    let mut chunk = [0; 8192];
-    loop {
-        let bytes_read = match stream.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
-            Ok(bytes_read) => bytes_read,
-        };
-        captured
-            .lock()
-            .await
-            .extend_from_slice(&chunk[..bytes_read]);
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut stdout_chunk = [0; 8192];
+    let mut stderr_chunk = [0; 8192];
+    while stdout_open || stderr_open {
+        tokio::select! {
+            result = stdout.read(&mut stdout_chunk), if stdout_open => match result {
+                Ok(0) | Err(_) => stdout_open = false,
+                Ok(bytes_read) => captured.lock().await.extend_from_slice(&stdout_chunk[..bytes_read]),
+            },
+            result = stderr.read(&mut stderr_chunk), if stderr_open => match result {
+                Ok(0) | Err(_) => stderr_open = false,
+                Ok(bytes_read) => captured.lock().await.extend_from_slice(&stderr_chunk[..bytes_read]),
+            },
+        }
     }
 }
 
@@ -1385,15 +1394,11 @@ async fn run_shell_process(
         .stderr(Stdio::piped());
     isolate_process_group(&mut process);
     let mut child = process.spawn().map_err(ToolError::Io)?;
-    let stdout = Arc::new(AsyncMutex::new(Vec::new()));
-    let stderr = Arc::new(AsyncMutex::new(Vec::new()));
-    let stdout_capture = tokio::spawn(capture_stream(
+    let captured = Arc::new(AsyncMutex::new(Vec::new()));
+    let capture = tokio::spawn(capture_streams(
         child.stdout.take().expect("stdout is piped"),
-        Arc::clone(&stdout),
-    ));
-    let stderr_capture = tokio::spawn(capture_stream(
         child.stderr.take().expect("stderr is piped"),
-        Arc::clone(&stderr),
+        Arc::clone(&captured),
     ));
 
     let status = match timeout {
@@ -1402,10 +1407,8 @@ async fn run_shell_process(
             Err(_) => {
                 terminate_process_tree(&mut child).await;
                 let _ = child.wait().await;
-                finish_capture(stdout_capture).await;
-                finish_capture(stderr_capture).await;
-                let mut partial = String::from_utf8_lossy(&stdout.lock().await).into_owned();
-                partial.push_str(&String::from_utf8_lossy(&stderr.lock().await));
+                finish_capture(capture).await;
+                let partial = String::from_utf8_lossy(&captured.lock().await).into_owned();
                 let partial = sanitize_shell_output(&partial);
                 let timeout_message =
                     format!("Command timed out after {} seconds", timeout.as_secs_f64());
@@ -1419,12 +1422,11 @@ async fn run_shell_process(
         },
         None => child.wait().await.map_err(ToolError::Io)?,
     };
-    finish_capture(stdout_capture).await;
-    finish_capture(stderr_capture).await;
+    finish_capture(capture).await;
     Ok(Output {
         status,
-        stdout: stdout.lock().await.clone(),
-        stderr: stderr.lock().await.clone(),
+        stdout: captured.lock().await.clone(),
+        stderr: Vec::new(),
     })
 }
 
@@ -2361,6 +2363,23 @@ mod tests {
                 .contains("Command timed out after 2 seconds")
         );
         assert!(timeout.to_string().contains("started\n\n"), "{timeout}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_preserves_interleaved_stdout_and_stderr_order() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = execute(
+            &dir,
+            "bash",
+            &json!({"command":"printf out1; sleep 0.05; printf err1 >&2; sleep 0.05; printf out2"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.structured_content.unwrap()["output"], "out1err1out2");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
