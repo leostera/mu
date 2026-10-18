@@ -462,6 +462,38 @@ impl SessionDocument {
     }
 
     /// Append a Pi-compatible custom entry on the active session branch.
+    pub fn append_session_name(&mut self, name: &str) {
+        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let id = next_entry_id(
+            &mut self
+                .entries()
+                .filter_map(|entry| entry.id.as_ref().map(|id| id.as_str().to_owned()))
+                .collect(),
+        );
+        let mut extra = BTreeMap::new();
+        extra.insert("name".into(), Value::String(name.to_owned()));
+        self.records.push(SessionRecord::Entry(SessionEntry {
+            entry_type: EntryType("session_info".into()),
+            id: Some(id),
+            parent_id: parent_id
+                .map(ParentReference::Entry)
+                .unwrap_or(ParentReference::Root),
+            timestamp: now_timestamp(),
+            extra,
+        }));
+    }
+
+    pub fn session_name(&self) -> Option<&str> {
+        self.active_branch_entries()
+            .iter()
+            .rev()
+            .find(|entry| entry.entry_type.as_str() == "session_info")
+            .and_then(|entry| entry.extra.get("name"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+
     pub fn append_custom_entry(&mut self, custom_type: &str, data: Value) {
         let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
         let id = next_entry_id(
@@ -884,6 +916,18 @@ mod tests {
         AssistantTurnResponse, CURRENT_SESSION_VERSION, MessageCost, MessageUsage, ParentReference,
         SessionDocument, SessionRecord,
     };
+
+    #[test]
+    fn session_names_are_pi_compatible_branch_entries() {
+        let mut session = SessionDocument::new("/project");
+        assert_eq!(session.session_name(), None);
+        session.append_user_text("hello");
+        session.append_session_name("  Refactor core  ");
+        assert_eq!(session.session_name(), Some("Refactor core"));
+        let jsonl = session.to_jsonl().unwrap();
+        let parsed = SessionDocument::parse_jsonl(&jsonl).unwrap();
+        assert_eq!(parsed.session_name(), Some("Refactor core"));
+    }
 
     #[test]
     fn forking_preserves_entries_and_replaces_only_session_header_identity() {

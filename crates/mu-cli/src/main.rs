@@ -80,6 +80,10 @@ struct Cli {
     )]
     fork: Option<String>,
 
+    /// Set the session display name.
+    #[arg(short = 'n', long)]
+    name: Option<String>,
+
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     mode: OutputMode,
@@ -173,6 +177,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         continue_latest: cli.continue_session,
         no_session: cli.no_session,
         fork_from,
+        name: cli.name,
     };
 
     if cli.print || !is_terminal {
@@ -224,10 +229,12 @@ fn select_session(
     }
     writeln!(output, "Sessions:")?;
     for (index, session) in sessions.iter().enumerate() {
+        let title = session.name.as_deref().unwrap_or(&session.id);
         writeln!(
             output,
-            "  {}. {}  {}",
+            "  {}. {}  [{}]  {}",
             index + 1,
+            title,
             session.id,
             session.timestamp
         )?;
@@ -339,6 +346,9 @@ mod tests {
             Cli::try_parse_from(["mu", "--fork", "/tmp/source.jsonl"]).expect("parse session fork");
         assert_eq!(fork.fork.as_deref(), Some("/tmp/source.jsonl"));
         assert!(Cli::try_parse_from(["mu", "--fork", "source", "--continue"]).is_err());
+        let named = Cli::try_parse_from(["mu", "-n", "investigate bug"])
+            .expect("parse session display name");
+        assert_eq!(named.name.as_deref(), Some("investigate bug"));
     }
 
     #[test]
@@ -346,11 +356,13 @@ mod tests {
         let sessions = vec![
             mu_core::SessionInfo {
                 id: "first".into(),
+                name: Some("First session".into()),
                 path: PathBuf::from("/tmp/first.jsonl"),
                 timestamp: "2025-01-01T00:00:00Z".into(),
             },
             mu_core::SessionInfo {
                 id: "second".into(),
+                name: None,
                 path: PathBuf::from("/tmp/second.jsonl"),
                 timestamp: "2025-01-02T00:00:00Z".into(),
             },
@@ -390,6 +402,7 @@ mod tests {
         assert!(help.contains("--session-dir"));
         assert!(help.contains("--no-session"));
         assert!(help.contains("--fork"));
+        assert!(help.contains("--name"));
         assert!(help.contains("PROMPT"));
     }
 }

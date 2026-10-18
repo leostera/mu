@@ -14,7 +14,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## CLI and session behavior
 
-- [ ] Implement remaining session workflows and CLI forms: Pi-style searchable session picker/previews, cross-project session-ID lookup/fork prompt, clone, branch navigation/tree selection, and import/export. Mu now supports a numbered `--resume` picker, `--continue`, `--session <path|local-id-prefix>`, exact `--session-id` (opens or creates), `--fork <path|local-id-prefix>`, custom `--session-dir`, and in-memory `--no-session`; loaded/forked files preserve active-branch history and MCP/codemode state.
+- [ ] Implement remaining session workflows and CLI forms: Pi-style searchable session picker/previews, cross-project session-ID lookup/fork prompt, clone, branch navigation/tree selection, and import/export. Mu now supports a numbered `--resume` picker, `--continue`, `--session <path|local-id-prefix>`, exact `--session-id` (opens or creates), `--fork <path|local-id-prefix>`, custom `--session-dir`, `--name`, and in-memory `--no-session`; loaded/forked files preserve active-branch history and MCP/codemode state.
 - [ ] Port Pi session compaction, branch selection, summaries, and context projection behavior end to end.
 
 ## Built-in tools and skills

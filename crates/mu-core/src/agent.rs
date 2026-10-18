@@ -34,6 +34,7 @@ pub enum AgentError {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionInfo {
     pub id: String,
+    pub name: Option<String>,
     pub path: PathBuf,
     pub timestamp: String,
 }
@@ -47,6 +48,7 @@ pub struct SessionOptions {
     pub continue_latest: bool,
     pub no_session: bool,
     pub fork_from: Option<PathBuf>,
+    pub name: Option<String>,
 }
 
 struct Config {
@@ -955,6 +957,26 @@ fn find_session_id_path(
     })
 }
 
+fn normalize_session_name(name: Option<String>) -> Result<Option<String>, AgentError> {
+    name.map(|name| {
+        let normalized = name
+            .split(['\r', '\n'])
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_owned();
+        if normalized.is_empty() {
+            Err(AgentError::Session(
+                "--name requires a non-empty value".into(),
+            ))
+        } else {
+            Ok(normalized)
+        }
+    })
+    .transpose()
+}
+
 fn validate_session_id(id: &str) -> Result<(), AgentError> {
     let valid_edge = |character: char| character.is_ascii_alphanumeric();
     let characters = id.chars().collect::<Vec<_>>();
@@ -1036,7 +1058,9 @@ fn resolve_session_options(
         continue_latest,
         no_session,
         fork_from,
+        name,
     } = options;
+    let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
         let (source, _) = load_session(&source_path)?;
         let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -1055,13 +1079,16 @@ fn resolve_session_options(
             )));
         }
         let parent_session = source_path.to_string_lossy().into_owned();
-        let session = source
+        let mut session = source
             .fork_with_id(
                 config.cwd.to_string_lossy().into_owned(),
                 id,
                 parent_session,
             )
             .ok_or_else(|| AgentError::Session("source session has no header".into()))?;
+        if let Some(name) = name {
+            session.append_session_name(&name);
+        }
         let path = session_path(config, directory.as_deref());
         if !no_session {
             write_session(&session, &path)?;
@@ -1103,10 +1130,10 @@ fn resolve_session_options(
             id_prefix.as_deref().unwrap_or_default()
         )));
     }
-    match requested_path {
+    let (path, mut session, history) = match requested_path {
         Some(path) => {
             let (session, history) = load_session(&path)?;
-            Ok((path, session, history))
+            (path, session, history)
         }
         None => {
             let session = match id {
@@ -1115,13 +1142,20 @@ fn resolve_session_options(
                 }
                 None => SessionDocument::new(config.cwd.to_string_lossy().into_owned()),
             };
-            Ok((
+            (
                 session_path(config, directory.as_deref()),
                 session,
                 Vec::new(),
-            ))
+            )
+        }
+    };
+    if let Some(name) = name {
+        session.append_session_name(&name);
+        if !no_session {
+            write_session(&session, &path)?;
         }
     }
+    Ok((path, session, history))
 }
 
 async fn execute_in_parallel<I, F>(futures: I) -> Vec<F::Output>
@@ -1808,8 +1842,11 @@ pub fn list_sessions_for_current_cwd(
         list_session_paths(&config.agent_dir, &config.cwd, session_dir)
             .into_iter()
             .filter_map(|(_, path, header)| {
+                let contents = std::fs::read_to_string(&path).ok()?;
+                let document = SessionDocument::parse_jsonl(&contents).ok()?;
                 Some(SessionInfo {
                     id: header.get("id")?.as_str()?.to_owned(),
+                    name: document.session_name().map(str::to_owned),
                     path,
                     timestamp: header.get("timestamp")?.as_str()?.to_owned(),
                 })
@@ -2040,12 +2077,14 @@ mod tests {
             SessionOptions {
                 directory: Some(session_dir.clone()),
                 id: Some("requested-id".into()),
+                name: Some("  Feature\nname  ".into()),
                 ..SessionOptions::default()
             },
         )
         .unwrap();
         assert_eq!(new_path.parent(), Some(session_dir.as_path()));
         assert_eq!(new_session.header().unwrap().id.as_str(), "requested-id");
+        assert_eq!(new_session.session_name(), Some("Feature name"));
         new_session.write_atomic(&new_path).unwrap();
 
         let (opened_path, opened_session, _) = resolve_session_options(
