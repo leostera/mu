@@ -1558,7 +1558,7 @@ fn shell_result(output: Output, started_at: Instant) -> ToolResult {
     let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
     full_output.push_str(&String::from_utf8_lossy(&output.stderr));
     let full_output = sanitize_shell_output(&full_output);
-    let exit_code = output.status.code().unwrap_or(1);
+    let exit_code = output.status.code();
     let (structured_output, structured_truncated) =
         truncate_utf8(&full_output, STRUCTURED_OUTPUT_MAX_BYTES);
     let (mut content, truncation) =
@@ -1578,6 +1578,15 @@ fn shell_result(output: Output, started_at: Instant) -> ToolResult {
         content = "(no output)".into();
     }
 
+    let Some(exit_code) = exit_code else {
+        content.push_str("\n\nCommand terminated without an exit code");
+        return ToolResult {
+            content,
+            details: (!details.is_empty()).then_some(Value::Object(details)),
+            structured_content: None,
+            is_error: true,
+        };
+    };
     let is_error = exit_code != 0;
     if is_error {
         content.push_str(&format!("\n\nCommand exited with code {exit_code}"));
@@ -2210,6 +2219,22 @@ mod tests {
         );
         assert!(timeout.to_string().contains("started\n\n"), "{timeout}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_signal_termination_matches_pi_error_result() {
+        let result = execute(Path::new("."), "bash", &json!({"command":"kill -TERM $$"}))
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .content
+                .ends_with("Command terminated without an exit code")
+        );
+        assert!(result.structured_content.is_none());
     }
 
     #[cfg(unix)]
