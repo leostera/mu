@@ -1291,6 +1291,8 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     Ok(result)
 }
 
+const MAX_TIMEOUT_SECONDS: f64 = 2_147_483_647.0 / 1000.0;
+
 fn shell_timeout(args: &Value) -> Result<Option<Duration>, ToolError> {
     let Some(value) = args.get("timeout") else {
         return Ok(None);
@@ -1298,10 +1300,15 @@ fn shell_timeout(args: &Value) -> Result<Option<Duration>, ToolError> {
     let seconds = value.as_f64().ok_or_else(|| {
         ToolError::Arguments("Invalid timeout: must be a finite number of seconds".into())
     })?;
-    if !seconds.is_finite() || seconds <= 0.0 || seconds > 2_147_483.647 {
+    if !seconds.is_finite() || seconds <= 0.0 {
         return Err(ToolError::Arguments(
             "Invalid timeout: must be a finite number of seconds".into(),
         ));
+    }
+    if seconds * 1000.0 > 2_147_483_647.0 {
+        return Err(ToolError::Arguments(format!(
+            "Invalid timeout: maximum is {MAX_TIMEOUT_SECONDS} seconds"
+        )));
     }
     Duration::try_from_secs_f64(seconds)
         .map(Some)
@@ -2317,7 +2324,23 @@ mod tests {
         let invalid = execute(&dir, "bash", &json!({"command":"true","timeout":0}))
             .await
             .unwrap_err();
-        assert!(invalid.to_string().contains("Invalid timeout"));
+        assert!(
+            invalid
+                .to_string()
+                .contains("Invalid timeout: must be a finite number of seconds")
+        );
+        let too_long = execute(
+            &dir,
+            "bash",
+            &json!({"command":"true","timeout":2_147_483.648}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            too_long
+                .to_string()
+                .contains("Invalid timeout: maximum is 2147483.647 seconds")
+        );
 
         let timeout = execute(
             &dir,
