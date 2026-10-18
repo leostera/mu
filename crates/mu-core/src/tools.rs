@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Output, Stdio},
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use globset::{Glob, GlobMatcher};
@@ -51,8 +51,8 @@ pub fn definitions() -> Vec<Value> {
         json!({"type":"function","name":"read","description":"Read a file. Supports line offset and limit.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}}),
         json!({"type":"function","name":"write","description":"Write content to a file, creating parent directories as needed.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}}),
         json!({"type":"function","name":"edit","description":"Edit a single file using exact text replacements. Each edits[].oldText must match a unique, non-overlapping region of the original file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false}}),
-        json!({"type":"function","name":"bash","description":"Run a shell command in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}),
-        json!({"type":"function","name":"powershell","description":"Execute PowerShell commands in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}),
+        json!({"type":"function","name":"bash","description":"Run a shell command in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number","description":"Timeout in seconds (optional, no default timeout)"}},"required":["command"],"additionalProperties":false}}),
+        json!({"type":"function","name":"powershell","description":"Execute PowerShell commands in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number","description":"Timeout in seconds (optional, no default timeout)"}},"required":["command"],"additionalProperties":false}}),
         json!({"type":"function","name":"ls","description":"List directory contents, including dotfiles. Entries are sorted alphabetically; directories have a trailing slash.","parameters":{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"number","description":"Maximum number of entries to return (default: 500)"}},"additionalProperties":false}}),
         json!({"type":"function","name":"grep","description":"Search file contents for a pattern. Respects .gitignore and returns matching lines with file paths and line numbers.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},"context":{"type":"number"},"limit":{"type":"number"}},"required":["pattern"],"additionalProperties":false}}),
         json!({"type":"function","name":"find","description":"Find files by glob pattern. Includes hidden files and respects .gitignore.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"limit":{"type":"number"}},"required":["pattern"],"additionalProperties":false}}),
@@ -1199,7 +1199,50 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     Ok(result)
 }
 
+fn shell_timeout(args: &Value) -> Result<Option<Duration>, ToolError> {
+    let Some(value) = args.get("timeout") else {
+        return Ok(None);
+    };
+    let seconds = value.as_f64().ok_or_else(|| {
+        ToolError::Arguments("Invalid timeout: must be a finite number of seconds".into())
+    })?;
+    if !seconds.is_finite() || seconds <= 0.0 || seconds > 2_147_483.647 {
+        return Err(ToolError::Arguments(
+            "Invalid timeout: must be a finite number of seconds".into(),
+        ));
+    }
+    Duration::try_from_secs_f64(seconds)
+        .map(Some)
+        .map_err(|_| ToolError::Arguments("Invalid timeout: invalid duration".into()))
+}
+
+async fn run_shell_process(
+    cwd: &Path,
+    mut process: tokio::process::Command,
+    timeout: Option<Duration>,
+) -> Result<Output, ToolError> {
+    process
+        .current_dir(cwd)
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = process.output();
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, output)
+            .await
+            .map_err(|_| {
+                ToolError::Command(format!(
+                    "Command timed out after {} seconds",
+                    timeout.as_secs_f64()
+                ))
+            })?
+            .map_err(ToolError::Io),
+        None => output.await.map_err(ToolError::Io),
+    }
+}
+
 async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let timeout = shell_timeout(args)?;
     let started_at = Instant::now();
     let command = string_arg(args, "command")?;
     #[cfg(windows)]
@@ -1210,12 +1253,7 @@ async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let mut process = tokio::process::Command::new("sh");
     #[cfg(not(windows))]
     process.args(["-c", command]);
-    let output = process
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = run_shell_process(cwd, process, timeout).await?;
     Ok(shell_result(output, started_at))
 }
 
@@ -1228,9 +1266,10 @@ fn powershell_command_with_utf8_output(command: &str) -> String {
 
 async fn run_powershell(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let command = string_arg(args, "command")?;
+    let timeout = shell_timeout(args)?;
     #[cfg(not(windows))]
     {
-        let _ = (cwd, command);
+        let _ = (cwd, command, timeout);
         Err(ToolError::Arguments(
             "The powershell tool is only available on Windows.".into(),
         ))
@@ -1258,12 +1297,7 @@ async fn run_powershell(cwd: &Path, args: &Value) -> Result<ToolResult, ToolErro
             "-Command",
             &command,
         ]);
-        let output = process
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = run_shell_process(cwd, process, timeout).await?;
         Ok(shell_result(output, started_at))
     }
 }
@@ -1775,6 +1809,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(missing.to_string().contains("Path not found"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_timeout_validates_duration_and_terminates_the_process() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let invalid = execute(&dir, "bash", &json!({"command":"true","timeout":0}))
+            .await
+            .unwrap_err();
+        assert!(invalid.to_string().contains("Invalid timeout"));
+
+        let timeout = execute(
+            &dir,
+            "bash",
+            &json!({"command":"while :; do :; done","timeout":0.05}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            timeout
+                .to_string()
+                .contains("Command timed out after 0.05 seconds")
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
