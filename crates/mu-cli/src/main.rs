@@ -84,6 +84,10 @@ struct Cli {
     #[arg(short = 'n', long)]
     name: Option<String>,
 
+    /// Enable a comma-separated list of tools or apply +name/-name modifiers.
+    #[arg(short = 't', long, value_delimiter = ',')]
+    tools: Option<Vec<String>>,
+
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     mode: OutputMode,
@@ -178,6 +182,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         no_session: cli.no_session,
         fork_from,
         name: cli.name,
+        tools: cli.tools,
     };
 
     if cli.print || !is_terminal {
@@ -349,6 +354,12 @@ mod tests {
         let named = Cli::try_parse_from(["mu", "-n", "investigate bug"])
             .expect("parse session display name");
         assert_eq!(named.name.as_deref(), Some("investigate bug"));
+        let tools = Cli::try_parse_from(["mu", "--tools", "read,+grep,-bash"])
+            .expect("parse tool selection");
+        assert_eq!(
+            tools.tools.unwrap(),
+            vec!["read".to_owned(), "+grep".to_owned(), "-bash".to_owned()]
+        );
     }
 
     #[test]
@@ -403,6 +414,7 @@ mod tests {
         assert!(help.contains("--no-session"));
         assert!(help.contains("--fork"));
         assert!(help.contains("--name"));
+        assert!(help.contains("--tools"));
         assert!(help.contains("PROMPT"));
     }
 }

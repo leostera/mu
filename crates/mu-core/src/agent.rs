@@ -49,6 +49,7 @@ pub struct SessionOptions {
     pub no_session: bool,
     pub fork_from: Option<PathBuf>,
     pub name: Option<String>,
+    pub tools: Option<Vec<String>>,
 }
 
 struct Config {
@@ -341,6 +342,66 @@ fn resolve_default_tools(entries: Option<Vec<String>>) -> HashSet<String> {
         }
     }
     tools.into_iter().collect()
+}
+
+fn apply_tool_selection(
+    defaults: &HashSet<String>,
+    selection: &[String],
+) -> Result<HashSet<String>, AgentError> {
+    let has_modifier = selection
+        .iter()
+        .any(|entry| entry.starts_with('+') || entry.starts_with('-'));
+    if has_modifier
+        && selection
+            .iter()
+            .any(|entry| !entry.starts_with('+') && !entry.starts_with('-'))
+    {
+        return Err(AgentError::Configuration(
+            "tool names cannot be mixed with +name or -name entries".into(),
+        ));
+    }
+    if selection
+        .iter()
+        .any(|entry| (entry.starts_with('+') || entry.starts_with('-')) && entry.contains('*'))
+    {
+        return Err(AgentError::Configuration(
+            "+name and -name entries take exact tool names, not patterns".into(),
+        ));
+    }
+    if !has_modifier {
+        return Ok(crate::tools::definitions()
+            .iter()
+            .filter_map(|definition| {
+                let name = definition.get("name")?.as_str()?;
+                selection
+                    .iter()
+                    .any(|pattern| tool_name_matches(pattern, name))
+                    .then(|| name.to_owned())
+            })
+            .collect());
+    }
+
+    let mut tools = defaults.clone();
+    for entry in selection {
+        let name = &entry[1..];
+        if name.is_empty() {
+            return Err(AgentError::Configuration(
+                "tool modifiers require a tool name".into(),
+            ));
+        }
+        if entry.starts_with('+') {
+            tools.insert(name.to_owned());
+        } else {
+            tools.remove(name);
+        }
+    }
+    Ok(tools)
+}
+
+fn tool_name_matches(pattern: &str, name: &str) -> bool {
+    globset::Glob::new(pattern)
+        .ok()
+        .is_some_and(|glob| glob.compile_matcher().is_match(name))
 }
 
 fn update_retry_policy(retry: &mut RetryPolicy, settings: &Value) {
@@ -1132,6 +1193,7 @@ fn resolve_session_options(
         no_session,
         fork_from,
         name,
+        tools: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -1404,7 +1466,10 @@ impl MuAgent {
     }
 
     pub async fn connect_with_options(options: SessionOptions) -> Result<Self, AgentError> {
-        let config = config()?;
+        let mut config = config()?;
+        if let Some(tools) = options.tools.as_deref() {
+            config.enabled_tools = apply_tool_selection(&config.enabled_tools, tools)?;
+        }
         let persist_session = !options.no_session;
         let (session_path, session, history) = resolve_session_options(&config, options)?;
         let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
@@ -2417,6 +2482,20 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(exposed, ["grep".to_owned()].into_iter().collect());
         std::fs::remove_dir_all(root).unwrap();
+
+        let defaults = super::resolve_default_tools(None);
+        assert_eq!(
+            super::apply_tool_selection(&defaults, &["-bash".into(), "+grep".into()]).unwrap(),
+            ["edit", "grep", "read", "write"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            super::apply_tool_selection(&defaults, &["read".into(), "gr*".into()]).unwrap(),
+            ["grep", "read"].into_iter().map(str::to_owned).collect()
+        );
+        assert!(super::apply_tool_selection(&defaults, &["read".into(), "+grep".into()]).is_err());
     }
 
     #[tokio::test]
