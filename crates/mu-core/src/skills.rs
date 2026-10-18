@@ -149,7 +149,11 @@ fn parse_skill(path: &Path) -> Result<Skill, String> {
         match key.trim() {
             "name" => name = Some(value.to_owned()),
             "description" => description = Some(value.to_owned()),
-            "disable-model-invocation" => disabled = value == "true",
+            "disable-model-invocation" => {
+                disabled = line
+                    .split_once(':')
+                    .is_some_and(|(_, raw)| raw.trim() == "true");
+            }
             _ => {}
         }
     }
@@ -219,6 +223,21 @@ mod tests {
         assert_eq!(catalog.skills[0].name, "review-guide");
         assert_eq!(catalog.skills[0].file_path, skills_dir.join("review.md"));
         assert!(catalog.diagnostics.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quoted_true_is_not_a_yaml_boolean_for_model_invocation() {
+        let root = std::env::temp_dir().join(format!("mu-skills-bool-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let skill = root.join("quoted/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(
+            &skill,
+            "---\nname: quoted\ndescription: Quoted flag\ndisable-model-invocation: 'true'\n---\n",
+        )
+        .unwrap();
+        assert!(!parse_skill(&skill).unwrap().disable_model_invocation);
         std::fs::remove_dir_all(root).unwrap();
     }
 
