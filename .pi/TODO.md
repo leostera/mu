@@ -39,7 +39,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ### Shell tools
 
-- [ ] Complete Bash parity: Mu now returns Pi-style nonzero error results, 1 MiB-capped structured output, and validates/enforces optional timeouts with kill-on-drop; still add streamed UTF-8 output, model-facing line/byte truncation and full-output persistence/path, progress coalescing, and process-tree-safe cancellation/lifecycle.
+- [ ] Complete Bash parity: Mu now returns Pi-style nonzero error results, 1 MiB-capped structured output, validates/enforces optional timeouts with kill-on-drop, and tail-truncates model-facing output to Pi's 2,000-line/50 KiB limits while persisting full output and metadata; still add streamed UTF-8 output, progress coalescing, and process-tree-safe cancellation/lifecycle.
 - [ ] Match remaining Bash lifecycle behavior: timeout/abort output and partial results, invalid/missing cwd, spawn errors, signal/null-exit handling, process-tree termination, inherited-stdio late-child cleanup, shell path/transport/WSL behavior, command prefix, environment exposure, and spawn hooks.
 - [ ] Complete PowerShell parity: Mu now exposes the tool, uses `pwsh.exe`/`powershell.exe` with Pi's no-profile/non-interactive/bypass flags and process-local UTF-8 output, and shares structured shell results; still test Windows executable discovery/fallback and port remaining timeout, cancellation, hooks, and process lifecycle behavior.
 - [ ] Port the Bash/PowerShell lifecycle, truncation, progress, shell-selection, output persistence, and Windows tests using injectable operations/fakes where possible; keep live local process tests small and platform-gated.

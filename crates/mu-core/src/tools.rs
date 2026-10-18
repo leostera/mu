@@ -734,6 +734,7 @@ fn line_index_at(line_starts: &[usize], offset: usize) -> usize {
 
 const LS_DEFAULT_LIMIT: usize = 500;
 const TOOL_OUTPUT_MAX_BYTES: usize = 50 * 1024;
+const BASH_OUTPUT_MAX_LINES: usize = 2_000;
 
 struct ListDirectoryInput {
     path: PathBuf,
@@ -1307,28 +1308,150 @@ fn shell_result(output: Output, started_at: Instant) -> ToolResult {
     let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
     full_output.push_str(&String::from_utf8_lossy(&output.stderr));
     let exit_code = output.status.code().unwrap_or(1);
-    let (structured_output, truncated) = truncate_utf8(&full_output, STRUCTURED_OUTPUT_MAX_BYTES);
-    let wall_time_seconds = (started_at.elapsed().as_millis() as f64 / 100.0).round() / 10.0;
-    let mut content = if full_output.is_empty() {
-        "(no output)".to_owned()
-    } else {
-        full_output
-    };
+    let (structured_output, structured_truncated) =
+        truncate_utf8(&full_output, STRUCTURED_OUTPUT_MAX_BYTES);
+    let (mut content, truncation) =
+        truncate_shell_output(&full_output, BASH_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_BYTES);
+    let mut details = serde_json::Map::new();
+    let mut full_output_path = None;
+    if let Some(truncation) = truncation {
+        let path = std::env::temp_dir().join(format!("mu-bash-{}.txt", uuid::Uuid::new_v4()));
+        if std::fs::write(&path, &full_output).is_ok() {
+            let path = path.to_string_lossy().into_owned();
+            append_shell_truncation_notice(&mut content, &truncation, &full_output, &path);
+            full_output_path = Some(path.clone());
+            details.insert("fullOutputPath".into(), Value::String(path));
+        }
+        details.insert("truncation".into(), truncation);
+    } else if full_output.is_empty() {
+        content = "(no output)".into();
+    }
+
     let is_error = exit_code != 0;
     if is_error {
         content.push_str(&format!("\n\nCommand exited with code {exit_code}"));
     }
+    let wall_time_seconds = (started_at.elapsed().as_millis() as f64 / 100.0).round() / 10.0;
+    let mut structured = json!({
+        "output": structured_output,
+        "truncated": structured_truncated,
+        "exit_code": exit_code,
+        "wall_time_seconds": wall_time_seconds,
+    });
+    if let Some(path) = full_output_path {
+        structured["full_output_path"] = Value::String(path);
+    }
     ToolResult {
         content,
-        details: None,
-        structured_content: Some(json!({
-            "output": structured_output,
-            "truncated": truncated,
-            "exit_code": exit_code,
-            "wall_time_seconds": wall_time_seconds,
-        })),
+        details: (!details.is_empty()).then_some(Value::Object(details)),
+        structured_content: Some(structured),
         is_error,
     }
+}
+
+fn truncate_shell_output(
+    content: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> (String, Option<Value>) {
+    let mut lines = if content.is_empty() {
+        Vec::new()
+    } else {
+        content.split('\n').collect::<Vec<_>>()
+    };
+    if content.ends_with('\n') {
+        lines.pop();
+    }
+    let total_lines = lines.len();
+    if total_lines <= max_lines && content.len() <= max_bytes {
+        return (content.to_owned(), None);
+    }
+
+    let mut tail = Vec::new();
+    let mut output_bytes = 0;
+    let mut truncated_by = "lines";
+    let mut last_line_partial = false;
+    for line in lines.iter().rev().take(max_lines) {
+        let line_bytes = line.len() + usize::from(!tail.is_empty());
+        if output_bytes + line_bytes > max_bytes {
+            truncated_by = "bytes";
+            if tail.is_empty() {
+                let partial = truncate_utf8_from_end(line, max_bytes);
+                tail.push(partial);
+                last_line_partial = true;
+            }
+            break;
+        }
+        output_bytes += line_bytes;
+        tail.push((*line).to_owned());
+    }
+    let output = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let output_lines = if output.is_empty() {
+        0
+    } else {
+        output.split('\n').count()
+    };
+    let truncation = json!({
+        "content": output,
+        "truncated": true,
+        "truncatedBy": truncated_by,
+        "totalLines": total_lines,
+        "totalBytes": content.len(),
+        "outputLines": output_lines,
+        "outputBytes": output.len(),
+        "lastLinePartial": last_line_partial,
+        "firstLineExceedsLimit": false,
+        "maxLines": max_lines,
+        "maxBytes": max_bytes,
+    });
+    (output, Some(truncation))
+}
+
+fn truncate_utf8_from_end(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_owned();
+    }
+    let mut start = text.len() - max_bytes;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_owned()
+}
+
+fn append_shell_truncation_notice(
+    content: &mut String,
+    truncation: &Value,
+    full_output: &str,
+    path: &str,
+) {
+    let total_lines = truncation["totalLines"].as_u64().unwrap_or(0);
+    let output_lines = truncation["outputLines"].as_u64().unwrap_or(0);
+    let start = total_lines.saturating_sub(output_lines).saturating_add(1);
+    let end = total_lines;
+    let notice = if truncation["lastLinePartial"].as_bool() == Some(true) {
+        format!(
+            "[Showing last {} of line {end} (line is {}). Full output: {path}]",
+            format_size(truncation["outputBytes"].as_u64().unwrap_or(0) as usize),
+            format_size(
+                full_output
+                    .strip_suffix('\n')
+                    .unwrap_or(full_output)
+                    .rsplit('\n')
+                    .next()
+                    .unwrap_or_default()
+                    .len(),
+            ),
+        )
+    } else if truncation["truncatedBy"].as_str() == Some("lines") {
+        format!("[Showing lines {start}-{end} of {total_lines}. Full output: {path}]")
+    } else {
+        format!(
+            "[Showing lines {start}-{end} of {total_lines} ({} limit). Full output: {path}]",
+            format_size(truncation["maxBytes"].as_u64().unwrap_or(0) as usize)
+        )
+    };
+    content.push_str("\n\n");
+    content.push_str(&notice);
 }
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
@@ -1884,6 +2007,51 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn bash_tail_truncation_keeps_recent_lines_and_respects_utf8_byte_boundaries() {
+        let (lines, line_details) = truncate_shell_output("one\ntwo\nthree\n", 2, 100);
+        assert_eq!(lines, "two\nthree");
+        let line_details = line_details.unwrap();
+        assert_eq!(line_details["truncatedBy"], "lines");
+        assert_eq!(line_details["totalLines"], 3);
+        assert_eq!(line_details["outputLines"], 2);
+
+        let (bytes, byte_details) = truncate_shell_output("start\nééé", 10, 3);
+        assert_eq!(bytes, "é");
+        let byte_details = byte_details.unwrap();
+        assert_eq!(byte_details["truncatedBy"], "bytes");
+        assert_eq!(byte_details["lastLinePartial"], true);
+        assert_eq!(byte_details["outputBytes"], 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_tail_truncation_persists_full_output_for_retrieval() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = execute(
+            &dir,
+            "bash",
+            &json!({"command":"i=0; while [ $i -lt 2001 ]; do printf 'line\\n'; i=$((i + 1)); done"}),
+        )
+        .await
+        .unwrap();
+        let details = result.details.unwrap();
+        assert_eq!(details["truncation"]["truncatedBy"], "lines");
+        assert_eq!(details["truncation"]["totalLines"], 2001);
+        assert_eq!(details["truncation"]["outputLines"], 2000);
+        assert_eq!(result.content.lines().count(), 2002);
+        let full_path = PathBuf::from(details["fullOutputPath"].as_str().unwrap());
+        let full_output = std::fs::read_to_string(&full_path).unwrap();
+        assert_eq!(full_output.lines().count(), 2001);
+        assert_eq!(
+            result.structured_content.unwrap()["full_output_path"],
+            full_path.to_string_lossy().as_ref()
+        );
+        std::fs::remove_file(full_path).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn bash_caps_structured_output_at_one_megabyte() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
