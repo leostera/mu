@@ -182,10 +182,19 @@ fn replace_screenshot_space(path: &str) -> String {
 const READ_MAX_LINES: usize = 2000;
 const READ_MAX_BYTES: usize = 50 * 1024;
 
+fn read_file_io_error(path: &Path, error: std::io::Error) -> ToolError {
+    let (code, message) = match error.kind() {
+        std::io::ErrorKind::NotFound => ("ENOENT", "no such file or directory"),
+        std::io::ErrorKind::PermissionDenied => ("EACCES", "permission denied"),
+        _ => return ToolError::Io(error),
+    };
+    ToolError::Command(format!("{code}: {message}, access '{}'", path.display()))
+}
+
 fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let path = resolve_read_path(cwd, args)?;
-    let bytes = std::fs::read(&path)?;
+    let bytes = std::fs::read(&path).map_err(|error| read_file_io_error(&path, error))?;
     // Node's Buffer.toString("utf-8") replaces malformed sequences instead of
     // rejecting the entire text file; mirror that decoding boundary here.
     let text = String::from_utf8_lossy(&bytes);
@@ -1930,6 +1939,21 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_access_errors_match_node_common_error_codes() {
+        let path = Path::new("/tmp/private.txt");
+        let missing = read_file_io_error(path, std::io::ErrorKind::NotFound.into());
+        let denied = read_file_io_error(path, std::io::ErrorKind::PermissionDenied.into());
+        assert_eq!(
+            missing.to_string(),
+            "ENOENT: no such file or directory, access '/tmp/private.txt'"
+        );
+        assert_eq!(
+            denied.to_string(),
+            "EACCES: permission denied, access '/tmp/private.txt'"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

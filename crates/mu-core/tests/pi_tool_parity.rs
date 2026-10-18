@@ -569,6 +569,24 @@ async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, read boundary and empty-file cases.
 #[tokio::test]
+async fn pi_read_formats_missing_file_errors_like_node_fs_access() {
+    let dir = temp_dir("read-missing-error");
+    let path = dir.join("missing.txt");
+    let error = execute(&dir, "read", &json!({"path":"missing.txt"}))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "ENOENT: no such file or directory, access '{}'",
+            path.display()
+        )
+    );
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_text_tools_replace_malformed_utf8_like_node_buffer_decoding() {
     let dir = temp_dir("lossy-utf8-tools");
     let path = dir.join("invalid.txt");
