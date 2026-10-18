@@ -33,7 +33,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 - [ ] Complete `read` text parity: Mu now handles byte/line caps, offsets/limits, out-of-range errors, continuation text, first-line-too-long fallback, and Pi-shaped truncation details; continue matching exact boundary/empty-file semantics and add a table-driven port of all Pi truncation cases.
 - [ ] Implement `read` image parity: MIME detection by file magic, JPEG/PNG/GIF/WebP/BMP support, BMP conversion, unsupported/corrupt image behavior, resize/model limits, vision-capability handling, and ordered image/text blocks.
 - [ ] Complete `write` behavior and success/error messages; share cancellation-safe canonical per-path mutation serialization with `edit` (same-path order, distinct-path concurrency, symlink aliases, queued/in-flight aborts).
-- [ ] Finish `edit` argument compatibility: JSON-stringified arrays, object-shaped edits, mixed legacy fields, malformed input, and exact Pi errors; match no-op failures.
+- [ ] Finish `edit` argument/error parity: Mu now accepts JSON-stringified arrays, object-shaped edits, and mixed legacy fields; still port exact per-case Pi errors and no-op failure semantics.
 - [x] Implement `edit` fuzzy matching (NFKC, trailing whitespace, smart quotes/dashes, special spaces), normalized duplicate detection, untouched-line preservation, and exact-first matching; deterministic unit tests cover each category.
 - [ ] Finish `edit` output/error parity: execution now returns unified patch, collapsed display diff, first changed line, and preserves no-partial-write behavior; still add non-mutating diff preview, Pi-shaped ENOENT/EACCES/custom-operation errors, and applicable-patch/failure edge tests.
 

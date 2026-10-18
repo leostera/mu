@@ -104,6 +104,68 @@ async fn pi_edit_applies_disjoint_edits_in_one_atomic_call() {
     cleanup(&dir);
 }
 
+// Pi source: packages/coding-agent/test/edit-tool-legacy-input.test.ts.
+#[tokio::test]
+async fn pi_edit_accepts_legacy_mixed_object_and_stringified_edits() {
+    let dir = temp_dir("edit-legacy-input");
+    let path = dir.join("input.txt");
+    fs::write(&path, "one two three").unwrap();
+
+    let encoded_edits = serde_json::to_string(&json!([{"oldText":"one","newText":"ONE"}])).unwrap();
+    let stringified = execute(
+        &dir,
+        "edit",
+        &json!({"path":"input.txt","edits":encoded_edits}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        stringified
+            .content
+            .contains("Successfully replaced 1 block(s)")
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "ONE two three");
+
+    execute(
+        &dir,
+        "edit",
+        &json!({"path":"input.txt","edits":{"oldText":"two","newText":"TWO"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "ONE TWO three");
+
+    let mixed = execute(
+        &dir,
+        "edit",
+        &json!({
+            "path":"input.txt",
+            "edits":[{"oldText":"three","newText":"THREE"}],
+            "oldText":"ONE",
+            "newText":"one"
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(mixed.content.contains("Successfully replaced 2 block(s)"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), "one TWO THREE");
+
+    let malformed = execute(
+        &dir,
+        "edit",
+        &json!({"path":"input.txt","edits":"not json"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        malformed
+            .to_string()
+            .contains("Edit tool input is invalid. edits must contain at least one replacement.")
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "one TWO THREE");
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts, edit diff cases.
 #[tokio::test]
 async fn pi_edit_diff_collapses_large_unchanged_gaps() {

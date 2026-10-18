@@ -359,12 +359,12 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
     let edits = object
         .get("edits")
         .and_then(Value::as_array)
-        .ok_or_else(|| ToolError::Arguments("`edits` must be an array".into()))?;
-    if edits.is_empty() {
-        return Err(ToolError::Arguments(
-            "edits must contain at least one replacement".into(),
-        ));
-    }
+        .filter(|edits| !edits.is_empty())
+        .ok_or_else(|| {
+            ToolError::Arguments(
+                "Edit tool input is invalid. edits must contain at least one replacement.".into(),
+            )
+        })?;
     edits
         .iter()
         .map(|value| {
