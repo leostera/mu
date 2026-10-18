@@ -1373,7 +1373,7 @@ fn session_directory(agent_dir: &Path, cwd: &Path, override_dir: Option<&Path>) 
 }
 
 fn resolved_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+    crate::path_utils::canonicalize_path(path)
 }
 
 fn session_header(path: &Path) -> Option<Value> {
