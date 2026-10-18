@@ -175,6 +175,42 @@ async fn pi_edit_application_errors_are_returned_without_mu_prefixes() {
 }
 
 #[tokio::test]
+async fn pi_edit_rejects_noop_replacements_with_single_and_multi_edit_errors() {
+    let dir = temp_dir("edit-noop");
+    let path = dir.join("same.txt");
+    fs::write(&path, "alpha beta").unwrap();
+
+    let single = execute(
+        &dir,
+        "edit",
+        &json!({"path":"same.txt","edits":[{"oldText":"alpha","newText":"alpha"}]}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        single.to_string(),
+        "No changes made to same.txt. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected."
+    );
+
+    let multiple = execute(
+        &dir,
+        "edit",
+        &json!({"path":"same.txt","edits":[
+            {"oldText":"alpha","newText":"alpha"},
+            {"oldText":"beta","newText":"beta"}
+        ]}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        multiple.to_string(),
+        "No changes made to same.txt. The replacements produced identical content."
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), "alpha beta");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_edit_accepts_legacy_mixed_object_and_stringified_edits() {
     let dir = temp_dir("edit-legacy-input");
     let path = dir.join("input.txt");
