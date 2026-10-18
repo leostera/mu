@@ -261,6 +261,39 @@ async fn pi_grep_treats_flag_like_patterns_as_search_text_and_supports_literal_m
     cleanup(&dir);
 }
 
+#[tokio::test]
+async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
+    let dir = temp_dir("normalized-search-path");
+    let folder = dir.join("spaced folder");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("source.txt"), "needle\n").unwrap();
+    let path_with_nonbreaking_space = "@spaced\u{00a0}folder";
+
+    let grep = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":"needle","path":path_with_nonbreaking_space}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(grep.content, "source.txt:1: needle");
+
+    let find = execute(
+        &dir,
+        "find",
+        &json!({"pattern":"*.txt","path":path_with_nonbreaking_space}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(find.content, "source.txt");
+
+    let ls = execute(&dir, "ls", &json!({"path":path_with_nonbreaking_space}))
+        .await
+        .unwrap();
+    assert_eq!(ls.content, "source.txt");
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts, grep limit cases.
 #[tokio::test]
 async fn pi_grep_reports_a_limit_only_when_an_additional_match_exists() {

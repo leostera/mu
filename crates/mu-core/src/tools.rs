@@ -682,8 +682,8 @@ fn parse_list_directory_input(cwd: &Path, args: &Value) -> Result<ListDirectoryI
         .as_object()
         .ok_or_else(|| ToolError::Arguments("ls arguments must be an object".into()))?;
     let path = match object.get("path") {
-        None => PathBuf::from("."),
-        Some(Value::String(path)) => PathBuf::from(path),
+        None => cwd.to_owned(),
+        Some(Value::String(path)) => resolve_input_path(cwd, path)?,
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };
     let limit = match object.get("limit") {
@@ -692,11 +692,6 @@ fn parse_list_directory_input(cwd: &Path, args: &Value) -> Result<ListDirectoryI
             .as_f64()
             .filter(|limit| limit.is_finite())
             .ok_or_else(|| ToolError::Arguments("`limit` must be a finite number".into()))?,
-    };
-    let path = if path.is_absolute() {
-        path
-    } else {
-        cwd.join(path)
     };
     Ok(ListDirectoryInput { path, limit })
 }
@@ -826,8 +821,8 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
         .ok_or_else(|| ToolError::Arguments("`pattern` must be a string".into()))?
         .to_owned();
     let path = match object.get("path") {
-        None => PathBuf::from("."),
-        Some(Value::String(path)) => PathBuf::from(path),
+        None => cwd.to_owned(),
+        Some(Value::String(path)) => resolve_input_path(cwd, path)?,
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };
     let glob = match object.get("glob") {
@@ -857,11 +852,6 @@ fn parse_grep_input(cwd: &Path, args: &Value) -> Result<GrepInput, ToolError> {
     let limit = optional_nonnegative_integer(object.get("limit"), "limit")?
         .unwrap_or(GREP_DEFAULT_LIMIT)
         .max(1);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        cwd.join(path)
-    };
     let pattern = if literal {
         regex::escape(&pattern)
     } else {
@@ -1052,17 +1042,12 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         .map_err(|error| ToolError::Arguments(error.to_string()))?
         .compile_matcher();
     let path = match object.get("path") {
-        None => PathBuf::from("."),
-        Some(Value::String(path)) => PathBuf::from(path),
+        None => cwd.to_owned(),
+        Some(Value::String(path)) => resolve_input_path(cwd, path)?,
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };
     let limit =
         optional_nonnegative_integer(object.get("limit"), "limit")?.unwrap_or(FIND_DEFAULT_LIMIT);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        cwd.join(path)
-    };
     Ok(FindInput {
         pattern,
         path,
