@@ -402,6 +402,20 @@ fn canonical_mutation_path(path: &Path) -> PathBuf {
     canonical
 }
 
+fn write_file_io_error(path: &Path, operation: &str, error: std::io::Error) -> ToolError {
+    let (code, message) = match error.kind() {
+        std::io::ErrorKind::NotFound => ("ENOENT", "no such file or directory"),
+        std::io::ErrorKind::PermissionDenied => ("EACCES", "permission denied"),
+        std::io::ErrorKind::NotADirectory => ("ENOTDIR", "not a directory"),
+        std::io::ErrorKind::AlreadyExists => ("EEXIST", "file already exists"),
+        _ => return ToolError::Io(error),
+    };
+    ToolError::Command(format!(
+        "{code}: {message}, {operation} '{}'",
+        path.display()
+    ))
+}
+
 async fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let path = resolve(cwd, args)?;
@@ -409,9 +423,10 @@ async fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let lock = mutation_lock(&path);
     let _guard = lock.lock().await;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| write_file_io_error(parent, "mkdir", error))?;
     }
-    std::fs::write(&path, content)?;
+    std::fs::write(&path, content).map_err(|error| write_file_io_error(&path, "open", error))?;
     Ok(ToolResult::text(format!(
         "Successfully wrote to {requested_path}"
     )))

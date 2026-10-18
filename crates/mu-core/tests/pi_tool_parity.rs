@@ -178,6 +178,26 @@ async fn pi_edit_applies_disjoint_edits_in_one_atomic_call() {
 }
 
 #[tokio::test]
+async fn pi_write_formats_parent_creation_errors_like_node_fs_mkdir() {
+    let dir = temp_dir("write-mkdir-error");
+    fs::write(dir.join("blocker"), "file").unwrap();
+    let parent = dir.join("blocker/child");
+
+    let error = execute(
+        &dir,
+        "write",
+        &json!({"path":"blocker/child/file.txt","content":"content"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("ENOTDIR: not a directory, mkdir '{}'", parent.display())
+    );
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_edit_reports_enoent_with_the_requested_path() {
     let dir = temp_dir("edit-enoent");
     let error = execute(
