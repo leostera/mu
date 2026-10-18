@@ -99,8 +99,19 @@ fn scan(root: &Path, catalog: &mut SkillCatalog, names: &mut HashSet<String>) {
         if name.to_string_lossy().starts_with('.') || name == "node_modules" {
             continue;
         }
-        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
-            scan(&entry.path(), catalog, names);
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            scan(&path, catalog, names);
+        } else if file_type.is_file() && path.extension().is_some_and(|extension| extension == "md")
+        {
+            // Pi also accepts described Markdown files directly in a skills root.
+            // Unlike declared SKILL.md files, unrelated or malformed Markdown is ignored.
+            if let Ok(skill) = parse_skill(&path) {
+                add_skill(skill, catalog, names);
+            }
         }
     }
 }
@@ -190,6 +201,26 @@ fn escape_xml(value: &str) -> String {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn discovers_described_markdown_skills_at_the_root_but_ignores_other_markdown() {
+        let root = std::env::temp_dir().join(format!("mu-skills-root-{}", Uuid::new_v4()));
+        let skills_dir = root.join(".pi/skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(
+            skills_dir.join("review.md"),
+            "---\nname: review-guide\ndescription: Review source changes\n---\nInstructions",
+        )
+        .unwrap();
+        std::fs::write(skills_dir.join("notes.md"), "Ordinary notes, not a skill").unwrap();
+
+        let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].name, "review-guide");
+        assert_eq!(catalog.skills[0].file_path, skills_dir.join("review.md"));
+        assert!(catalog.diagnostics.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn discovers_nested_skills_and_formats_metadata_without_injecting_contents() {
