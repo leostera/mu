@@ -956,6 +956,16 @@ fn is_javascript_trim_whitespace(character: char) -> bool {
     )
 }
 
+fn node_scandir_error(path: &Path, error: std::io::Error) -> String {
+    let (code, message) = match error.kind() {
+        std::io::ErrorKind::NotFound => ("ENOENT", "no such file or directory"),
+        std::io::ErrorKind::PermissionDenied => ("EACCES", "permission denied"),
+        std::io::ErrorKind::NotADirectory => ("ENOTDIR", "not a directory"),
+        _ => return error.to_string(),
+    };
+    format!("{code}: {message}, scandir '{}'", path.display())
+}
+
 fn sort_directory_entries(entries: &mut [String]) {
     entries.sort_by_key(|entry| entry.to_lowercase());
 }
@@ -977,7 +987,12 @@ fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     }
 
     let mut entries = std::fs::read_dir(&path)
-        .map_err(|error| ToolError::Command(format!("Cannot read directory: {error}")))?
+        .map_err(|error| {
+            ToolError::Command(format!(
+                "Cannot read directory: {}",
+                node_scandir_error(&path, error)
+            ))
+        })?
         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
         .collect::<Result<Vec<_>, _>>()?;
     sort_directory_entries(&mut entries);
@@ -2124,6 +2139,16 @@ mod tests {
     fn find_output_trim_matches_javascript_bom_whitespace_behavior() {
         assert_eq!(trim_fd_output_line(" file \u{feff}"), " file");
         assert_eq!(trim_fd_output_line("file\u{0085}"), "file\u{0085}");
+    }
+
+    #[test]
+    fn ls_scandir_errors_match_node_common_error_codes() {
+        let path = Path::new("private-dir");
+        let error = node_scandir_error(
+            path,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        assert_eq!(error, "EACCES: permission denied, scandir 'private-dir'");
     }
 
     #[test]
