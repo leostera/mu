@@ -1139,7 +1139,8 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             let first = index.saturating_sub(input.context);
             let last = (index + input.context).min(lines.len().saturating_sub(1));
             for (context_index, text) in lines.iter().enumerate().take(last + 1).skip(first) {
-                let (text, was_truncated) = truncate_grep_line(text);
+                let sanitized = text.replace('\r', "");
+                let (text, was_truncated) = truncate_grep_line(&sanitized);
                 lines_truncated |= was_truncated;
                 let line_number = context_index + 1;
                 if context_index == index {

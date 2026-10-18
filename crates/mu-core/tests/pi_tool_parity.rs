@@ -569,6 +569,18 @@ async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, read boundary and empty-file cases.
 #[tokio::test]
+async fn pi_grep_removes_embedded_carriage_returns_from_match_lines() {
+    let dir = temp_dir("grep-carriage-return");
+    fs::write(dir.join("input.txt"), b"a\rb\rc\n").unwrap();
+
+    let result = execute(&dir, "grep", &json!({"pattern":"b"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "input.txt:1: abc");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_grep_decodes_invalid_utf8_and_treats_nul_as_a_line_boundary() {
     let dir = temp_dir("grep-binary-decoding");
     fs::write(dir.join("invalid.txt"), b"left\xffright\n").unwrap();
