@@ -1436,7 +1436,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         if std::fs::symlink_metadata(&entry_path).is_ok_and(|metadata| metadata.is_dir()) {
             display.push('/');
         }
-        results.push(display);
+        results.push(display.trim().to_owned());
     }
     if results.is_empty() {
         return Ok(ToolResult::text("No files found matching pattern"));

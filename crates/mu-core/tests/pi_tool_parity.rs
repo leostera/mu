@@ -965,6 +965,18 @@ async fn pi_find_stops_parent_gitignore_rules_at_nested_repository_boundaries() 
 }
 
 #[tokio::test]
+async fn pi_find_trims_whitespace_from_fd_output_paths() {
+    let dir = temp_dir("find-trim-output");
+    fs::write(dir.join(" leading.txt "), "content").unwrap();
+
+    let result = execute(&dir, "find", &json!({"pattern":"*leading.txt*"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "leading.txt");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_treats_flag_like_patterns_as_globs_and_reports_invalid_globs() {
     let dir = temp_dir("find-flags");
     fs::write(dir.join("-report.txt"), "report").unwrap();
