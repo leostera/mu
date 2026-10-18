@@ -92,6 +92,8 @@ fn builtin_definitions_match_pi_descriptions_and_numeric_parameter_shapes() {
         find("read")["parameters"]["properties"]["offset"]["description"],
         "Line number to start reading from (1-indexed)"
     );
+    assert!(find("read")["parameters"]["properties"]["offset"]["minimum"].is_null());
+    assert!(find("read")["parameters"]["properties"]["limit"]["minimum"].is_null());
     assert_eq!(
         find("grep")["parameters"]["properties"]["literal"]["description"],
         "Treat pattern as literal string instead of regex (default: false)"
