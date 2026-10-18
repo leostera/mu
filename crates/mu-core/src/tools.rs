@@ -1192,7 +1192,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         if results.len() >= limit {
             break;
         }
-        if entry_path.is_dir() {
+        if std::fs::symlink_metadata(&entry_path).is_ok_and(|metadata| metadata.is_dir()) {
             display.push('/');
         }
         results.push(display);

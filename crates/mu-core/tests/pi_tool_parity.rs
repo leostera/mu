@@ -432,6 +432,21 @@ async fn pi_find_orders_results_like_fd_default_sorting() {
     cleanup(&dir);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_find_does_not_mark_directory_symlinks_as_directories() {
+    let dir = temp_dir("find-symlink");
+    fs::create_dir(dir.join("actual-dir")).unwrap();
+    std::os::unix::fs::symlink(dir.join("actual-dir"), dir.join("linked-dir")).unwrap();
+
+    let result = execute(&dir, "find", &json!({"pattern":"linked-dir","path":"."}))
+        .await
+        .unwrap();
+
+    assert_eq!(result.content, "linked-dir");
+    cleanup(&dir);
+}
+
 #[tokio::test]
 async fn pi_find_stops_parent_gitignore_rules_at_nested_repository_boundaries() {
     let dir = temp_dir("find-nested-repo");
