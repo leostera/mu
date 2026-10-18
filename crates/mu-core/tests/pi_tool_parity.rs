@@ -260,6 +260,42 @@ async fn pi_grep_treats_flag_like_patterns_as_search_text_and_supports_literal_m
     cleanup(&dir);
 }
 
+// Pi source: packages/coding-agent/test/tools.test.ts, grep limit cases.
+#[tokio::test]
+async fn pi_grep_reports_a_limit_only_when_an_additional_match_exists() {
+    let dir = temp_dir("grep-limit-boundary");
+    fs::write(dir.join("one.txt"), "needle\n").unwrap();
+    fs::write(dir.join("two.txt"), "needle\nneedle\n").unwrap();
+
+    let exactly_one = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":"needle","path":"one.txt","limit":1}),
+    )
+    .await
+    .unwrap();
+    assert!(!exactly_one.content.contains("limit reached"));
+
+    let exactly_two = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":"needle","path":"two.txt","limit":2}),
+    )
+    .await
+    .unwrap();
+    assert!(!exactly_two.content.contains("limit reached"));
+
+    let limited = execute(
+        &dir,
+        "grep",
+        &json!({"pattern":"needle","path":"two.txt","limit":1}),
+    )
+    .await
+    .unwrap();
+    assert!(limited.content.contains("1 matches limit reached"));
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts, find and ls cases.
 #[tokio::test]
 async fn pi_find_includes_hidden_files_and_respects_gitignore() {

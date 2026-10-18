@@ -886,6 +886,7 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let files = collect_search_files(&input.path, is_directory);
     let mut formatted_matches = Vec::new();
     let mut match_count = 0;
+    let mut match_limit_reached = false;
     let mut lines_truncated = false;
 
     'files: for file in files {
@@ -907,6 +908,10 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             if !regex.is_match(line) {
                 continue;
             }
+            if match_count >= input.limit {
+                match_limit_reached = true;
+                break 'files;
+            }
             match_count += 1;
             let first = index.saturating_sub(input.context);
             let last = (index + input.context).min(lines.len().saturating_sub(1));
@@ -920,9 +925,6 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
                     formatted_matches.push(format!("{display_path}-{line_number}- {text}"));
                 }
             }
-            if match_count >= input.limit {
-                break 'files;
-            }
         }
     }
 
@@ -931,7 +933,7 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     }
     let (mut output, byte_truncated) = truncate_tool_output(&formatted_matches.join("\n"));
     let mut notices = Vec::new();
-    if match_count >= input.limit {
+    if match_limit_reached {
         notices.push(format!(
             "{} matches limit reached. Use limit={} for more, or refine pattern",
             input.limit,
