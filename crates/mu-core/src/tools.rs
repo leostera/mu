@@ -1695,6 +1695,17 @@ async fn finish_capture(
     }
 }
 
+fn shell_spawn_error(error: std::io::Error) -> ToolError {
+    let code = match error.kind() {
+        std::io::ErrorKind::NotFound => Some("ENOENT"),
+        std::io::ErrorKind::PermissionDenied => Some("EACCES"),
+        std::io::ErrorKind::NotADirectory => Some("ENOTDIR"),
+        _ => None,
+    };
+    code.map(|code| ToolError::Command(format!("spawn {code}")))
+        .unwrap_or(ToolError::Io(error))
+}
+
 async fn run_shell_process(
     cwd: &Path,
     shell_name: &str,
@@ -1721,7 +1732,7 @@ async fn run_shell_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     isolate_process_group(&mut process);
-    let mut child = process.spawn().map_err(ToolError::Io)?;
+    let mut child = process.spawn().map_err(shell_spawn_error)?;
     let captured = Arc::new(AsyncMutex::new(Vec::new()));
     let (updates_sender, mut updates_receiver) = tokio::sync::mpsc::unbounded_channel();
     let capture = tokio::spawn(capture_streams(

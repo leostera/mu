@@ -1298,6 +1298,20 @@ async fn pi_bash_nonzero_exit_is_returned_as_an_error_tool_result() {
     cleanup(&dir);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_bash_matches_node_spawn_error_for_a_file_working_directory() {
+    let dir = temp_dir("bash-file-cwd");
+    let file = dir.join("not-a-directory");
+    fs::write(&file, "content").unwrap();
+
+    let error = execute(&file, "bash", &json!({"command":"true"}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "spawn ENOTDIR");
+    cleanup(&dir);
+}
+
 #[tokio::test]
 async fn pi_bash_reports_a_missing_working_directory_before_spawn() {
     let missing = temp_dir("bash-missing-cwd").join("missing");
