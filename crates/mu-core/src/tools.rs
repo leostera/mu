@@ -76,19 +76,96 @@ fn string_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, ToolError> {
 }
 
 fn resolve(cwd: &Path, args: &Value) -> Result<PathBuf, ToolError> {
-    let path = Path::new(string_arg(args, "path")?);
+    resolve_input_path(cwd, string_arg(args, "path")?)
+}
+
+fn resolve_input_path(cwd: &Path, input: &str) -> Result<PathBuf, ToolError> {
+    let normalized = normalize_path_input(input);
+    let path = if normalized.starts_with("file://") {
+        url::Url::parse(&normalized)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .ok_or_else(|| ToolError::Arguments(format!("invalid file URL `{normalized}`")))?
+    } else {
+        PathBuf::from(normalized)
+    };
     Ok(if path.is_absolute() {
-        path.to_owned()
+        path
     } else {
         cwd.join(path)
     })
+}
+
+fn normalize_path_input(input: &str) -> String {
+    let mut normalized = input
+        .chars()
+        .map(|character| match character {
+            '\u{00a0}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}' => ' ',
+            character => character,
+        })
+        .collect::<String>();
+    if normalized.starts_with('@') {
+        normalized.remove(0);
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    if let Some(home) = home {
+        if normalized == "~" {
+            return home.to_string_lossy().into_owned();
+        }
+        if normalized.starts_with("~/") || normalized.starts_with("~\\") {
+            return home.join(&normalized[2..]).to_string_lossy().into_owned();
+        }
+    }
+    normalized
+}
+
+fn resolve_read_path(cwd: &Path, args: &Value) -> Result<PathBuf, ToolError> {
+    let input = string_arg(args, "path")?;
+    let resolved = resolve_input_path(cwd, input)?;
+    if resolved.exists() {
+        return Ok(resolved);
+    }
+    for candidate in read_path_fallbacks(&resolved) {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Ok(resolved)
+}
+
+fn read_path_fallbacks(path: &Path) -> Vec<PathBuf> {
+    let path = path.to_string_lossy();
+    let screenshot = replace_screenshot_space(&path);
+    let decomposed = path.nfd().collect::<String>();
+    let curly_quotes = path.replace('\'', "’");
+    let decomposed_curly_quotes = decomposed.replace('\'', "’");
+    [
+        screenshot,
+        decomposed,
+        curly_quotes,
+        decomposed_curly_quotes,
+    ]
+    .into_iter()
+    .filter(|candidate| candidate != &*path)
+    .map(PathBuf::from)
+    .collect()
+}
+
+fn replace_screenshot_space(path: &str) -> String {
+    let mut output = path.to_owned();
+    for token in ["AM", "PM", "Am", "Pm", "aM", "pM", "am", "pm"] {
+        output = output.replace(&format!(" {token}."), &format!("\u{202f}{token}."));
+    }
+    output
 }
 
 const READ_MAX_LINES: usize = 2000;
 const READ_MAX_BYTES: usize = 50 * 1024;
 
 fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
-    let path = resolve(cwd, args)?;
+    let path = resolve_read_path(cwd, args)?;
     let text = std::fs::read_to_string(&path)?;
     let offset = args
         .get("offset")
@@ -1058,6 +1135,59 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_inputs_expand_tilde_strip_at_prefix_and_normalize_unicode_spaces() {
+        let cwd = Path::new("/tmp/mu-path-test");
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap();
+        assert_eq!(
+            resolve_input_path(cwd, "~/folder/file.txt").unwrap(),
+            home.join("folder/file.txt")
+        );
+        assert_eq!(
+            resolve_input_path(cwd, "@folder\u{00a0}name/file.txt").unwrap(),
+            cwd.join("folder name/file.txt")
+        );
+    }
+
+    #[test]
+    fn read_fallbacks_cover_screenshot_spaces_decomposed_names_and_quotes() {
+        let candidates =
+            read_path_fallbacks(Path::new("/tmp/2025-01-01 at 4.32. PM. Élodie's file.png"));
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| { candidate.to_string_lossy().contains("4.32.\u{202f}PM.") })
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.to_string_lossy().contains("Élodie’s"))
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.to_string_lossy().contains("E\u{301}lodie"))
+        );
+    }
+
+    #[tokio::test]
+    async fn read_retries_mac_screenshot_filename_spacing() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let requested = dir.join("shot 4.32. PM.png");
+        let fallback = read_path_fallbacks(&requested).remove(0);
+        std::fs::write(fallback, "image placeholder").unwrap();
+
+        let result = execute(&dir, "read", &json!({"path":"shot 4.32. PM.png"}))
+            .await
+            .unwrap();
+        assert_eq!(result.content, "image placeholder");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn read_write_and_exact_edit_operate_in_working_directory() {
