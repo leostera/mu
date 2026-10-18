@@ -1208,6 +1208,8 @@ fn expand_environment(value: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -1553,6 +1555,7 @@ done
             &registry,
             &json!({}),
             &json!({"code":"const result = await tools.mcp__test__echo({ text: 'hello' }); text(result.answer); return result;"}),
+            &HashMap::new(),
         )
         .await
         .expect("execute MCP tool through codemode");

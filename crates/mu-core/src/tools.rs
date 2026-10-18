@@ -60,12 +60,21 @@ pub fn definitions() -> Vec<Value> {
 }
 
 pub async fn execute(cwd: &Path, name: &str, arguments: &Value) -> Result<ToolResult, ToolError> {
+    execute_with_environment(cwd, name, arguments, &HashMap::new()).await
+}
+
+pub async fn execute_with_environment(
+    cwd: &Path,
+    name: &str,
+    arguments: &Value,
+    environment: &HashMap<String, String>,
+) -> Result<ToolResult, ToolError> {
     match name {
         "read" => read_file(cwd, arguments),
         "write" => write_file(cwd, arguments).await,
         "edit" => edit_file(cwd, arguments).await,
-        "bash" => run_bash(cwd, arguments).await,
-        "powershell" => run_powershell(cwd, arguments).await,
+        "bash" => run_bash(cwd, arguments, environment).await,
+        "powershell" => run_powershell(cwd, arguments, environment).await,
         "ls" => list_directory(cwd, arguments),
         "grep" => grep_files(cwd, arguments),
         "find" => find_files(cwd, arguments),
@@ -1282,10 +1291,17 @@ async fn run_shell_process(
     cwd: &Path,
     mut process: tokio::process::Command,
     timeout: Option<Duration>,
+    environment: &HashMap<String, String>,
 ) -> Result<Output, ToolError> {
     process
         .current_dir(cwd)
         .kill_on_drop(true)
+        .env_remove("PI_SESSION_ID")
+        .env_remove("PI_SESSION_FILE")
+        .env_remove("PI_PROVIDER")
+        .env_remove("PI_MODEL")
+        .env_remove("PI_REASONING_LEVEL")
+        .envs(environment)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = process.output();
@@ -1303,14 +1319,18 @@ async fn run_shell_process(
     }
 }
 
-async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+async fn run_bash(
+    cwd: &Path,
+    args: &Value,
+    environment: &HashMap<String, String>,
+) -> Result<ToolResult, ToolError> {
     let timeout = shell_timeout(args)?;
     let started_at = Instant::now();
     let command = string_arg(args, "command")?;
     let shell = default_bash_shell()?;
     let mut process = tokio::process::Command::new(shell);
     process.args(["-c", command]);
-    let output = run_shell_process(cwd, process, timeout).await?;
+    let output = run_shell_process(cwd, process, timeout, environment).await?;
     Ok(shell_result(output, started_at))
 }
 
@@ -1356,12 +1376,16 @@ fn powershell_command_with_utf8_output(command: &str) -> String {
     )
 }
 
-async fn run_powershell(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+async fn run_powershell(
+    cwd: &Path,
+    args: &Value,
+    environment: &HashMap<String, String>,
+) -> Result<ToolResult, ToolError> {
     let command = string_arg(args, "command")?;
     let timeout = shell_timeout(args)?;
     #[cfg(not(windows))]
     {
-        let _ = (cwd, command, timeout);
+        let _ = (cwd, command, timeout, environment);
         Err(ToolError::Arguments(
             "The powershell tool is only available on Windows.".into(),
         ))
@@ -1389,7 +1413,7 @@ async fn run_powershell(cwd: &Path, args: &Value) -> Result<ToolResult, ToolErro
             "-Command",
             &command,
         ]);
-        let output = run_shell_process(cwd, process, timeout).await?;
+        let output = run_shell_process(cwd, process, timeout, environment).await?;
         Ok(shell_result(output, started_at))
     }
 }
@@ -2120,6 +2144,29 @@ mod tests {
             ),
             "linked"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_receives_session_metadata_environment() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let environment = HashMap::from([
+            ("PI_SESSION_ID".to_owned(), "session-test".to_owned()),
+            ("PI_MODEL".to_owned(), "model-test".to_owned()),
+        ]);
+
+        let result = execute_with_environment(
+            &dir,
+            "bash",
+            &json!({"command":"printf '%s/%s' \"$PI_SESSION_ID\" \"$PI_MODEL\""}),
+            &environment,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.content, "session-test/model-test");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process::Stdio,
@@ -465,6 +465,9 @@ fn tool_prompt_guidelines(name: &str) -> &'static [&'static str] {
             "Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
         ],
         "write" => &["Use write only for new files or complete rewrites."],
+        "bash" | "powershell" => {
+            &["You can inspect PI_* environment variables for current model and session details."]
+        }
         _ => &[],
     }
 }
@@ -1542,15 +1545,21 @@ where
 async fn execute_independent_tool(
     mcp: &crate::mcp::McpRegistry,
     cwd: &Path,
+    shell_environment: &HashMap<String, String>,
     call: &FunctionCall,
 ) -> Result<(String, bool, Option<Value>), String> {
     match mcp.call(&call.name, &call.arguments).await {
         Some(Ok(result)) => Ok((result.content, result.is_error, None)),
         Some(Err(error)) => Err(error),
-        None => crate::tools::execute(cwd, &call.name, &call.arguments)
-            .await
-            .map(|result| (result.content, result.is_error, None))
-            .map_err(|error| error.to_string()),
+        None => crate::tools::execute_with_environment(
+            cwd,
+            &call.name,
+            &call.arguments,
+            shell_environment,
+        )
+        .await
+        .map(|result| (result.content, result.is_error, None))
+        .map_err(|error| error.to_string()),
     }
 }
 
@@ -1936,7 +1945,29 @@ impl MuAgent {
                 "tool `{name}` is not enabled"
             )));
         }
-        crate::tools::execute(&self.cwd, name, arguments).await
+        crate::tools::execute_with_environment(
+            &self.cwd,
+            name,
+            arguments,
+            &self.shell_environment(),
+        )
+        .await
+    }
+
+    fn shell_environment(&self) -> HashMap<String, String> {
+        let mut environment = HashMap::new();
+        if let Some(header) = self.session.header() {
+            environment.insert("PI_SESSION_ID".into(), header.id.as_str().to_owned());
+        }
+        if self.persist_session {
+            environment.insert(
+                "PI_SESSION_FILE".into(),
+                self.session_path.to_string_lossy().into_owned(),
+            );
+        }
+        environment.insert("PI_PROVIDER".into(), self.provider_id.clone());
+        environment.insert("PI_MODEL".into(), self.provider.model.clone());
+        environment
     }
 
     fn record_queued_prompt(
@@ -2102,12 +2133,11 @@ impl MuAgent {
                     .iter()
                     .all(|call| !matches!(call.name.as_str(), "tool_search" | "codemode"))
             {
+                let shell_environment = self.shell_environment();
                 Some(
-                    execute_in_parallel(
-                        calls
-                            .iter()
-                            .map(|call| execute_independent_tool(&self.mcp, &self.cwd, call)),
-                    )
+                    execute_in_parallel(calls.iter().map(|call| {
+                        execute_independent_tool(&self.mcp, &self.cwd, &shell_environment, call)
+                    }))
                     .await
                     .into_iter(),
                 )
@@ -2188,9 +2218,15 @@ impl MuAgent {
                     }
                 } else if call.name == "codemode" {
                     let store = self.codemode_store();
-                    crate::codemode::execute(&self.cwd, &self.mcp, &store, &call.arguments)
-                        .await
-                        .map_err(|error| error.to_string())
+                    crate::codemode::execute(
+                        &self.cwd,
+                        &self.mcp,
+                        &store,
+                        &call.arguments,
+                        &self.shell_environment(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
                 } else {
                     match self.mcp.call(&call.name, &call.arguments).await {
                         Some(Ok(result)) => Ok((result.content, result.is_error, None)),
@@ -2745,6 +2781,17 @@ mod tests {
             enabled_tools: vec!["grep".to_owned()],
         })
         .unwrap();
+        let shell_environment = agent.shell_environment();
+        assert_eq!(
+            shell_environment["PI_SESSION_ID"],
+            agent.session.header().unwrap().id.as_str()
+        );
+        assert_eq!(shell_environment["PI_PROVIDER"], "mu-demo");
+        assert_eq!(shell_environment["PI_MODEL"], "mu-demo");
+        assert_eq!(
+            shell_environment["PI_SESSION_FILE"],
+            agent.session_path().to_string_lossy()
+        );
         let exposed = agent
             .tool_definitions(&HashSet::new())
             .into_iter()
@@ -2840,7 +2887,7 @@ mod tests {
             &[serde_json::json!({"name":"bash"})],
         );
         assert!(shell_only.contains("Use bash for file operations like ls, rg, find"));
-        assert!(!shell_only.contains("PI_* environment variables"));
+        assert!(shell_only.contains("PI_* environment variables"));
         let shell_with_search = super::instructions_for_tools(
             "base instructions",
             &[

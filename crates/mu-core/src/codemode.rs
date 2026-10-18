@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use codemode::{CodeMode, CodeModeConfig, CodeModeError, NativeFunctionRegistry, RunCode};
 use serde_json::{Value, json};
@@ -48,6 +48,7 @@ pub(crate) async fn execute(
     mcp: &McpRegistry,
     stored_values: &Value,
     arguments: &Value,
+    shell_environment: &HashMap<String, String>,
 ) -> Result<(String, bool, Option<Value>), String> {
     let code = arguments
         .get("code")
@@ -67,11 +68,13 @@ pub(crate) async fn execute(
     let source = script_source(code, &metadata, stored_values)?;
     let mcp = mcp.clone();
     let cwd = cwd.to_owned();
+    let shell_environment = shell_environment.clone();
     let searchable_tools = tool_definitions.clone();
     let native_functions = NativeFunctionRegistry::default()
         .add_function("call_tool", move |args: Value| {
             let mcp = mcp.clone();
             let cwd = cwd.clone();
+            let shell_environment = shell_environment.clone();
             async move {
                 let call = args.as_array().ok_or_else(|| CodeModeError::ExecuteCode {
                     reason: "native call_tool arguments must be an array".into(),
@@ -89,11 +92,12 @@ pub(crate) async fn execute(
                         .structured_content
                         .unwrap_or_else(|| Value::String(result.content)));
                 }
-                let result = tools::execute(&cwd, name, &arguments)
-                    .await
-                    .map_err(|error| CodeModeError::ExecuteCode {
-                        reason: error.to_string(),
-                    })?;
+                let result =
+                    tools::execute_with_environment(&cwd, name, &arguments, &shell_environment)
+                        .await
+                        .map_err(|error| CodeModeError::ExecuteCode {
+                            reason: error.to_string(),
+                        })?;
                 Ok(result
                     .structured_content
                     .unwrap_or_else(|| Value::String(result.content)))
@@ -304,6 +308,7 @@ mod tests {
             &McpRegistry::default(),
             &json!({"count":1}),
             &json!({"code":"const result = await tools.read({ path: 'sample.txt' }); text(result); const matches = await searchTools('read file'); text(matches[0].name); store('count', load('count') + 1); return { done: true, capabilities: [typeof fetch, typeof env, typeof Deno] };"}),
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -318,6 +323,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn script_passes_pi_session_environment_to_nested_bash() {
+        let cwd = std::env::temp_dir().join(format!("mu-codemode-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&cwd).unwrap();
+        let environment = HashMap::from([("PI_SESSION_ID".into(), "nested-session".into())]);
+
+        let (output, is_error, _) = execute(
+            &cwd,
+            &McpRegistry::default(),
+            &json!({}),
+            &json!({"code":"return await tools.bash({ command: 'printf $PI_SESSION_ID' });"}),
+            &environment,
+        )
+        .await
+        .unwrap();
+
+        assert!(!is_error, "{output}");
+        assert!(output.contains("nested-session"), "{output}");
+        fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[tokio::test]
     async fn script_reports_tool_failures_as_script_errors() {
         let cwd = std::env::temp_dir().join(format!("mu-codemode-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&cwd).unwrap();
@@ -327,6 +353,7 @@ mod tests {
             &McpRegistry::default(),
             &json!({}),
             &json!({"code":"store('lost', true); await tools.read({ path: 'missing.txt' });"}),
+            &HashMap::new(),
         )
         .await
         .unwrap();
