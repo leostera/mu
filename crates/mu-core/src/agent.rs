@@ -337,7 +337,12 @@ fn expand_skill_command(prompt: String, skills: &crate::skills::SkillCatalog) ->
     }
 }
 
-fn shell_setting(agent_dir: &Path, cwd: &Path, key: &str) -> Option<String> {
+fn configured_setting<T>(
+    agent_dir: &Path,
+    cwd: &Path,
+    key: &str,
+    parse: impl Fn(&Value) -> Option<T>,
+) -> Option<T> {
     let mut setting = None;
     for path in [
         agent_dir.join("settings.json"),
@@ -349,11 +354,22 @@ fn shell_setting(agent_dir: &Path, cwd: &Path, key: &str) -> Option<String> {
         let Ok(settings) = serde_json::from_str::<Value>(&contents) else {
             continue;
         };
-        if let Some(value) = settings.get(key).and_then(Value::as_str) {
-            setting = Some(value.to_owned());
+        if let Some(value) = settings.get(key).and_then(&parse) {
+            setting = Some(value);
         }
     }
-    setting.filter(|value| !value.is_empty())
+    setting
+}
+
+fn shell_setting(agent_dir: &Path, cwd: &Path, key: &str) -> Option<String> {
+    configured_setting(agent_dir, cwd, key, |value| {
+        value.as_str().map(str::to_owned)
+    })
+    .filter(|value| !value.is_empty())
+}
+
+fn skill_commands_enabled(agent_dir: &Path, cwd: &Path) -> bool {
+    configured_setting(agent_dir, cwd, "enableSkillCommands", Value::as_bool).unwrap_or(true)
 }
 
 fn config() -> Result<Config, AgentError> {
@@ -2088,6 +2104,14 @@ impl MuAgent {
         &self.skills
     }
 
+    fn expand_prompt(&self, prompt: String) -> String {
+        if skill_commands_enabled(&self.agent_dir, &self.cwd) {
+            expand_skill_command(prompt, &self.skills)
+        } else {
+            prompt
+        }
+    }
+
     pub fn hide_thinking_block(&self) -> bool {
         self.hide_thinking_block
     }
@@ -2140,7 +2164,7 @@ impl MuAgent {
         behavior: PromptBehavior,
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
-        let prompt = expand_skill_command(prompt, &self.skills);
+        let prompt = self.expand_prompt(prompt);
         self.session.append_user_text(prompt.clone());
         self.save_session()?;
         self.history.push(json!({
@@ -2242,7 +2266,7 @@ impl MuAgent {
         prompt: String,
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
-        let prompt = expand_skill_command(prompt, &self.skills);
+        let prompt = self.expand_prompt(prompt);
         self.session.append_user_text(prompt.clone());
         self.save_session()?;
         self.history
@@ -2609,12 +2633,12 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
         std::fs::write(
             agent_dir.join("settings.json"),
-            r#"{"shellCommandPrefix":"global setup"}"#,
+            r#"{"shellCommandPrefix":"global setup","enableSkillCommands":true}"#,
         )
         .unwrap();
         std::fs::write(
             project_dir.join("settings.json"),
-            r#"{"shellCommandPrefix":"project setup","shellPath":"/project/bash"}"#,
+            r#"{"shellCommandPrefix":"project setup","shellPath":"/project/bash","enableSkillCommands":false}"#,
         )
         .unwrap();
         assert_eq!(
@@ -2626,6 +2650,14 @@ mod tests {
             super::shell_setting(&agent_dir, &root.join("project"), "shellPath").as_deref(),
             Some("/project/bash")
         );
+        assert!(!super::skill_commands_enabled(
+            &agent_dir,
+            &root.join("project")
+        ));
+        assert!(super::skill_commands_enabled(
+            &root.join("missing-agent"),
+            &root
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 
