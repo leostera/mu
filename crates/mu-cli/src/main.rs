@@ -88,6 +88,14 @@ struct Cli {
     #[arg(short = 't', long, value_delimiter = ',')]
     tools: Option<Vec<String>>,
 
+    /// Disable all tools.
+    #[arg(long)]
+    no_tools: bool,
+
+    /// Disable built-in tools while leaving MCP tools available.
+    #[arg(long)]
+    no_builtin_tools: bool,
+
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     mode: OutputMode,
@@ -183,6 +191,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         fork_from,
         name: cli.name,
         tools: cli.tools,
+        no_tools: cli.no_tools,
+        no_builtin_tools: cli.no_builtin_tools,
     };
 
     if cli.print || !is_terminal {
@@ -360,6 +370,16 @@ mod tests {
             tools.tools.unwrap(),
             vec!["read".to_owned(), "+grep".to_owned(), "-bash".to_owned()]
         );
+        assert!(
+            Cli::try_parse_from(["mu", "--no-tools"])
+                .expect("parse disable-tools option")
+                .no_tools
+        );
+        assert!(
+            Cli::try_parse_from(["mu", "--no-builtin-tools"])
+                .expect("parse disable-builtin-tools option")
+                .no_builtin_tools
+        );
     }
 
     #[test]
@@ -415,6 +435,8 @@ mod tests {
         assert!(help.contains("--fork"));
         assert!(help.contains("--name"));
         assert!(help.contains("--tools"));
+        assert!(help.contains("--no-tools"));
+        assert!(help.contains("--no-builtin-tools"));
         assert!(help.contains("PROMPT"));
     }
 }

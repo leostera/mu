@@ -24,7 +24,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 - [ ] Finish the built-in result contract: Mu now carries plain text plus optional `details`, `structured_content`, and `is_error`; still add ordered text/image content blocks, progress/cancellation, and render state, then preserve all fields through agent history and Pi session JSONL.
 - [ ] Complete built-in activation: all eight Pi tool schemas, including PowerShell, are exposed and the name/schema spec is active; still implement `defaultTools`/platform selection semantics and port default-tools-setting and full invalid-input cases.
-- [ ] Implement Pi tool loadouts (coding/read-only/all), `--no-tools`/`--no-builtin-tools`, custom/MCP tool allowlists, explicit-option precedence, reload/resume restoration, and platform-specific Bash/PowerShell choice. Mu now merges settings-layer `defaultTools`, defaults to Pi's four coding tools, and applies `--tools` builtin-name/pattern allowlists or ordered `+name`/`-name` modifiers to provider definitions.
+- [ ] Implement Pi tool loadouts (coding/read-only/all), custom/MCP tool allowlists, explicit-option precedence, reload/resume restoration, and platform-specific Bash/PowerShell choice. Mu now merges settings-layer `defaultTools`, defaults to Pi's four coding tools, and applies `--tools` builtin-name/pattern allowlists or ordered `+name`/`-name` modifiers. `--no-tools` disables built-in and MCP calls; `--no-builtin-tools` retains MCP, codemode, and tool-search tools.
 - [ ] Port strict-sampling metadata and opt-outs for the matching built-ins; keep optional schema fields optional. Port per-tool prompt snippets/guidelines and cwd-from-execution-context behavior.
 
 ### Paths and file tools

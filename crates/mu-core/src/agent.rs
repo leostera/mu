@@ -50,6 +50,8 @@ pub struct SessionOptions {
     pub fork_from: Option<PathBuf>,
     pub name: Option<String>,
     pub tools: Option<Vec<String>>,
+    pub no_tools: bool,
+    pub no_builtin_tools: bool,
 }
 
 struct Config {
@@ -1223,6 +1225,8 @@ fn resolve_session_options(
         fork_from,
         name,
         tools: _,
+        no_tools: _,
+        no_builtin_tools: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -1475,6 +1479,7 @@ pub struct MuAgent {
     hide_thinking_block: bool,
     retry: RetryPolicy,
     enabled_tools: Vec<String>,
+    no_tools: bool,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -1499,6 +1504,10 @@ impl MuAgent {
         if let Some(tools) = options.tools.as_deref() {
             config.enabled_tools = apply_tool_selection(&config.enabled_tools, tools)?;
         }
+        if options.no_builtin_tools || options.no_tools {
+            config.enabled_tools.clear();
+        }
+        let no_tools = options.no_tools;
         let persist_session = !options.no_session;
         let (session_path, session, history) = resolve_session_options(&config, options)?;
         let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
@@ -1537,6 +1546,7 @@ impl MuAgent {
             hide_thinking_block: config.hide_thinking_block,
             retry: config.retry,
             enabled_tools: config.enabled_tools,
+            no_tools,
             mcp,
             mcp_startup: Some(mcp_startup),
             active_mcp_tools,
@@ -1588,6 +1598,7 @@ impl MuAgent {
             hide_thinking_block: config.hide_thinking_block,
             retry: config.retry,
             enabled_tools: config.enabled_tools,
+            no_tools: false,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup: None,
             active_mcp_tools,
@@ -1787,6 +1798,9 @@ impl MuAgent {
     }
 
     fn tool_definitions(&self, active_mcp_tools: &HashSet<String>) -> Vec<Value> {
+        if self.no_tools {
+            return Vec::new();
+        }
         let all_definitions = crate::tools::definitions();
         let mut definitions = self
             .enabled_tools
@@ -1865,7 +1879,8 @@ impl MuAgent {
                     arguments: call.arguments.clone(),
                 });
             }
-            let mut parallel_results = if !truncated_tool_arguments
+            let mut parallel_results = if !self.no_tools
+                && !truncated_tool_arguments
                 && calls
                     .iter()
                     .all(|call| !matches!(call.name.as_str(), "tool_search" | "codemode"))
@@ -1883,7 +1898,9 @@ impl MuAgent {
                 None
             };
             for call in calls {
-                let result = if truncated_tool_arguments {
+                let result = if self.no_tools {
+                    Err(format!("Tool {} is not available", call.name))
+                } else if truncated_tool_arguments {
                     Err(format!(
                         "Tool call \"{}\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
                         call.name
@@ -2500,7 +2517,7 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!("mu-tool-loadout-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let agent = super::MuAgent::demo_from_config(super::Config {
+        let mut agent = super::MuAgent::demo_from_config(super::Config {
             agent_dir: root.join("agent"),
             cwd: root.clone(),
             provider: "mu-demo".into(),
@@ -2522,6 +2539,8 @@ mod tests {
             })
             .collect::<HashSet<_>>();
         assert_eq!(exposed, ["grep".to_owned()].into_iter().collect());
+        agent.no_tools = true;
+        assert!(agent.tool_definitions(&HashSet::new()).is_empty());
         std::fs::remove_dir_all(root).unwrap();
 
         let defaults = super::resolve_default_tools(None);
