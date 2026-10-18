@@ -1147,16 +1147,17 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             if !regex.is_match(line) {
                 continue;
             }
-            if match_count as f64 >= input.limit {
-                match_limit_reached = true;
-                break 'files;
-            }
             match_count += 1;
+            let reached_match_limit = match_count as f64 >= input.limit;
             if input.context == 0.0 {
                 let sanitized = line.replace('\r', "");
                 let (text, was_truncated) = truncate_grep_line(&sanitized);
                 lines_truncated |= was_truncated;
                 formatted_matches.push(format!("{display_path}:{}: {text}", index + 1));
+                if reached_match_limit {
+                    match_limit_reached = true;
+                    break 'files;
+                }
                 continue;
             }
 
@@ -1183,6 +1184,10 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
                     formatted_matches.push(format!("{display_path}-{line_number}- {text}"));
                 }
                 current_line += 1.0;
+            }
+            if reached_match_limit {
+                match_limit_reached = true;
+                break 'files;
             }
         }
     }

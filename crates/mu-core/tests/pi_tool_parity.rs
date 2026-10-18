@@ -779,7 +779,7 @@ async fn pi_grep_stops_parent_gitignore_rules_at_nested_repository_boundaries() 
 
 // Pi source: packages/coding-agent/test/tools.test.ts, grep limit cases.
 #[tokio::test]
-async fn pi_grep_reports_a_limit_only_when_an_additional_match_exists() {
+async fn pi_grep_reports_a_limit_when_match_count_reaches_the_limit() {
     let dir = temp_dir("grep-limit-boundary");
     fs::write(dir.join("one.txt"), "needle\n").unwrap();
     fs::write(dir.join("two.txt"), "needle\nneedle\n").unwrap();
@@ -791,7 +791,11 @@ async fn pi_grep_reports_a_limit_only_when_an_additional_match_exists() {
     )
     .await
     .unwrap();
-    assert!(!exactly_one.content.contains("limit reached"));
+    assert!(exactly_one.content.contains("1 matches limit reached"));
+    assert_eq!(
+        exactly_one.details.as_ref().unwrap()["matchLimitReached"],
+        1
+    );
 
     let exactly_two = execute(
         &dir,
@@ -800,7 +804,11 @@ async fn pi_grep_reports_a_limit_only_when_an_additional_match_exists() {
     )
     .await
     .unwrap();
-    assert!(!exactly_two.content.contains("limit reached"));
+    assert!(exactly_two.content.contains("2 matches limit reached"));
+    assert_eq!(
+        exactly_two.details.as_ref().unwrap()["matchLimitReached"],
+        2
+    );
 
     let limited = execute(
         &dir,
