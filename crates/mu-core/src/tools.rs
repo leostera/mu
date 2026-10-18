@@ -1452,6 +1452,19 @@ fn default_bash_shell() -> Result<PathBuf, ToolError> {
 }
 
 #[cfg(any(windows, test))]
+fn find_powershell_executable(path: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let directories = path
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    ["pwsh.exe", "powershell.exe"].into_iter().find_map(|name| {
+        directories
+            .iter()
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+#[cfg(any(windows, test))]
 fn powershell_command_with_utf8_output(command: &str) -> String {
     format!(
         "try {{ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 }} catch {{}}\n{command}"
@@ -1476,16 +1489,12 @@ async fn run_powershell(
     {
         let started_at = Instant::now();
         let command = powershell_command_with_utf8_output(command);
-        let powershell = ["pwsh.exe", "powershell.exe"]
-            .into_iter()
-            .find_map(|name| {
-                std::env::var_os("PATH")
-                    .into_iter()
-                    .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-                    .map(|path| path.join(name))
-                    .find(|path| path.is_file())
-            })
-            .unwrap_or_else(|| PathBuf::from("powershell.exe"));
+        let powershell = find_powershell_executable(std::env::var_os("PATH")).ok_or_else(|| {
+            ToolError::Command(
+                "No PowerShell executable found. Install PowerShell or add powershell.exe/pwsh.exe to PATH."
+                    .into(),
+            )
+        })?;
         let mut process = tokio::process::Command::new(powershell);
         process.args([
             "-NoProfile",
@@ -1750,6 +1759,24 @@ mod tests {
         assert!(Arc::ptr_eq(&target_lock, &alias_lock));
         assert!(!Arc::ptr_eq(&target_lock, &other_lock));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn powershell_discovery_prefers_pwsh_and_requires_an_executable_on_path() {
+        let root = std::env::temp_dir().join(format!("mu-powershell-{}", uuid::Uuid::new_v4()));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let powershell = first.join("powershell.exe");
+        let pwsh = second.join("pwsh.exe");
+        std::fs::write(&powershell, "").unwrap();
+        std::fs::write(&pwsh, "").unwrap();
+        let path = std::env::join_paths([&first, &second]).unwrap();
+
+        assert_eq!(find_powershell_executable(Some(path)), Some(pwsh));
+        assert_eq!(find_powershell_executable(None), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
