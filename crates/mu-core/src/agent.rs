@@ -412,6 +412,38 @@ fn apply_tool_selection(
     Ok(tools)
 }
 
+fn filter_tool_definitions(definitions: Vec<Value>, selection: &[String]) -> Vec<Value> {
+    let modifiers_only = selection
+        .iter()
+        .all(|entry| entry.starts_with('+') || entry.starts_with('-'));
+    if modifiers_only {
+        definitions
+            .into_iter()
+            .filter(|definition| {
+                let name = definition.get("name").and_then(Value::as_str);
+                !selection
+                    .iter()
+                    .filter(|entry| entry.starts_with('-'))
+                    .any(|modifier| name == Some(&modifier[1..]))
+            })
+            .collect()
+    } else {
+        definitions
+            .into_iter()
+            .filter(|definition| {
+                definition
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| {
+                        selection
+                            .iter()
+                            .any(|pattern| tool_name_matches(pattern, name))
+                    })
+            })
+            .collect()
+    }
+}
+
 fn tool_name_matches(pattern: &str, name: &str) -> bool {
     globset::Glob::new(pattern)
         .ok()
@@ -1480,6 +1512,7 @@ pub struct MuAgent {
     retry: RetryPolicy,
     enabled_tools: Vec<String>,
     no_tools: bool,
+    tool_selection: Option<Vec<String>>,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -1508,6 +1541,7 @@ impl MuAgent {
             config.enabled_tools.clear();
         }
         let no_tools = options.no_tools;
+        let tool_selection = options.tools.clone();
         let persist_session = !options.no_session;
         let (session_path, session, history) = resolve_session_options(&config, options)?;
         let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
@@ -1547,6 +1581,7 @@ impl MuAgent {
             retry: config.retry,
             enabled_tools: config.enabled_tools,
             no_tools,
+            tool_selection,
             mcp,
             mcp_startup: Some(mcp_startup),
             active_mcp_tools,
@@ -1599,6 +1634,7 @@ impl MuAgent {
             retry: config.retry,
             enabled_tools: config.enabled_tools,
             no_tools: false,
+            tool_selection: None,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup: None,
             active_mcp_tools,
@@ -1820,6 +1856,9 @@ impl MuAgent {
         }
         if self.mcp.has_deferred_tools() {
             definitions.push(crate::tool_search::definition());
+        }
+        if let Some(selection) = &self.tool_selection {
+            definitions = filter_tool_definitions(definitions, selection);
         }
         definitions
     }
@@ -2559,6 +2598,18 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(super::apply_tool_selection(&defaults, &["read".into(), "+grep".into()]).is_err());
+        let definitions = vec![
+            serde_json::json!({"name":"read"}),
+            serde_json::json!({"name":"mcp__docs__search"}),
+            serde_json::json!({"name":"tool_search"}),
+        ];
+        let allowlisted = super::filter_tool_definitions(
+            definitions.clone(),
+            &["read".into(), "mcp__docs__*".into()],
+        );
+        assert_eq!(allowlisted.len(), 2);
+        let modified = super::filter_tool_definitions(definitions, &["-tool_search".into()]);
+        assert_eq!(modified.len(), 2);
     }
 
     #[tokio::test]
