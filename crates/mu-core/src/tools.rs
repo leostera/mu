@@ -20,6 +20,8 @@ use tokio::{
 };
 use unicode_normalization::UnicodeNormalization;
 
+pub(crate) const SHELL_COMMAND_PREFIX_ENV: &str = "MU_INTERNAL_SHELL_COMMAND_PREFIX";
+
 #[derive(Debug, Error)]
 pub enum ToolError {
     #[error("invalid arguments: {0}")]
@@ -1901,6 +1903,14 @@ async fn run_shell_process(
     })
 }
 
+fn shell_child_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
+    environment
+        .iter()
+        .filter(|(name, _)| name.as_str() != SHELL_COMMAND_PREFIX_ENV)
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 async fn run_bash(
     cwd: &Path,
     args: &Value,
@@ -1909,10 +1919,19 @@ async fn run_bash(
     let timeout = shell_timeout(args)?;
     let started_at = Instant::now();
     let command = string_arg(args, "command")?;
+    let command = environment
+        .get(SHELL_COMMAND_PREFIX_ENV)
+        .filter(|prefix| !prefix.is_empty())
+        .map_or_else(
+            || command.to_owned(),
+            |prefix| format!("{prefix}\n{command}"),
+        );
+    let child_environment = shell_child_environment(environment);
     let shell = default_bash_shell()?;
     let mut process = tokio::process::Command::new(shell);
-    process.args(["-c", command]);
-    let output = run_shell_process(cwd, "bash", "pi-bash", process, timeout, environment).await?;
+    process.args(["-c", &command]);
+    let output =
+        run_shell_process(cwd, "bash", "pi-bash", process, timeout, &child_environment).await?;
     Ok(shell_result(output, started_at, "pi-bash"))
 }
 
@@ -2061,7 +2080,7 @@ async fn run_powershell(
             "pi-powershell",
             process,
             timeout,
-            environment,
+            &shell_child_environment(environment),
         )
         .await?;
         Ok(shell_result(output, started_at, "pi-powershell"))
@@ -3128,6 +3147,28 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_prepends_configured_command_prefix_without_leaking_internal_option() {
+        let directory = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut environment = HashMap::new();
+        environment.insert(
+            SHELL_COMMAND_PREFIX_ENV.to_owned(),
+            "printf prefix".to_owned(),
+        );
+        let result = execute_with_environment(
+            &directory,
+            "bash",
+            &json!({"command": r#"printf command; test -z "$MU_INTERNAL_SHELL_COMMAND_PREFIX""#}),
+            &environment,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.content, "prefixcommand");
+        assert!(!result.is_error);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn bash_receives_session_metadata_environment() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));

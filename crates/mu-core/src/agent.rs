@@ -337,6 +337,25 @@ fn expand_skill_command(prompt: String, skills: &crate::skills::SkillCatalog) ->
     }
 }
 
+fn shell_command_prefix(agent_dir: &Path, cwd: &Path) -> Option<String> {
+    let mut prefix = None;
+    for path in [
+        agent_dir.join("settings.json"),
+        cwd.join(".pi/settings.json"),
+    ] {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(settings) = serde_json::from_str::<Value>(&contents) else {
+            continue;
+        };
+        if let Some(value) = settings.get("shellCommandPrefix").and_then(Value::as_str) {
+            prefix = Some(value.to_owned());
+        }
+    }
+    prefix.filter(|prefix| !prefix.is_empty())
+}
+
 fn config() -> Result<Config, AgentError> {
     let cwd = std::env::current_dir()?;
     let home = std::env::var_os("HOME")
@@ -2106,6 +2125,9 @@ impl MuAgent {
         }
         environment.insert("PI_PROVIDER".into(), self.provider_id.clone());
         environment.insert("PI_MODEL".into(), self.provider.model.clone());
+        if let Some(prefix) = shell_command_prefix(&self.agent_dir, &self.cwd) {
+            environment.insert(crate::tools::SHELL_COMMAND_PREFIX_ENV.into(), prefix);
+        }
         environment
     }
 
@@ -2574,6 +2596,30 @@ mod tests {
     use mu_session::{AssistantToolResponse, MessageUsage, SessionDocument, ToolCallRecord};
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn project_shell_command_prefix_overrides_agent_settings() {
+        let root = std::env::temp_dir().join(format!("mu-shell-prefix-{}", uuid::Uuid::new_v4()));
+        let agent_dir = root.join("agent");
+        let project_dir = root.join("project/.pi");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"shellCommandPrefix":"global setup"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir.join("settings.json"),
+            r#"{"shellCommandPrefix":"project setup"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            super::shell_command_prefix(&agent_dir, &root.join("project")).as_deref(),
+            Some("project setup")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn skill_commands_expand_frontmatter_body_and_arguments() {
