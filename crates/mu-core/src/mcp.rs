@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::join_all};
 use reqwest::{
     Client, Url,
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -124,8 +124,10 @@ impl McpRegistry {
         let (configs, auto_enable_codemode) = match load_config(agent_dir, cwd) {
             Ok(config) => config,
             Err(error) => {
-                eprintln!("mu: MCP configuration: {error}");
-                return Self::default();
+                return Self {
+                    server_status: vec![format!("MCP configuration: {error}")],
+                    ..Self::default()
+                };
             }
         };
 
@@ -133,12 +135,20 @@ impl McpRegistry {
             auto_enable_codemode,
             ..Self::default()
         };
+        let connected = join_all(configs.into_iter().map(|config| {
+            let cwd = cwd.to_owned();
+            async move {
+                let name = config.name.clone();
+                let server_exposure = config.exposure;
+                let tool_exposure = config.tool_exposure.clone();
+                let result = connect_server(config, &cwd).await;
+                (name, server_exposure, tool_exposure, result)
+            }
+        }))
+        .await;
         let mut used_names = HashSet::new();
-        for config in configs {
-            let name = config.name.clone();
-            let server_exposure = config.exposure;
-            let tool_exposure = config.tool_exposure.clone();
-            match connect_server(config, cwd).await {
+        for (name, server_exposure, tool_exposure, result) in connected {
+            match result {
                 Ok((server, tools)) => {
                     registry
                         .server_status
@@ -170,7 +180,6 @@ impl McpRegistry {
                     registry
                         .server_status
                         .push(format!("{name}: disconnected ({error})"));
-                    eprintln!("mu: MCP server `{name}`: {error}");
                 }
             }
         }
@@ -1550,6 +1559,59 @@ done
         assert!(!is_error, "{output}");
         assert!(output.contains("42"), "{output}");
         assert!(store_writes.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registry_connects_all_configured_servers_concurrently() {
+        let root = std::env::temp_dir().join(format!("mu-mcp-parallel-{}", uuid::Uuid::new_v4()));
+        let ready = root.join("ready");
+        std::fs::create_dir_all(&ready).unwrap();
+        let mut servers = serde_json::Map::new();
+        for (name, other) in [("alpha", "beta"), ("beta", "alpha")] {
+            let script = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *initialize*)
+      touch "$READY_DIR/$SERVER_NAME"
+      i=0
+      while [ ! -e "$READY_DIR/$OTHER_NAME" ] && [ "$i" -lt 200 ]; do
+        i=$((i + 1)); sleep 0.01
+      done
+      [ -e "$READY_DIR/$OTHER_NAME" ] || exit 2
+      echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"parallel-test","version":"1"}}}' ;;
+    *tools/list*)
+      echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}' ;;
+  esac
+done
+"#;
+            servers.insert(
+                name.to_owned(),
+                json!({
+                    "type":"stdio",
+                    "command":"sh",
+                    "args":["-c",script],
+                    "env":{
+                        "READY_DIR":ready.to_string_lossy(),
+                        "SERVER_NAME":name,
+                        "OTHER_NAME":other
+                    }
+                }),
+            );
+        }
+        std::fs::write(
+            root.join("mcp.json"),
+            json!({"mcpServers":servers}).to_string(),
+        )
+        .unwrap();
+
+        let registry =
+            tokio::time::timeout(Duration::from_secs(5), McpRegistry::connect(&root, &root))
+                .await
+                .expect("parallel startup completed");
+        assert!(registry.status_text().contains("alpha: connected"));
+        assert!(registry.status_text().contains("beta: connected"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

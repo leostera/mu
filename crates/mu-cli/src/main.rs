@@ -1,6 +1,9 @@
 mod tui;
 
-use std::io::{IsTerminal, Read};
+use std::{
+    io::{IsTerminal, Read},
+    path::PathBuf,
+};
 
 use clap::{Parser, ValueEnum};
 
@@ -18,12 +21,23 @@ struct Cli {
     version: bool,
 
     /// Run the TUI with a deterministic backend; no gateway or credentials required.
-    #[arg(long, conflicts_with_all = ["print", "prompt"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["print", "prompt", "continue_session", "session"]
+    )]
     demo: bool,
 
     /// Process a prompt and exit without opening the interactive TUI.
     #[arg(short = 'p', long)]
     print: bool,
+
+    /// Continue the most recent session for the current working directory.
+    #[arg(short = 'c', long = "continue", conflicts_with = "session")]
+    continue_session: bool,
+
+    /// Resume a specific Pi-compatible session file.
+    #[arg(long, conflicts_with = "continue_session")]
+    session: Option<PathBuf>,
 
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
@@ -74,6 +88,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.mode != OutputMode::Text {
         return Err(format!("--mode {:?} is not implemented yet", cli.mode).into());
     }
+    let session_file = if cli.continue_session {
+        Some(mu_core::latest_session_for_current_cwd()?.ok_or(
+            "--continue requested, but no previous session exists for this working directory",
+        )?)
+    } else {
+        cli.session
+    };
 
     if cli.print || !cli.prompt.is_empty() || !is_terminal {
         let prompt = if cli.prompt.is_empty() {
@@ -84,11 +105,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if prompt.trim().is_empty() {
             return Ok(());
         }
-        mu_core::run_prompt(prompt).await?;
+        mu_core::run_prompt_with_session(prompt, session_file).await?;
         return Ok(());
     }
 
-    tui::run(mu_core::MuAgent::connect().await?).await
+    tui::run(mu_core::MuAgent::connect_with_session(session_file).await?).await
 }
 
 fn read_stdin_prompt(is_terminal: bool) -> Result<String, std::io::Error> {
@@ -104,6 +125,7 @@ fn read_stdin_prompt(is_terminal: bool) -> Result<String, std::io::Error> {
 mod tests {
     use super::Cli;
     use clap::{CommandFactory, Parser};
+    use std::path::PathBuf;
 
     #[test]
     fn parses_demo_and_one_shot_prompt_modes() {
@@ -123,6 +145,20 @@ mod tests {
             Cli::try_parse_from(["mu", "-p", "inspect", "this repo"]).expect("parse print mode");
         assert!(print.print);
         assert_eq!(print.prompt, ["inspect", "this repo"]);
+
+        let continue_session =
+            Cli::try_parse_from(["mu", "-c"]).expect("parse continue-session mode");
+        assert!(continue_session.continue_session);
+        let session = Cli::try_parse_from(["mu", "--session", "/tmp/pi-session.jsonl"])
+            .expect("parse explicit session mode");
+        assert_eq!(
+            session.session,
+            Some(PathBuf::from("/tmp/pi-session.jsonl"))
+        );
+        assert!(
+            Cli::try_parse_from(["mu", "--continue", "--session", "/tmp/pi-session.jsonl"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -131,6 +167,8 @@ mod tests {
         assert!(help.contains("--demo"));
         assert!(help.contains("--print"));
         assert!(help.contains("--mode"));
+        assert!(help.contains("--continue"));
+        assert!(help.contains("--session"));
         assert!(help.contains("PROMPT"));
     }
 }

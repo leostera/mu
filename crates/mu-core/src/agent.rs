@@ -14,8 +14,10 @@ use mu_session::{
 use reqwest::{Client, Url, header};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::sync::OnceCell;
 
 const ORIGIN: &str = "https://opencode.cloudflare.dev";
+const MCP_STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -768,13 +770,159 @@ fn session_codemode_store(session: &SessionDocument) -> Value {
     Value::Object(store)
 }
 
-fn session_path(c: &Config) -> PathBuf {
-    let cwd = c
-        .cwd
+fn load_session(path: &Path) -> Result<(SessionDocument, Vec<Value>), AgentError> {
+    let contents =
+        std::fs::read_to_string(path).map_err(|error| AgentError::Session(error.to_string()))?;
+    let session = SessionDocument::parse_jsonl(&contents)
+        .map_err(|error| AgentError::Session(error.to_string()))?;
+    let history = session_history(&session);
+    Ok((session, history))
+}
+
+fn session_history(session: &SessionDocument) -> Vec<Value> {
+    let mut history = Vec::new();
+    for entry in session.active_branch_entries() {
+        let Some(message) = entry
+            .extra_fields()
+            .get("message")
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let content = message.get("content").and_then(Value::as_array);
+        match role {
+            "user" => {
+                let blocks = content
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|block| {
+                        let text = block.get("text")?.as_str()?;
+                        Some(json!({"type":"input_text","text":text}))
+                    })
+                    .collect::<Vec<_>>();
+                if !blocks.is_empty() {
+                    history.push(json!({"role":"user","content":blocks}));
+                }
+            }
+            "assistant" => {
+                let mut text_blocks = Vec::new();
+                let mut tool_calls = Vec::new();
+                for block in content.into_iter().flatten() {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                                text_blocks.push(json!({"type":"output_text","text":text}));
+                            }
+                        }
+                        Some("toolCall") => {
+                            let Some(call_id) = block.get("id").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            let Some(name) = block.get("name").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            let arguments = block.get("arguments").cloned().unwrap_or(Value::Null);
+                            let arguments =
+                                arguments.as_str().map(str::to_owned).unwrap_or_else(|| {
+                                    serde_json::to_string(&arguments)
+                                        .unwrap_or_else(|_| "{}".into())
+                                });
+                            tool_calls.push(json!({
+                                "type":"function_call",
+                                "call_id":call_id,
+                                "name":name,
+                                "arguments":arguments,
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+                if !text_blocks.is_empty() {
+                    history.push(json!({"role":"assistant","content":text_blocks}));
+                }
+                history.extend(tool_calls);
+            }
+            "toolResult" => {
+                let text = content
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if let Some(call_id) = message.get("toolCallId").and_then(Value::as_str) {
+                    history.push(json!({
+                        "type":"function_call_output",
+                        "call_id":call_id,
+                        "output":text,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    history
+}
+
+fn session_directory(agent_dir: &Path, cwd: &Path) -> PathBuf {
+    let cwd = cwd
         .to_string_lossy()
         .trim_start_matches(['/', '\\'])
         .replace(['/', '\\', ':'], "-");
-    let dir = c.agent_dir.join("sessions").join(format!("--{cwd}--"));
+    agent_dir.join("sessions").join(format!("--{cwd}--"))
+}
+
+fn latest_session_path(agent_dir: &Path, cwd: &Path) -> Option<PathBuf> {
+    let directory = session_directory(agent_dir, cwd);
+    let expected_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
+    let mut sessions = std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file()
+                || path
+                    .extension()
+                    .is_none_or(|extension| extension != "jsonl")
+            {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.0));
+
+    for (_, path) in sessions {
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(header) = contents
+            .lines()
+            .next()
+            .and_then(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|value| value.get("type").and_then(Value::as_str) == Some("session"))
+        else {
+            continue;
+        };
+        let Some(session_cwd) = header.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        let session_cwd = Path::new(session_cwd);
+        let session_cwd =
+            std::fs::canonicalize(session_cwd).unwrap_or_else(|_| session_cwd.to_owned());
+        if session_cwd == expected_cwd {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn session_path(c: &Config) -> PathBuf {
+    let dir = session_directory(&c.agent_dir, &c.cwd);
     let ts = chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         .replace([':', '.'], "-");
@@ -921,36 +1069,71 @@ pub struct MuAgent {
     session: SessionDocument,
     history: Vec<Value>,
     session_path: PathBuf,
+    agent_dir: PathBuf,
     cwd: PathBuf,
     skills: crate::skills::SkillCatalog,
     hide_thinking_block: bool,
     retry: RetryPolicy,
     mcp: crate::mcp::McpRegistry,
+    mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
     prompt_queue: AgentPromptQueue,
 }
 
 impl MuAgent {
     pub async fn connect() -> Result<Self, AgentError> {
+        Self::connect_with_session(None).await
+    }
+
+    pub async fn connect_with_session(session_file: Option<PathBuf>) -> Result<Self, AgentError> {
         let config = config()?;
+        let (session_path, session, history) = match session_file {
+            Some(path) => {
+                let (session, history) = load_session(&path)?;
+                (path, session, history)
+            }
+            None => (
+                session_path(&config),
+                SessionDocument::new(config.cwd.to_string_lossy().into_owned()),
+                Vec::new(),
+            ),
+        };
         let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
-        let provider = connect(&config, skills.system_prompt()).await?;
-        let mcp = crate::mcp::McpRegistry::connect(&config.agent_dir, &config.cwd).await;
-        let session_path = session_path(&config);
-        let session = SessionDocument::new(config.cwd.to_string_lossy().into_owned());
+        let mcp_startup = Arc::new(OnceCell::new());
+        let background_mcp = Arc::clone(&mcp_startup);
+        let mcp_agent_dir = config.agent_dir.clone();
+        let mcp_cwd = config.cwd.clone();
+        let mcp_startup_task = tokio::spawn(async move {
+            background_mcp
+                .get_or_init(|| async move {
+                    crate::mcp::McpRegistry::connect(&mcp_agent_dir, &mcp_cwd).await
+                })
+                .await;
+        });
+        let provider = match connect(&config, skills.system_prompt()).await {
+            Ok(provider) => provider,
+            Err(error) => {
+                mcp_startup_task.abort();
+                return Err(error);
+            }
+        };
+        drop(mcp_startup_task);
+        let mcp = crate::mcp::McpRegistry::default();
         let active_mcp_tools = session_active_mcp_tools(&session);
         Ok(Self {
             provider,
             provider_id: config.provider,
             model_choices: config.model_choices,
             session,
-            history: Vec::new(),
+            history,
             session_path,
+            agent_dir: config.agent_dir.clone(),
             cwd: config.cwd.clone(),
             skills,
             hide_thinking_block: config.hide_thinking_block,
             retry: config.retry,
             mcp,
+            mcp_startup: Some(mcp_startup),
             active_mcp_tools,
             prompt_queue: AgentPromptQueue::default(),
         })
@@ -992,11 +1175,13 @@ impl MuAgent {
             session,
             history: Vec::new(),
             session_path: path,
+            agent_dir: config.agent_dir.clone(),
             cwd: config.cwd.clone(),
             skills: crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir),
             hide_thinking_block: config.hide_thinking_block,
             retry: config.retry,
             mcp: crate::mcp::McpRegistry::default(),
+            mcp_startup: None,
             active_mcp_tools,
             prompt_queue: AgentPromptQueue::default(),
         })
@@ -1011,7 +1196,38 @@ impl MuAgent {
     }
 
     pub fn mcp_status(&self) -> String {
-        self.mcp.status_text()
+        self.mcp_startup
+            .as_ref()
+            .and_then(|startup| startup.get())
+            .map_or_else(
+                || {
+                    if self.mcp_startup.is_some() {
+                        "MCP servers are connecting in the background.".to_owned()
+                    } else {
+                        self.mcp.status_text()
+                    }
+                },
+                crate::mcp::McpRegistry::status_text,
+            )
+    }
+
+    async fn ensure_mcp_ready(&mut self) {
+        let Some(startup) = self.mcp_startup.clone() else {
+            return;
+        };
+        let agent_dir = self.agent_dir.clone();
+        let cwd = self.cwd.clone();
+        let connected = tokio::time::timeout(
+            MCP_STARTUP_WAIT,
+            startup.get_or_init(|| async move {
+                crate::mcp::McpRegistry::connect(&agent_dir, &cwd).await
+            }),
+        )
+        .await;
+        if let Ok(registry) = connected {
+            self.mcp = registry.clone();
+            self.mcp_startup = None;
+        }
     }
 
     pub fn prompt_queue(&self) -> AgentPromptQueue {
@@ -1103,12 +1319,26 @@ impl MuAgent {
         session_codemode_store(&self.session)
     }
 
+    fn refresh_mcp_if_ready(&mut self) {
+        let Some(registry) = self
+            .mcp_startup
+            .as_ref()
+            .and_then(|startup| startup.get())
+            .cloned()
+        else {
+            return;
+        };
+        self.mcp = registry;
+        self.mcp_startup = None;
+    }
+
     async fn complete_with_retry(
-        &self,
+        &mut self,
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<Reply, AgentError> {
         let mut attempt = 0;
         loop {
+            self.refresh_mcp_if_ready();
             match self
                 .provider
                 .complete(
@@ -1163,6 +1393,7 @@ impl MuAgent {
             .map_err(|error| AgentError::Session(error.to_string()))?;
         self.history
             .push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
+        self.ensure_mcp_ready().await;
         if let Some(steering) = self.prompt_queue.take_steering() {
             self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
         }
@@ -1375,8 +1606,20 @@ impl MuAgent {
     }
 }
 
+pub fn latest_session_for_current_cwd() -> Result<Option<PathBuf>, AgentError> {
+    let config = config()?;
+    Ok(latest_session_path(&config.agent_dir, &config.cwd))
+}
+
 pub async fn run_prompt(prompt: String) -> Result<(), AgentError> {
-    let mut agent = MuAgent::connect().await?;
+    run_prompt_with_session(prompt, None).await
+}
+
+pub async fn run_prompt_with_session(
+    prompt: String,
+    session_file: Option<PathBuf>,
+) -> Result<(), AgentError> {
+    let mut agent = MuAgent::connect_with_session(session_file).await?;
     agent
         .submit(prompt, &mut |event| {
             match event {
@@ -1449,11 +1692,131 @@ pub async fn run_cli() -> Result<(), AgentError> {
 mod tests {
     use super::{
         AgentPromptQueue, FunctionCall, PromptBehavior, Reply, configured_models,
-        execute_in_parallel, session_active_mcp_tools, session_codemode_store, trusted_url,
+        execute_in_parallel, latest_session_path, load_session, session_active_mcp_tools,
+        session_codemode_store, session_history, trusted_url,
     };
-    use mu_session::SessionDocument;
+    use mu_session::{AssistantToolResponse, MessageUsage, SessionDocument, ToolCallRecord};
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn latest_session_for_a_working_directory_uses_mtime_and_validates_session_cwd() {
+        let root = std::env::temp_dir().join(format!("mu-session-list-{}", uuid::Uuid::new_v4()));
+        let session_dir = root.join("sessions/--tmp-project--");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let header = |cwd: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"session",
+                    "id":"session-id",
+                    "timestamp":"2025-01-01T00:00:00.000Z",
+                    "cwd":cwd
+                })
+            )
+        };
+        let old_name = session_dir.join("2024-01-01_old.jsonl");
+        let lexically_newer_name = session_dir.join("2025-01-01_new.jsonl");
+        let other_cwd_name = session_dir.join("2026-01-01-other.jsonl");
+        std::fs::write(&old_name, header("/tmp/project")).unwrap();
+        std::fs::write(&lexically_newer_name, header("/tmp/project")).unwrap();
+        std::fs::write(&other_cwd_name, header("/tmp/other-project")).unwrap();
+        std::fs::write(session_dir.join("invalid.jsonl"), "not json").unwrap();
+        std::fs::create_dir(session_dir.join("2027-01-01-directory.jsonl")).unwrap();
+        let set_mtime =
+            |path: &Path, seconds| {
+                std::fs::File::open(path)
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                    ))
+                    .unwrap();
+            };
+        set_mtime(&old_name, 300);
+        set_mtime(&lexically_newer_name, 200);
+        set_mtime(&other_cwd_name, 400);
+
+        assert_eq!(
+            latest_session_path(&root, Path::new("/tmp/project")),
+            Some(old_name)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn loading_a_session_file_restores_its_document_and_model_history() {
+        let root = std::env::temp_dir().join(format!("mu-session-load-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        let mut session = SessionDocument::new("/tmp/project");
+        session.append_user_text("remember this");
+        session.append_assistant_turn(
+            "openai-responses",
+            "test-provider",
+            "test-model",
+            "",
+            "I will.",
+            MessageUsage::default(),
+        );
+        session.append_custom_entry(
+            "mcp-tool-loadout",
+            serde_json::json!({"active":["mcp__test__echo"]}),
+        );
+        session.append_custom_entry("codemode-store", serde_json::json!({"set":{"answer":42}}));
+        session.write_atomic(&path).unwrap();
+
+        let (loaded, history) = load_session(&path).unwrap();
+        assert_eq!(loaded.header().unwrap().cwd, "/tmp/project");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["content"][0]["text"], "remember this");
+        assert_eq!(history[1]["content"][0]["text"], "I will.");
+        assert!(session_active_mcp_tools(&loaded).contains("mcp__test__echo"));
+        assert_eq!(session_codemode_store(&loaded)["answer"], 42);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resumed_history_reconstructs_user_assistant_tool_call_and_tool_result() {
+        let mut session = SessionDocument::new("/tmp/project");
+        session.append_user_text("hello");
+        session.append_assistant_tool_calls(
+            "openai-responses",
+            "test-provider",
+            "test-model",
+            AssistantToolResponse {
+                thinking: String::new(),
+                thinking_signature: None,
+                text: String::new(),
+                calls: vec![ToolCallRecord {
+                    id: "call-1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path":"file.txt"}),
+                }],
+                usage: MessageUsage::default(),
+            },
+        );
+        session.append_tool_result("call-1", "read", "file contents".into(), false);
+        session.append_assistant_turn(
+            "openai-responses",
+            "test-provider",
+            "test-model",
+            "",
+            "done",
+            MessageUsage::default(),
+        );
+
+        let history = session_history(&session);
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[0]["role"], "user");
+        assert_eq!(history[0]["content"][0]["text"], "hello");
+        assert_eq!(history[1]["type"], "function_call");
+        assert_eq!(history[1]["call_id"], "call-1");
+        assert_eq!(history[1]["arguments"], r#"{"path":"file.txt"}"#);
+        assert_eq!(history[2]["type"], "function_call_output");
+        assert_eq!(history[2]["output"], "file contents");
+        assert_eq!(history[3]["content"][0]["text"], "done");
+    }
+
     #[tokio::test]
     async fn scripted_provider_runs_a_complete_streaming_tool_turn_offline() {
         let root = std::env::temp_dir().join(format!("mu-scripted-agent-{}", uuid::Uuid::new_v4()));

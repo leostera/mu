@@ -11,6 +11,7 @@ mod tool_search;
 pub mod tools;
 
 pub use agent::{
-    AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior, run_cli, run_prompt,
+    AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior,
+    latest_session_for_current_cwd, run_cli, run_prompt, run_prompt_with_session,
 };
 pub use mu_session as session;

@@ -14,9 +14,8 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## CLI and session behavior
 
-- [ ] Implement session discovery, resume, fork/clone, branch navigation, import/export, tree selection, and their command-line forms.
+- [ ] Implement remaining session workflows and CLI forms: interactive `--resume`, session-ID lookup, fork/clone, branch navigation/tree selection, and import/export. `--continue` now chooses the newest current-project JSONL session; `--session <path>` loads a specific file and reconstructs the active branch's text/tool-call history.
 - [ ] Port Pi session compaction, branch selection, summaries, and context projection behavior end to end.
-- [ ] Resume persisted codemode store and MCP tool activation from an actual loaded session/branch.
 
 ## Built-in tools and skills
 
@@ -60,7 +59,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 - [ ] OAuth and provider-token authentication for MCP servers.
 - [ ] MCP resources, resource templates, and resource reads.
-- [ ] Lazy/background server lifecycle, retries/reconnect, notifications, dynamic capability/tool registration, server logs, and clean shutdown.
+- [ ] Finish MCP lifecycle parity: retries/reconnect, notifications, dynamic capability/tool registration, server logs, and clean shutdown. Connections now start in the background and configured servers initialize concurrently; the first prompt waits at most 10 seconds for startup (Pi waits only for direct-exposure servers).
 - [ ] Full `/mcp` management UI/commands (Mu currently has a status view only).
 - [ ] Project trust confirmation/prompt and persistent decisions; currently trusted Pi decisions are read but no prompt is shown.
 - [ ] Preserve and render all MCP content blocks, including images/resources and structured content, in model output and codemode.
