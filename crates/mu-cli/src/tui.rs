@@ -1318,19 +1318,23 @@ impl App {
 type StartupFuture = Pin<Box<dyn Future<Output = Result<MuAgent, AgentError>> + Send>>;
 
 pub async fn run(agent: MuAgent) -> Result<(), Box<dyn std::error::Error>> {
-    run_loop(Some(agent), None).await
+    run_loop(Some(agent), None, None).await
 }
 
-pub async fn run_starting<F>(startup: F) -> Result<(), Box<dyn std::error::Error>>
+pub async fn run_starting<F>(
+    startup: F,
+    initial_prompt: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>>
 where
     F: Future<Output = Result<MuAgent, AgentError>> + Send + 'static,
 {
-    run_loop(None, Some(Box::pin(startup))).await
+    run_loop(None, Some(Box::pin(startup)), initial_prompt).await
 }
 
 async fn run_loop(
     initial_agent: Option<MuAgent>,
     startup: Option<StartupFuture>,
+    mut initial_prompt: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _terminal_session = terminal::TerminalSession::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -1362,7 +1366,12 @@ async fn run_loop(
                 app.apply_agent_metadata(&loaded_agent);
                 app.loading = false;
                 app.retry_status = None;
-                agent = Some(Arc::new(Mutex::new(loaded_agent)));
+                let loaded_agent = Arc::new(Mutex::new(loaded_agent));
+                agent = Some(Arc::clone(&loaded_agent));
+                if let Some(prompt) = initial_prompt.take().filter(|prompt| !prompt.trim().is_empty()) {
+                    app.composer.insert_text(&prompt);
+                    app.submit(loaded_agent, tx.clone());
+                }
             },
             event = next_event() => if let Some(event) = event {
                 match event {

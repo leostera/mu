@@ -1,6 +1,6 @@
 use std::{
     collections::{HashSet, VecDeque},
-    io::{self, Write},
+    io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex as StdMutex},
@@ -29,6 +29,13 @@ pub enum AgentError {
     Session(String),
     #[error("I/O: {0}")]
     Io(#[from] io::Error),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub id: String,
+    pub path: PathBuf,
+    pub timestamp: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -893,8 +900,11 @@ fn resolved_path(path: &Path) -> PathBuf {
 }
 
 fn session_header(path: &Path) -> Option<Value> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    let header = serde_json::from_str::<Value>(contents.lines().next()?).ok()?;
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line).ok()?;
+    let header = serde_json::from_str::<Value>(&first_line).ok()?;
     (header.get("type").and_then(Value::as_str) == Some("session")).then_some(header)
 }
 
@@ -961,15 +971,16 @@ fn validate_session_id(id: &str) -> Result<(), AgentError> {
     Ok(())
 }
 
-fn latest_session_path(
+fn list_session_paths(
     agent_dir: &Path,
     cwd: &Path,
     override_dir: Option<&Path>,
-) -> Option<PathBuf> {
+) -> Vec<(std::time::SystemTime, PathBuf, Value)> {
     let directory = session_directory(agent_dir, cwd, override_dir);
     let expected_cwd = resolved_path(cwd);
     let mut sessions = std::fs::read_dir(directory)
-        .ok()?
+        .into_iter()
+        .flatten()
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
@@ -981,26 +992,24 @@ fn latest_session_path(
                 return None;
             }
             let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, path))
+            let header = session_header(&path)?;
+            let session_cwd = Path::new(header.get("cwd")?.as_str()?);
+            (resolved_path(session_cwd) == expected_cwd).then_some((modified, path, header))
         })
         .collect::<Vec<_>>();
     sessions.sort_by_key(|session| std::cmp::Reverse(session.0));
+    sessions
+}
 
-    for (_, path) in sessions {
-        let Some(header) = session_header(&path) else {
-            continue;
-        };
-        let Some(session_cwd) = header.get("cwd").and_then(Value::as_str) else {
-            continue;
-        };
-        let session_cwd = Path::new(session_cwd);
-        let session_cwd =
-            std::fs::canonicalize(session_cwd).unwrap_or_else(|_| session_cwd.to_owned());
-        if session_cwd == expected_cwd {
-            return Some(path);
-        }
-    }
-    None
+fn latest_session_path(
+    agent_dir: &Path,
+    cwd: &Path,
+    override_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    list_session_paths(agent_dir, cwd, override_dir)
+        .into_iter()
+        .next()
+        .map(|(_, path, _)| path)
 }
 
 fn session_path(c: &Config, override_dir: Option<&Path>) -> PathBuf {
@@ -1755,6 +1764,24 @@ impl MuAgent {
         }
         Ok(())
     }
+}
+
+pub fn list_sessions_for_current_cwd(
+    session_dir: Option<&Path>,
+) -> Result<Vec<SessionInfo>, AgentError> {
+    let config = config()?;
+    Ok(
+        list_session_paths(&config.agent_dir, &config.cwd, session_dir)
+            .into_iter()
+            .filter_map(|(_, path, header)| {
+                Some(SessionInfo {
+                    id: header.get("id")?.as_str()?.to_owned(),
+                    path,
+                    timestamp: header.get("timestamp")?.as_str()?.to_owned(),
+                })
+            })
+            .collect(),
+    )
 }
 
 pub fn latest_session_for_current_cwd(
