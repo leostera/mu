@@ -1485,6 +1485,7 @@ fn default_bash_shell() -> Result<PathBuf, ToolError> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn find_executable_on_path(path: Option<std::ffi::OsString>, names: &[&str]) -> Option<PathBuf> {
     let directories = path
         .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
@@ -1532,12 +1533,35 @@ fn windows_bash_shell(
     ))
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+fn executable_on_unix_path(path: Option<std::ffi::OsString>, name: &str) -> Option<PathBuf> {
+    let directories = path
+        .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .unwrap_or_default();
+    directories
+        .iter()
+        .map(|directory| directory.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
 #[cfg(any(not(windows), test))]
 fn unix_bash_shell(bin_bash_exists: bool, path: Option<std::ffi::OsString>) -> PathBuf {
     if bin_bash_exists {
         PathBuf::from("/bin/bash")
     } else {
-        find_executable_on_path(path, &["bash"]).unwrap_or_else(|| PathBuf::from("sh"))
+        executable_on_unix_path(path, "bash").unwrap_or_else(|| PathBuf::from("sh"))
     }
 }
 
@@ -1848,10 +1872,21 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bash = root.join("bash");
         std::fs::write(&bash, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let path = std::env::join_paths([&root]).unwrap();
 
         assert_eq!(unix_bash_shell(true, None), PathBuf::from("/bin/bash"));
-        assert_eq!(unix_bash_shell(false, Some(path)), bash);
+        assert_eq!(unix_bash_shell(false, Some(path.clone())), bash);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(unix_bash_shell(false, Some(path)), PathBuf::from("sh"));
+        }
         assert_eq!(unix_bash_shell(false, None), PathBuf::from("sh"));
         std::fs::remove_dir_all(root).unwrap();
     }
