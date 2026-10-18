@@ -59,6 +59,7 @@ struct Config {
     model_choices: Vec<String>,
     hide_thinking_block: bool,
     retry: RetryPolicy,
+    enabled_tools: HashSet<String>,
 }
 struct Provider {
     transport: ProviderTransport,
@@ -231,6 +232,7 @@ fn config() -> Result<Config, AgentError> {
     let mut model = None;
     let mut hide_thinking_block = false;
     let mut retry = RetryPolicy::default();
+    let mut default_tool_entries = None;
     for path in [
         agent_dir.join("settings.json"),
         cwd.join(".pi/settings.json"),
@@ -253,6 +255,7 @@ fn config() -> Result<Config, AgentError> {
             hide_thinking_block = v;
         }
         update_retry_policy(&mut retry, &value);
+        merge_default_tools(&mut default_tool_entries, &value)?;
     }
     let provider = provider
         .ok_or_else(|| AgentError::Configuration("Pi settings have no defaultProvider".into()))?;
@@ -267,7 +270,77 @@ fn config() -> Result<Config, AgentError> {
         model_choices,
         hide_thinking_block,
         retry,
+        enabled_tools: resolve_default_tools(default_tool_entries),
     })
+}
+
+const DEFAULT_TOOL_NAMES: &[&str] = &["read", "bash", "edit", "write"];
+
+fn merge_default_tools(
+    inherited: &mut Option<Vec<String>>,
+    settings: &Value,
+) -> Result<(), AgentError> {
+    let Some(value) = settings.get("defaultTools") else {
+        return Ok(());
+    };
+    let entries = value
+        .as_array()
+        .ok_or_else(|| {
+            AgentError::Configuration("defaultTools must be an array of strings".into())
+        })?
+        .iter()
+        .map(|entry| {
+            entry.as_str().map(str::to_owned).ok_or_else(|| {
+                AgentError::Configuration("defaultTools must be an array of strings".into())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let modifiers_only = entries
+        .iter()
+        .all(|entry| entry.starts_with('+') || entry.starts_with('-'));
+    if modifiers_only {
+        inherited.get_or_insert_with(Vec::new).extend(entries);
+    } else {
+        *inherited = Some(entries);
+    }
+    Ok(())
+}
+
+fn resolve_default_tools(entries: Option<Vec<String>>) -> HashSet<String> {
+    let entries = entries.unwrap_or_else(|| {
+        DEFAULT_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).into())
+            .collect()
+    });
+    let plain = entries
+        .iter()
+        .filter(|entry| !entry.starts_with('+') && !entry.starts_with('-'))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut tools = if !plain.is_empty() || entries.is_empty() {
+        plain
+    } else {
+        DEFAULT_TOOL_NAMES
+            .iter()
+            .map(|name| (*name).into())
+            .collect()
+    };
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.starts_with('+') || entry.starts_with('-'))
+    {
+        let name = &entry[1..];
+        if name.is_empty() {
+            continue;
+        }
+        if entry.starts_with('+') && !tools.contains(&name.to_owned()) {
+            tools.push(name.to_owned());
+        } else if entry.starts_with('-') {
+            tools.retain(|tool| tool != name);
+        }
+    }
+    tools.into_iter().collect()
 }
 
 fn update_retry_policy(retry: &mut RetryPolicy, settings: &Value) {
@@ -1310,6 +1383,7 @@ pub struct MuAgent {
     skills: crate::skills::SkillCatalog,
     hide_thinking_block: bool,
     retry: RetryPolicy,
+    enabled_tools: HashSet<String>,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -1368,6 +1442,7 @@ impl MuAgent {
             skills,
             hide_thinking_block: config.hide_thinking_block,
             retry: config.retry,
+            enabled_tools: config.enabled_tools,
             mcp,
             mcp_startup: Some(mcp_startup),
             active_mcp_tools,
@@ -1391,6 +1466,7 @@ impl MuAgent {
             model_choices: vec!["mu-demo".into(), "mu-demo-alt".into()],
             hide_thinking_block: false,
             retry: RetryPolicy::default(),
+            enabled_tools: resolve_default_tools(None),
         };
         Self::demo_from_config(config)
     }
@@ -1417,6 +1493,7 @@ impl MuAgent {
             skills: crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir),
             hide_thinking_block: config.hide_thinking_block,
             retry: config.retry,
+            enabled_tools: config.enabled_tools,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup: None,
             active_mcp_tools,
@@ -1536,6 +1613,11 @@ impl MuAgent {
         name: &str,
         arguments: &Value,
     ) -> Result<crate::tools::ToolResult, crate::tools::ToolError> {
+        if !self.enabled_tools.contains(name) {
+            return Err(crate::tools::ToolError::Arguments(format!(
+                "tool `{name}` is not enabled"
+            )));
+        }
         crate::tools::execute(&self.cwd, name, arguments).await
     }
 
@@ -1611,7 +1693,15 @@ impl MuAgent {
     }
 
     fn tool_definitions(&self, active_mcp_tools: &HashSet<String>) -> Vec<Value> {
-        let mut definitions = crate::tools::definitions();
+        let mut definitions = crate::tools::definitions()
+            .into_iter()
+            .filter(|definition| {
+                definition
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| self.enabled_tools.contains(name))
+            })
+            .collect::<Vec<_>>();
         definitions.extend(self.mcp.definitions_for_model(active_mcp_tools));
         if self.mcp.codemode_enabled() {
             definitions.push(crate::codemode::definition(&self.mcp));
@@ -1954,6 +2044,8 @@ pub async fn run_cli() -> Result<(), AgentError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{
         AgentPromptQueue, FunctionCall, PromptBehavior, Reply, configured_models,
         execute_in_parallel, find_session_id_path, latest_session_path, load_session,
@@ -2065,6 +2157,7 @@ mod tests {
             model_choices: vec!["test-model".into()],
             hide_thinking_block: false,
             retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
         };
 
         let (new_path, new_session, _) = resolve_session_options(
@@ -2136,6 +2229,7 @@ mod tests {
             model_choices: vec!["test-model".into()],
             hide_thinking_block: false,
             retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
         };
 
         let (fork_path, fork, history) = resolve_session_options(
@@ -2248,6 +2342,7 @@ mod tests {
             model_choices: vec!["mu-demo".into()],
             hide_thinking_block: false,
             retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
         };
         let mut agent = super::MuAgent::demo_from_config(config).unwrap();
         agent.persist_session = false;
@@ -2258,6 +2353,69 @@ mod tests {
         assert_eq!(agent.session.active_branch_entries().len(), 2);
         agent.start_new_session().unwrap();
         assert!(!agent.session_path().exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_tools_merge_and_resolve_like_pi_settings() {
+        let mut entries = None;
+        assert_eq!(
+            super::resolve_default_tools(entries.clone()),
+            ["bash", "edit", "read", "write"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        super::merge_default_tools(
+            &mut entries,
+            &serde_json::json!({"defaultTools":["read", "bash", "+grep"]}),
+        )
+        .unwrap();
+        super::merge_default_tools(
+            &mut entries,
+            &serde_json::json!({"defaultTools":["-bash", "+find"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            super::resolve_default_tools(entries),
+            ["find", "grep", "read"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+
+        let mut empty = None;
+        super::merge_default_tools(&mut empty, &serde_json::json!({"defaultTools":[]})).unwrap();
+        assert!(super::resolve_default_tools(empty).is_empty());
+        assert!(
+            super::merge_default_tools(&mut None, &serde_json::json!({"defaultTools":["read", 4]}))
+                .is_err()
+        );
+
+        let root = std::env::temp_dir().join(format!("mu-tool-loadout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = super::MuAgent::demo_from_config(super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.clone(),
+            provider: "mu-demo".into(),
+            model: "mu-demo".into(),
+            model_choices: vec!["mu-demo".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+            enabled_tools: ["grep".to_owned()].into_iter().collect(),
+        })
+        .unwrap();
+        let exposed = agent
+            .tool_definitions(&HashSet::new())
+            .into_iter()
+            .filter_map(|definition| {
+                definition
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(exposed, ["grep".to_owned()].into_iter().collect());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2273,6 +2431,7 @@ mod tests {
             model_choices: vec!["test-model".into()],
             hide_thinking_block: false,
             retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
         let replies =
@@ -2372,6 +2531,7 @@ mod tests {
             model_choices: vec!["test-model".into()],
             hide_thinking_block: false,
             retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
         let mut scripted = std::collections::VecDeque::new();
@@ -2448,6 +2608,7 @@ mod tests {
                 base_delay_ms: 0,
                 max_delay_ms: 0,
             },
+            enabled_tools: super::resolve_default_tools(None),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
         agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
@@ -2525,6 +2686,7 @@ mod tests {
                 base_delay_ms: 60_000,
                 max_delay_ms: 60_000,
             },
+            enabled_tools: super::resolve_default_tools(None),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
         agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
@@ -2618,6 +2780,7 @@ mod tests {
             model_choices: vec!["test-model".into()],
             hide_thinking_block: false,
             retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
         agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
@@ -2665,6 +2828,7 @@ mod tests {
             model_choices: vec!["mu-demo".into()],
             hide_thinking_block: false,
             retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
         };
         let mut agent = super::MuAgent::demo_from_config(config).expect("demo agent");
         agent
