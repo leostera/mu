@@ -29,6 +29,7 @@ pub fn definitions() -> Vec<Value> {
         json!({"type":"function","name":"write","description":"Write content to a file, creating parent directories as needed.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}}),
         json!({"type":"function","name":"edit","description":"Edit a single file using exact text replacements. Each edits[].oldText must match a unique, non-overlapping region of the original file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false}}),
         json!({"type":"function","name":"bash","description":"Run a shell command in the working directory.","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}),
+        json!({"type":"function","name":"ls","description":"List directory contents, including dotfiles. Entries are sorted alphabetically; directories have a trailing slash.","parameters":{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"number","description":"Maximum number of entries to return (default: 500)"}},"additionalProperties":false}}),
     ]
 }
 
@@ -38,6 +39,7 @@ pub async fn execute(cwd: &Path, name: &str, arguments: &Value) -> Result<ToolRe
         "write" => write_file(cwd, arguments),
         "edit" => edit_file(cwd, arguments),
         "bash" => run_bash(cwd, arguments).await,
+        "ls" => list_directory(cwd, arguments),
         other => Err(ToolError::Arguments(format!("unknown tool `{other}`"))),
     }
 }
@@ -334,6 +336,121 @@ fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     })
 }
 
+const LS_DEFAULT_LIMIT: usize = 500;
+const TOOL_OUTPUT_MAX_BYTES: usize = 50 * 1024;
+
+struct ListDirectoryInput {
+    path: PathBuf,
+    limit: f64,
+}
+
+fn parse_list_directory_input(cwd: &Path, args: &Value) -> Result<ListDirectoryInput, ToolError> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| ToolError::Arguments("ls arguments must be an object".into()))?;
+    let path = match object.get("path") {
+        None => PathBuf::from("."),
+        Some(Value::String(path)) => PathBuf::from(path),
+        Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
+    };
+    let limit = match object.get("limit") {
+        None => LS_DEFAULT_LIMIT as f64,
+        Some(value) => value
+            .as_f64()
+            .filter(|limit| limit.is_finite())
+            .ok_or_else(|| ToolError::Arguments("`limit` must be a finite number".into()))?,
+    };
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    Ok(ListDirectoryInput { path, limit })
+}
+
+fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    let ListDirectoryInput { path, limit } = parse_list_directory_input(cwd, args)?;
+    if !path.exists() {
+        return Err(ToolError::Arguments(format!(
+            "Path not found: {}",
+            path.display()
+        )));
+    }
+    let metadata = std::fs::metadata(&path)?;
+    if !metadata.is_dir() {
+        return Err(ToolError::Arguments(format!(
+            "Not a directory: {}",
+            path.display()
+        )));
+    }
+
+    let mut entries = std::fs::read_dir(&path)
+        .map_err(|error| ToolError::Arguments(format!("Cannot read directory: {error}")))?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut names = Vec::new();
+    let mut limit_reached = false;
+    for name in entries {
+        if names.len() as f64 >= limit {
+            limit_reached = true;
+            break;
+        }
+        if let Ok(metadata) = std::fs::metadata(path.join(&name)) {
+            names.push(if metadata.is_dir() {
+                format!("{name}/")
+            } else {
+                name
+            });
+        }
+    }
+    if names.is_empty() {
+        return Ok(ToolResult {
+            content: "(empty directory)".into(),
+        });
+    }
+
+    let (mut output, truncated) = truncate_tool_output(&names.join("\n"));
+    let mut notices = Vec::new();
+    if limit_reached {
+        notices.push(format!(
+            "{limit} entries limit reached. Use limit={} for more",
+            limit * 2.0
+        ));
+    }
+    if truncated {
+        notices.push(format!(
+            "{} limit reached",
+            format_size(TOOL_OUTPUT_MAX_BYTES)
+        ));
+    }
+    if !notices.is_empty() {
+        output.push_str(&format!("\n\n[{}]", notices.join(". ")));
+    }
+    Ok(ToolResult { content: output })
+}
+
+fn truncate_tool_output(content: &str) -> (String, bool) {
+    let lines = content.split('\n').collect::<Vec<_>>();
+    let mut output = Vec::new();
+    let mut byte_count = 0;
+    for line in &lines {
+        let line_bytes = line.len() + usize::from(!output.is_empty());
+        if byte_count + line_bytes > TOOL_OUTPUT_MAX_BYTES {
+            break;
+        }
+        byte_count += line_bytes;
+        output.push(*line);
+    }
+    let truncated = output.len() < lines.len();
+    (output.join("\n"), truncated)
+}
+
 async fn run_bash(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let command = string_arg(args, "command")?;
     #[cfg(windows)]
@@ -601,6 +718,44 @@ mod tests {
         .unwrap_err();
         assert!(missing.to_string().contains("Could not find edits[1]"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ls_sorts_entries_and_reports_limit_continuation() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["gamma", "beta", "alpha"] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+
+        let result = execute(&dir, "ls", &json!({"limit":2})).await.unwrap();
+
+        assert_eq!(
+            result.content,
+            "alpha\nbeta\n\n[2 entries limit reached. Use limit=4 for more]"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ls_reports_empty_and_invalid_directories() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            execute(&dir, "ls", &json!({})).await.unwrap().content,
+            "(empty directory)"
+        );
+        let file = dir.join("file");
+        std::fs::write(&file, "text").unwrap();
+        let error = execute(&dir, "ls", &json!({"path":"file"}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Not a directory"));
+        let missing = execute(&dir, "ls", &json!({"path":"missing"}))
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("Path not found"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

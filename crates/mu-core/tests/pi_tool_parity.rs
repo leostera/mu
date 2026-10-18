@@ -30,13 +30,13 @@ fn current_builtin_definitions_are_valid_json_schemas() {
         .filter_map(|definition| definition.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
     names.sort_unstable();
-    assert_eq!(names, ["bash", "edit", "read", "write"]);
+    assert_eq!(names, ["bash", "edit", "ls", "read", "write"]);
 
     for definition in definitions {
         let schema = &definition["parameters"];
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
-        assert!(schema["required"].as_array().is_some());
+        assert!(schema.get("required").is_none() || schema["required"].as_array().is_some());
     }
 }
 
@@ -147,7 +147,6 @@ async fn pi_find_includes_hidden_files_and_respects_gitignore() {
 }
 
 #[tokio::test]
-#[ignore = "Mu has not implemented ls"]
 async fn pi_ls_lists_dotfiles_and_marks_directories() {
     let dir = temp_dir("ls");
     fs::write(dir.join(".hidden-file"), "secret").unwrap();
