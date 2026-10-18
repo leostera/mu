@@ -1450,7 +1450,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         if !matches {
             continue;
         }
-        if results.len() >= limit {
+        if limit != 0 && results.len() >= limit {
             break;
         }
         if std::fs::symlink_metadata(&entry_path).is_ok_and(|metadata| metadata.is_dir()) {

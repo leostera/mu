@@ -817,6 +817,23 @@ async fn pi_read_preserves_numeric_slice_semantics_for_fractional_ranges() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, find result-limit cases.
 #[tokio::test]
+async fn pi_find_treats_zero_limit_as_unbounded_fd_results() {
+    let dir = temp_dir("find-zero-limit");
+    fs::write(dir.join("one.txt"), "1").unwrap();
+    fs::write(dir.join("two.txt"), "2").unwrap();
+
+    let result = execute(&dir, "find", &json!({"pattern":"*.txt","limit":0}))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.content,
+        "one.txt\ntwo.txt\n\n[0 results limit reached]"
+    );
+    assert_eq!(result.details.unwrap()["resultLimitReached"], 0);
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_preserves_result_limit_details() {
     let dir = temp_dir("find-limit");
     fs::write(dir.join("one.txt"), "one").unwrap();
