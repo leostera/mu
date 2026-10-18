@@ -1470,12 +1470,18 @@ fn truncate_grep_line(line: &str) -> (String, bool) {
 
 const FIND_DEFAULT_LIMIT: usize = 1000;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FindPatternTarget {
+    Basename,
+    RelativePath,
+    AbsolutePath,
+}
+
 struct FindInput {
     pattern: GlobMatcher,
     path: PathBuf,
     limit: usize,
-    match_absolute_path: bool,
-    match_full_path: bool,
+    target: FindPatternTarget,
 }
 
 fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
@@ -1491,12 +1497,16 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         Some(Value::String(path)) => resolve_input_path(cwd, path)?,
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };
-    let match_full_path = pattern.contains('/');
-    let match_absolute_path = match_full_path && Path::new(pattern).is_absolute();
+    let target = if !pattern.contains('/') {
+        FindPatternTarget::Basename
+    } else if Path::new(pattern).is_absolute() {
+        FindPatternTarget::AbsolutePath
+    } else {
+        FindPatternTarget::RelativePath
+    };
     let effective_pattern = if pattern.is_empty() {
         "**".to_owned()
-    } else if match_full_path
-        && !match_absolute_path
+    } else if target == FindPatternTarget::RelativePath
         && !pattern.starts_with("**/")
         && pattern != "**"
     {
@@ -1515,8 +1525,7 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         pattern,
         path,
         limit,
-        match_absolute_path,
-        match_full_path,
+        target,
     })
 }
 
@@ -1600,8 +1609,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         pattern,
         path,
         limit,
-        match_absolute_path,
-        match_full_path,
+        target,
     } = parse_find_input(cwd, args)?;
     if !path.is_dir() {
         return Err(ToolError::Command(format!(
@@ -1617,16 +1625,14 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     for entry_path in candidates {
         let relative = entry_path.strip_prefix(&path).unwrap_or(&entry_path);
         let mut display = find_path_to_posix(&relative.to_string_lossy());
-        let matches = if match_full_path {
-            if match_absolute_path {
-                pattern.is_match(find_path_to_posix(&entry_path.to_string_lossy()))
-            } else {
-                pattern.is_match(&display)
-            }
-        } else {
-            relative
+        let matches = match target {
+            FindPatternTarget::Basename => relative
                 .file_name()
-                .is_some_and(|name| pattern.is_match(Path::new(name)))
+                .is_some_and(|name| pattern.is_match(Path::new(name))),
+            FindPatternTarget::RelativePath => pattern.is_match(&display),
+            FindPatternTarget::AbsolutePath => {
+                pattern.is_match(find_path_to_posix(&entry_path.to_string_lossy()))
+            }
         };
         if !matches {
             continue;
