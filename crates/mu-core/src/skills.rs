@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -20,9 +20,24 @@ struct ParsedSkill {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkillDiagnosticKind {
+    Warning,
+    Collision,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillCollision {
+    pub name: String,
+    pub winner_path: PathBuf,
+    pub loser_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillDiagnostic {
+    pub kind: SkillDiagnosticKind,
     pub path: PathBuf,
     pub message: String,
+    pub collision: Option<SkillCollision>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,7 +55,7 @@ impl SkillCatalog {
 
     fn discover_with_home(cwd: &Path, agent_dir: &Path, home: &Path) -> Self {
         let mut catalog = Self::default();
-        let mut seen_names = HashSet::new();
+        let mut seen_names = HashMap::new();
         let mut scanned_directories = HashSet::new();
         for root in [
             agent_dir.join("skills"),
@@ -96,7 +111,7 @@ fn home_dir() -> PathBuf {
 fn scan(
     root: &Path,
     catalog: &mut SkillCatalog,
-    names: &mut HashSet<String>,
+    names: &mut HashMap<String, PathBuf>,
     scanned_directories: &mut HashSet<PathBuf>,
     inherited_ignore_rules: &[Gitignore],
 ) {
@@ -118,8 +133,10 @@ fn scan(
             match parse_skill(&file) {
                 Ok(parsed) => add_skill(parsed, catalog, names),
                 Err(message) => catalog.diagnostics.push(SkillDiagnostic {
+                    kind: SkillDiagnosticKind::Warning,
                     path: file,
                     message,
+                    collision: None,
                 }),
             }
         }
@@ -174,21 +191,34 @@ fn is_ignored(path: &Path, is_directory: bool, rules: &[Gitignore]) -> bool {
     ignored
 }
 
-fn add_skill(parsed: ParsedSkill, catalog: &mut SkillCatalog, names: &mut HashSet<String>) {
+fn add_skill(
+    parsed: ParsedSkill,
+    catalog: &mut SkillCatalog,
+    names: &mut HashMap<String, PathBuf>,
+) {
     let ParsedSkill { skill, warnings } = parsed;
     catalog
         .diagnostics
         .extend(warnings.into_iter().map(|message| SkillDiagnostic {
+            kind: SkillDiagnosticKind::Warning,
             path: skill.file_path.clone(),
             message,
+            collision: None,
         }));
-    if names.insert(skill.name.clone()) {
-        catalog.skills.push(skill);
-    } else {
+    if let Some(winner_path) = names.get(&skill.name) {
         catalog.diagnostics.push(SkillDiagnostic {
-            path: skill.file_path,
-            message: format!("duplicate skill name `{}` ignored", skill.name),
+            kind: SkillDiagnosticKind::Collision,
+            path: skill.file_path.clone(),
+            message: format!("name \"{}\" collision", skill.name),
+            collision: Some(SkillCollision {
+                name: skill.name,
+                winner_path: winner_path.clone(),
+                loser_path: skill.file_path,
+            }),
         });
+    } else {
+        names.insert(skill.name.clone(), skill.file_path.clone());
+        catalog.skills.push(skill);
     }
 }
 
@@ -402,6 +432,40 @@ mod tests {
         let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
         assert_eq!(catalog.skills.len(), 1);
         assert_eq!(catalog.skills[0].name, "review");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skill_name_collisions_keep_user_skill_and_report_both_paths() {
+        let root = std::env::temp_dir().join(format!("mu-skill-collision-{}", Uuid::new_v4()));
+        let agent_dir = root.join("agent");
+        let user_file = agent_dir.join("skills/shared/SKILL.md");
+        let project_file = root.join(".pi/skills/shared/SKILL.md");
+        std::fs::create_dir_all(user_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(project_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user_file,
+            "---\nname: shared\ndescription: user definition\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &project_file,
+            "---\nname: shared\ndescription: project definition\n---\n",
+        )
+        .unwrap();
+
+        let catalog = SkillCatalog::discover_with_home(&root, &agent_dir, &root);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].description, "user definition");
+        let collision = catalog
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.kind == SkillDiagnosticKind::Collision)
+            .expect("skill collision diagnostic");
+        let collision = collision.collision.as_ref().expect("collision details");
+        assert_eq!(collision.winner_path, user_file);
+        assert_eq!(collision.loser_path, project_file);
+        assert_eq!(catalog.diagnostics[0].message, "name \"shared\" collision");
         std::fs::remove_dir_all(root).unwrap();
     }
 
