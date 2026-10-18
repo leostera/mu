@@ -526,6 +526,29 @@ async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, read boundary and empty-file cases.
 #[tokio::test]
+async fn pi_text_tools_replace_malformed_utf8_like_node_buffer_decoding() {
+    let dir = temp_dir("lossy-utf8-tools");
+    let path = dir.join("invalid.txt");
+    fs::write(&path, b"left\xffright").unwrap();
+
+    let read = execute(&dir, "read", &json!({"path":"invalid.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(read.content, "left\u{fffd}right");
+
+    let edit = execute(
+        &dir,
+        "edit",
+        &json!({"path":"invalid.txt","edits":[{"oldText":"right","newText":"RIGHT"}]}),
+    )
+    .await
+    .unwrap();
+    assert!(edit.content.contains("Successfully replaced 1 block(s)"));
+    assert_eq!(fs::read_to_string(path).unwrap(), "left\u{fffd}RIGHT");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_read_matches_empty_file_and_trailing_newline_boundaries() {
     let dir = temp_dir("read-empty-boundaries");
     fs::write(dir.join("empty.txt"), "").unwrap();

@@ -185,7 +185,10 @@ const READ_MAX_BYTES: usize = 50 * 1024;
 fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let path = resolve_read_path(cwd, args)?;
-    let text = std::fs::read_to_string(&path)?;
+    let bytes = std::fs::read(&path)?;
+    // Node's Buffer.toString("utf-8") replaces malformed sequences instead of
+    // rejecting the entire text file; mirror that decoding boundary here.
+    let text = String::from_utf8_lossy(&bytes);
     let offset = read_number_argument(args, "offset", 1.0)?;
     let start_line = if offset == 0.0 {
         0.0
@@ -484,8 +487,9 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let edits = parse_edits(args)?;
     let lock = mutation_lock(&path);
     let _guard = lock.lock().await;
-    let original =
-        std::fs::read_to_string(&path).map_err(|error| edit_file_io_error(display_path, error))?;
+    let original = std::fs::read(&path)
+        .map_err(|error| edit_file_io_error(display_path, error))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
     let (bom, content) = original
         .strip_prefix('\u{feff}')
         .map_or(("", original.as_str()), |content| ("\u{feff}", content));
@@ -546,8 +550,8 @@ pub fn compute_edit_diff(cwd: &Path, requested_path: &str, edits: &[TextEdit]) -
         Ok(path) => path,
         Err(error) => return json!({"error": error.to_string()}),
     };
-    let original = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
+    let original = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(error) => {
             return json!({"error": edit_file_io_message(Path::new(requested_path), error)});
         }
