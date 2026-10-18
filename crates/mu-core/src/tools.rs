@@ -1356,6 +1356,8 @@ struct FindInput {
     pattern: GlobMatcher,
     path: PathBuf,
     limit: usize,
+    match_absolute_path: bool,
+    match_full_path: bool,
 }
 
 fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
@@ -1366,20 +1368,33 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
         .get("pattern")
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::Arguments("`pattern` must be a string".into()))?;
-    let pattern = Glob::new(pattern)
-        .map_err(|error| ToolError::Command(format!("[fd error]: {error}")))?
-        .compile_matcher();
     let path = match object.get("path") {
         None => cwd.to_owned(),
         Some(Value::String(path)) => resolve_input_path(cwd, path)?,
         Some(_) => return Err(ToolError::Arguments("`path` must be a string".into())),
     };
+    let match_full_path = pattern.contains('/');
+    let match_absolute_path = match_full_path && pattern.starts_with('/');
+    let effective_pattern = if match_full_path
+        && !match_absolute_path
+        && !pattern.starts_with("**/")
+        && pattern != "**"
+    {
+        format!("**/{pattern}")
+    } else {
+        pattern.to_owned()
+    };
+    let pattern = Glob::new(&effective_pattern)
+        .map_err(|error| ToolError::Command(format!("[fd error]: {error}")))?
+        .compile_matcher();
     let limit =
         optional_nonnegative_integer(object.get("limit"), "limit")?.unwrap_or(FIND_DEFAULT_LIMIT);
     Ok(FindInput {
         pattern,
         path,
         limit,
+        match_absolute_path,
+        match_full_path,
     })
 }
 
@@ -1423,6 +1438,8 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         pattern,
         path,
         limit,
+        match_absolute_path,
+        match_full_path,
     } = parse_find_input(cwd, args)?;
     if !path.exists() {
         return Err(ToolError::Command(format!(
@@ -1443,10 +1460,17 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     for entry_path in candidates {
         let relative = entry_path.strip_prefix(&path).unwrap_or(&entry_path);
         let mut display = relative.to_string_lossy().replace('\\', "/");
-        let matches = pattern.is_match(&display)
-            || relative
+        let matches = if match_full_path {
+            if match_absolute_path {
+                pattern.is_match(entry_path.to_string_lossy().replace('\\', "/"))
+            } else {
+                pattern.is_match(&display)
+            }
+        } else {
+            relative
                 .file_name()
-                .is_some_and(|name| pattern.is_match(Path::new(name)));
+                .is_some_and(|name| pattern.is_match(Path::new(name)))
+        };
         if !matches {
             continue;
         }

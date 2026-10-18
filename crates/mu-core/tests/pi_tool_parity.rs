@@ -817,6 +817,26 @@ async fn pi_read_preserves_numeric_slice_semantics_for_fractional_ranges() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, find result-limit cases.
 #[tokio::test]
+async fn pi_find_matches_path_globs_from_nested_roots_and_absolute_patterns() {
+    let dir = temp_dir("find-path-glob");
+    fs::create_dir_all(dir.join("outer/src")).unwrap();
+    fs::write(dir.join("outer/src/target.rs"), "").unwrap();
+    fs::write(dir.join("outer/other.rs"), "").unwrap();
+
+    let relative = execute(&dir, "find", &json!({"pattern":"src/*.rs"}))
+        .await
+        .unwrap();
+    assert_eq!(relative.content, "outer/src/target.rs");
+
+    let absolute_pattern = format!("{}/*.rs", dir.join("outer/src").display());
+    let absolute = execute(&dir, "find", &json!({"pattern":absolute_pattern}))
+        .await
+        .unwrap();
+    assert_eq!(absolute.content, "outer/src/target.rs");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_treats_zero_limit_as_unbounded_fd_results() {
     let dir = temp_dir("find-zero-limit");
     fs::write(dir.join("one.txt"), "1").unwrap();
