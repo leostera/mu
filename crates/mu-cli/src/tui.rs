@@ -1702,8 +1702,8 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
 
 fn handle_mouse(kind: MouseEventKind, app: &mut App) {
     match kind {
-        MouseEventKind::ScrollUp => app.messages.scroll.scroll_by(-3),
-        MouseEventKind::ScrollDown => app.messages.scroll.scroll_by(3),
+        MouseEventKind::ScrollUp => app.messages.scroll.scroll_by(-1),
+        MouseEventKind::ScrollDown => app.messages.scroll.scroll_by(1),
         _ => {}
     }
 }
