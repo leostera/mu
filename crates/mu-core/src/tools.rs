@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use globset::{Glob, GlobMatcher};
+use globset::{Glob, GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
@@ -1384,7 +1384,10 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
     } else {
         pattern.to_owned()
     };
-    let pattern = Glob::new(&effective_pattern)
+    let case_insensitive = !effective_pattern.chars().any(char::is_uppercase);
+    let pattern = GlobBuilder::new(&effective_pattern)
+        .case_insensitive(case_insensitive)
+        .build()
         .map_err(|error| ToolError::Command(format!("[fd error]: {error}")))?
         .compile_matcher();
     let limit =

@@ -817,6 +817,24 @@ async fn pi_read_preserves_numeric_slice_semantics_for_fractional_ranges() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, find result-limit cases.
 #[tokio::test]
+async fn pi_find_uses_fd_smart_case_glob_matching() {
+    let dir = temp_dir("find-smart-case");
+    fs::write(dir.join("UPPER.TXT"), "").unwrap();
+    fs::write(dir.join("lower.txt"), "").unwrap();
+
+    let insensitive = execute(&dir, "find", &json!({"pattern":"*.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(insensitive.content, "UPPER.TXT\nlower.txt");
+
+    let sensitive = execute(&dir, "find", &json!({"pattern":"*.TXT"}))
+        .await
+        .unwrap();
+    assert_eq!(sensitive.content, "UPPER.TXT");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_matches_path_globs_from_nested_roots_and_absolute_patterns() {
     let dir = temp_dir("find-path-glob");
     fs::create_dir_all(dir.join("outer/src")).unwrap();
