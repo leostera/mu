@@ -74,6 +74,46 @@ fn current_builtin_definitions_are_valid_json_schemas() {
     }
 }
 
+#[test]
+fn builtin_definitions_match_pi_descriptions_and_numeric_parameter_shapes() {
+    let definitions = definitions();
+    let find = |name: &str| {
+        definitions
+            .iter()
+            .find(|definition| definition["name"] == name)
+            .unwrap()
+    };
+
+    assert_eq!(
+        find("read")["parameters"]["properties"]["offset"]["type"],
+        "number"
+    );
+    assert_eq!(
+        find("read")["parameters"]["properties"]["offset"]["description"],
+        "Line number to start reading from (1-indexed)"
+    );
+    assert_eq!(
+        find("grep")["parameters"]["properties"]["literal"]["description"],
+        "Treat pattern as literal string instead of regex (default: false)"
+    );
+    assert!(
+        find("read")["description"]
+            .as_str()
+            .unwrap()
+            .contains("Images are sent as attachments")
+    );
+    assert!(
+        find("bash")["description"]
+            .as_str()
+            .unwrap()
+            .contains("full output is saved to a temp file")
+    );
+    assert_eq!(
+        find("edit")["parameters"]["properties"]["edits"]["items"]["properties"]["oldText"]["description"],
+        "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+    );
+}
+
 // Pi source: packages/coding-agent/test/tools.test.ts and test/default-tools-setting.test.ts.
 #[tokio::test]
 async fn pi_default_builtin_tool_set_contains_all_eight_tools() {
