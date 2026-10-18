@@ -262,6 +262,35 @@ pub enum AgentEvent {
         attempt: u32,
     },
 }
+enum TerminalResponse {
+    Completed,
+    Incomplete { reason: Option<String> },
+}
+
+impl TerminalResponse {
+    fn error_message(&self) -> Option<String> {
+        match self {
+            Self::Completed => None,
+            Self::Incomplete {
+                reason: Some(reason),
+            } if reason == "max_output_tokens" => None,
+            Self::Incomplete {
+                reason: Some(reason),
+            } => Some(format!("Response incomplete: {reason}")),
+            Self::Incomplete { reason: None } => {
+                Some("Response incomplete without a provider reason".into())
+            }
+        }
+    }
+
+    fn incomplete_reason(&self) -> Option<&str> {
+        match self {
+            Self::Completed => None,
+            Self::Incomplete { reason } => reason.as_deref(),
+        }
+    }
+}
+
 struct Reply {
     text: String,
     thinking: String,
@@ -907,8 +936,7 @@ impl Provider {
         let mut thinking_signature = None;
         let mut output_items = Vec::new();
         let mut tool_calls = Vec::new();
-        let mut incomplete_reason = None;
-        let mut saw_terminal_response = false;
+        let mut terminal_response = None;
         let (mut input_tokens, mut output_tokens) = (0, 0);
         let (mut cache_read, mut cache_write, mut reasoning, mut total_tokens) = (0, 0, None, 0);
         while let Some(chunk) = stream.next().await {
@@ -959,11 +987,21 @@ impl Provider {
                             }
                         }
                         "response.completed" | "response.incomplete" => {
-                            saw_terminal_response = true;
-                            incomplete_reason = event
+                            let incomplete_reason = event
                                 .pointer("/response/incomplete_details/reason")
                                 .and_then(Value::as_str)
                                 .map(str::to_owned);
+                            terminal_response = Some(
+                                if event.get("type").and_then(Value::as_str)
+                                    == Some("response.completed")
+                                {
+                                    TerminalResponse::Completed
+                                } else {
+                                    TerminalResponse::Incomplete {
+                                        reason: incomplete_reason.clone(),
+                                    }
+                                },
+                            );
                             if let Some(items) =
                                 event.pointer("/response/output").and_then(Value::as_array)
                             {
@@ -1093,10 +1131,14 @@ impl Provider {
                 }
             }
         }
-        if !saw_terminal_response {
-            return Err(AgentError::Provider(
+        let terminal_response = terminal_response.ok_or_else(|| {
+            AgentError::Provider(
                 "OpenAI Responses stream ended before a terminal response event".into(),
-            ));
+            )
+        })?;
+        let incomplete_reason = terminal_response.incomplete_reason().map(str::to_owned);
+        if let Some(message) = terminal_response.error_message() {
+            return Err(AgentError::Provider(message));
         }
         Ok(Reply {
             text,
@@ -2482,7 +2524,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        AgentPromptQueue, FunctionCall, PromptBehavior, Reply, configured_models,
+        AgentPromptQueue, FunctionCall, PromptBehavior, Reply, TerminalResponse, configured_models,
         execute_in_parallel, find_session_id_path, latest_session_path, load_session,
         merge_final_response_text, resolve_session_options, response_message_text,
         session_active_mcp_tools, session_codemode_store, session_history, trusted_url,
@@ -2492,6 +2534,32 @@ mod tests {
     use mu_session::{AssistantToolResponse, MessageUsage, SessionDocument, ToolCallRecord};
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn incomplete_responses_preserve_only_the_output_token_limit_as_a_retryable_result() {
+        assert_eq!(TerminalResponse::Completed.error_message(), None);
+        assert_eq!(
+            TerminalResponse::Incomplete {
+                reason: Some("max_output_tokens".into())
+            }
+            .error_message(),
+            None
+        );
+        assert_eq!(
+            TerminalResponse::Incomplete {
+                reason: Some("content_filter".into())
+            }
+            .error_message()
+            .as_deref(),
+            Some("Response incomplete: content_filter")
+        );
+        assert_eq!(
+            TerminalResponse::Incomplete { reason: None }
+                .error_message()
+                .as_deref(),
+            Some("Response incomplete without a provider reason")
+        );
+    }
 
     #[test]
     fn responses_final_message_recovers_text_and_refusals_missing_from_deltas() {
