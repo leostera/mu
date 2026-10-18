@@ -569,6 +569,19 @@ async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, read boundary and empty-file cases.
 #[tokio::test]
+async fn pi_grep_decodes_invalid_utf8_but_skips_nul_binary_files() {
+    let dir = temp_dir("grep-binary-decoding");
+    fs::write(dir.join("invalid.txt"), b"left\xffright\n").unwrap();
+    fs::write(dir.join("binary.txt"), b"left\0right\n").unwrap();
+
+    let result = execute(&dir, "grep", &json!({"pattern":"right"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "invalid.txt:1: left\u{fffd}right");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_read_formats_missing_file_errors_like_node_fs_access() {
     let dir = temp_dir("read-missing-error");
     let path = dir.join("missing.txt");

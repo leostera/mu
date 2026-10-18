@@ -1116,9 +1116,15 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         }) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&file) else {
+        let Ok(bytes) = std::fs::read(&file) else {
             continue;
         };
+        // ripgrep skips files containing NUL bytes, but streams other invalid
+        // UTF-8 bytes through stdout where Node decodes them with replacement.
+        if bytes.contains(&0) {
+            continue;
+        }
+        let content = String::from_utf8_lossy(&bytes);
         let lines = content
             .split_terminator('\n')
             .map(|line| line.trim_end_matches('\r'))
