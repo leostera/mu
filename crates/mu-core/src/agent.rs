@@ -908,6 +908,7 @@ impl Provider {
         let mut output_items = Vec::new();
         let mut tool_calls = Vec::new();
         let mut incomplete_reason = None;
+        let mut saw_terminal_response = false;
         let (mut input_tokens, mut output_tokens) = (0, 0);
         let (mut cache_read, mut cache_write, mut reasoning, mut total_tokens) = (0, 0, None, 0);
         while let Some(chunk) = stream.next().await {
@@ -922,7 +923,7 @@ impl Provider {
                 };
                 if let Ok(event) = serde_json::from_str::<Value>(data.trim()) {
                     match event.get("type").and_then(Value::as_str).unwrap_or("") {
-                        "response.output_text.delta" => {
+                        "response.output_text.delta" | "response.refusal.delta" => {
                             if let Some(s) = event.get("delta").and_then(Value::as_str) {
                                 text.push_str(s);
                                 on_event(AgentEvent::TextDelta(s.to_owned()));
@@ -958,6 +959,7 @@ impl Provider {
                             }
                         }
                         "response.completed" | "response.incomplete" => {
+                            saw_terminal_response = true;
                             incomplete_reason = event
                                 .pointer("/response/incomplete_details/reason")
                                 .and_then(Value::as_str)
@@ -966,6 +968,11 @@ impl Provider {
                                 event.pointer("/response/output").and_then(Value::as_array)
                             {
                                 output_items = items.clone();
+                                if let Some(delta) =
+                                    merge_final_response_text(&mut text, &output_items)
+                                {
+                                    on_event(AgentEvent::TextDelta(delta));
+                                }
                             }
                             if let Some(output) =
                                 event.pointer("/response/output").and_then(Value::as_array)
@@ -1047,24 +1054,48 @@ impl Provider {
                                 .and_then(Value::as_u64)
                                 .unwrap_or(raw_input + output_tokens);
                         }
-                        "response.failed" | "error" => {
-                            return Err(AgentError::Provider(
-                                event
-                                    .pointer("/response/error/message")
-                                    .or_else(|| event.pointer("/error/message"))
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("response failed")
-                                    .to_owned(),
-                            ));
+                        "response.failed" => {
+                            let error = event.pointer("/response/error");
+                            let message = if let Some(error) = error {
+                                format!(
+                                    "{}: {}",
+                                    error
+                                        .get("code")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("unknown"),
+                                    error
+                                        .get("message")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("no message")
+                                )
+                            } else if let Some(reason) = event
+                                .pointer("/response/incomplete_details/reason")
+                                .and_then(Value::as_str)
+                            {
+                                format!("incomplete: {reason}")
+                            } else {
+                                "Unknown error (no error details in response)".into()
+                            };
+                            return Err(AgentError::Provider(message));
+                        }
+                        "error" => {
+                            let code = event.get("code").and_then(Value::as_str);
+                            let message = event.get("message").and_then(Value::as_str);
+                            return Err(AgentError::Provider(match (code, message) {
+                                (Some(code), Some(message)) => {
+                                    format!("Error Code {code}: {message}")
+                                }
+                                _ => "Unknown error".into(),
+                            }));
                         }
                         _ => {}
                     }
                 }
             }
         }
-        if text.is_empty() && tool_calls.is_empty() {
+        if !saw_terminal_response {
             return Err(AgentError::Provider(
-                "stream ended without response text or tool calls".into(),
+                "OpenAI Responses stream ended before a terminal response event".into(),
             ));
         }
         Ok(Reply {
@@ -1082,6 +1113,34 @@ impl Provider {
             incomplete_reason,
         })
     }
+}
+
+fn response_message_text(output_items: &[Value]) -> String {
+    output_items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+            Some("output_text") => block.get("text").and_then(Value::as_str),
+            Some("refusal") => block.get("refusal").and_then(Value::as_str),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn merge_final_response_text(streamed_text: &mut String, output_items: &[Value]) -> Option<String> {
+    let final_text = response_message_text(output_items);
+    if final_text.is_empty() || final_text == *streamed_text {
+        return None;
+    }
+    if let Some(delta) = final_text.strip_prefix(streamed_text.as_str()) {
+        streamed_text.push_str(delta);
+        return Some(delta.to_owned());
+    }
+    *streamed_text = final_text;
+    None
 }
 
 fn response_reasoning(item: &Value) -> String {
@@ -2425,13 +2484,48 @@ mod tests {
     use super::{
         AgentPromptQueue, FunctionCall, PromptBehavior, Reply, configured_models,
         execute_in_parallel, find_session_id_path, latest_session_path, load_session,
-        resolve_session_options, session_active_mcp_tools, session_codemode_store, session_history,
-        trusted_url, validate_session_id,
+        merge_final_response_text, resolve_session_options, response_message_text,
+        session_active_mcp_tools, session_codemode_store, session_history, trusted_url,
+        validate_session_id,
     };
     use super::{Config, SessionOptions};
     use mu_session::{AssistantToolResponse, MessageUsage, SessionDocument, ToolCallRecord};
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn responses_final_message_recovers_text_and_refusals_missing_from_deltas() {
+        let output = vec![serde_json::json!({
+            "type":"message",
+            "content":[
+                {"type":"output_text","text":"partial "},
+                {"type":"refusal","refusal":"answer"}
+            ]
+        })];
+        assert_eq!(response_message_text(&output), "partial answer");
+
+        let mut streamed = String::new();
+        assert_eq!(
+            merge_final_response_text(&mut streamed, &output).as_deref(),
+            Some("partial answer")
+        );
+        assert_eq!(streamed, "partial answer");
+        assert_eq!(merge_final_response_text(&mut streamed, &output), None);
+    }
+
+    #[test]
+    fn responses_final_message_appends_only_the_unstreamed_suffix() {
+        let output = vec![serde_json::json!({
+            "type":"message",
+            "content":[{"type":"refusal","refusal":"Refused."}]
+        })];
+        let mut streamed = "Ref".to_owned();
+        assert_eq!(
+            merge_final_response_text(&mut streamed, &output).as_deref(),
+            Some("used.")
+        );
+        assert_eq!(streamed, "Refused.");
+    }
 
     #[test]
     fn latest_session_for_a_working_directory_uses_mtime_and_validates_session_cwd() {
