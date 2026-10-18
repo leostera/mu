@@ -96,6 +96,14 @@ struct Cli {
     #[arg(long)]
     no_builtin_tools: bool,
 
+    /// Load an additional skill Markdown file or directory (repeatable).
+    #[arg(long = "skill", value_name = "PATH")]
+    skill_paths: Vec<PathBuf>,
+
+    /// Disable automatic skill discovery; explicit --skill paths remain enabled.
+    #[arg(long)]
+    no_skills: bool,
+
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     mode: OutputMode,
@@ -193,6 +201,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         tools: cli.tools,
         no_tools: cli.no_tools,
         no_builtin_tools: cli.no_builtin_tools,
+        skill_paths: cli.skill_paths,
+        no_skills: cli.no_skills,
     };
 
     if cli.print || !is_terminal {
@@ -383,6 +393,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_repeatable_skill_paths_and_disable_discovery() {
+        let cli = Cli::try_parse_from([
+            "mu",
+            "--skill",
+            "./first/SKILL.md",
+            "--skill",
+            "./second",
+            "--no-skills",
+        ])
+        .expect("parse skill options");
+        assert_eq!(
+            cli.skill_paths,
+            vec![PathBuf::from("./first/SKILL.md"), PathBuf::from("./second")]
+        );
+        assert!(cli.no_skills);
+    }
+
+    #[test]
     fn session_picker_selects_one_based_entries_and_can_be_cancelled() {
         let sessions = vec![
             mu_core::SessionInfo {
@@ -437,6 +465,8 @@ mod tests {
         assert!(help.contains("--tools"));
         assert!(help.contains("--no-tools"));
         assert!(help.contains("--no-builtin-tools"));
+        assert!(help.contains("--skill"));
+        assert!(help.contains("--no-skills"));
         assert!(help.contains("PROMPT"));
     }
 }

@@ -53,25 +53,98 @@ impl SkillCatalog {
         Self::discover_with_home(cwd, agent_dir, &home_dir())
     }
 
+    pub fn discover_with_paths(
+        cwd: &Path,
+        agent_dir: &Path,
+        skill_paths: &[PathBuf],
+        include_defaults: bool,
+    ) -> Self {
+        Self::discover_with_paths_and_home(
+            cwd,
+            agent_dir,
+            skill_paths,
+            include_defaults,
+            &home_dir(),
+        )
+    }
+
     fn discover_with_home(cwd: &Path, agent_dir: &Path, home: &Path) -> Self {
-        let mut catalog = Self::default();
+        Self::discover_with_paths_and_home(cwd, agent_dir, &[], true, home)
+    }
+
+    fn discover_with_paths_and_home(
+        cwd: &Path,
+        agent_dir: &Path,
+        skill_paths: &[PathBuf],
+        include_defaults: bool,
+        home: &Path,
+    ) -> Self {
+        let mut catalog = SkillCatalog::default();
         let mut seen_names = HashMap::new();
         let mut scanned_directories = HashSet::new();
         let mut scanned_skill_files = HashSet::new();
-        for root in [
-            agent_dir.join("skills"),
-            cwd.join(".pi/skills"),
-            cwd.join(".agents/skills"),
-            home.join(".agents/skills"),
-        ] {
-            scan(
-                &root,
-                &mut catalog,
-                &mut seen_names,
-                &mut scanned_directories,
-                &mut scanned_skill_files,
-                &[],
-            );
+        if include_defaults {
+            for root in [
+                agent_dir.join("skills"),
+                cwd.join(".pi/skills"),
+                cwd.join(".agents/skills"),
+                home.join(".agents/skills"),
+            ] {
+                scan(
+                    &root,
+                    &mut catalog,
+                    &mut seen_names,
+                    &mut scanned_directories,
+                    &mut scanned_skill_files,
+                    &[],
+                );
+            }
+        }
+        for path in skill_paths {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                cwd.join(path)
+            };
+            if !path.exists() {
+                catalog.diagnostics.push(SkillDiagnostic {
+                    kind: SkillDiagnosticKind::Warning,
+                    path: path.clone(),
+                    message: "skill path does not exist".into(),
+                    collision: None,
+                });
+            } else if path.is_dir() {
+                scan(
+                    &path,
+                    &mut catalog,
+                    &mut seen_names,
+                    &mut scanned_directories,
+                    &mut scanned_skill_files,
+                    &[],
+                );
+            } else if path.extension().is_some_and(|extension| extension == "md") {
+                match parse_skill(&path) {
+                    Ok(parsed) => add_skill(
+                        parsed,
+                        &mut catalog,
+                        &mut seen_names,
+                        &mut scanned_skill_files,
+                    ),
+                    Err(message) => catalog.diagnostics.push(SkillDiagnostic {
+                        kind: SkillDiagnosticKind::Warning,
+                        path,
+                        message,
+                        collision: None,
+                    }),
+                }
+            } else {
+                catalog.diagnostics.push(SkillDiagnostic {
+                    kind: SkillDiagnosticKind::Warning,
+                    path: path.clone(),
+                    message: "skill path is not a Markdown file or directory".into(),
+                    collision: None,
+                });
+            }
         }
         catalog
     }
@@ -394,6 +467,47 @@ fn escape_xml(value: &str) -> String {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn explicit_skill_paths_load_after_or_instead_of_default_discovery() {
+        let root = std::env::temp_dir().join(format!("mu-skill-paths-{}", Uuid::new_v4()));
+        let agent_dir = root.join("agent");
+        let default_file = agent_dir.join("skills/default/SKILL.md");
+        let explicit_file = root.join("custom/SKILL.md");
+        std::fs::create_dir_all(default_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(explicit_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &default_file,
+            "---\nname: default\ndescription: discovered\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &explicit_file,
+            "---\nname: explicit\ndescription: selected directly\n---\n",
+        )
+        .unwrap();
+
+        let defaults_disabled = SkillCatalog::discover_with_paths_and_home(
+            &root,
+            &agent_dir,
+            std::slice::from_ref(&explicit_file),
+            false,
+            &root,
+        );
+        assert_eq!(defaults_disabled.skills.len(), 1);
+        assert_eq!(defaults_disabled.skills[0].name, "explicit");
+
+        let defaults_enabled = SkillCatalog::discover_with_paths_and_home(
+            &root,
+            &agent_dir,
+            std::slice::from_ref(&explicit_file),
+            true,
+            &root,
+        );
+        assert_eq!(defaults_enabled.skills.len(), 2);
+        assert_eq!(defaults_enabled.skills[0].name, "default");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn discovers_described_markdown_skills_at_the_root_but_ignores_other_markdown() {

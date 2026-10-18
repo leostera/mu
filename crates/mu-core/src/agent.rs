@@ -105,6 +105,8 @@ pub struct SessionOptions {
     pub tools: Option<Vec<String>>,
     pub no_tools: bool,
     pub no_builtin_tools: bool,
+    pub skill_paths: Vec<PathBuf>,
+    pub no_skills: bool,
 }
 
 struct Config {
@@ -1536,6 +1538,8 @@ fn resolve_session_options(
         tools: _,
         no_tools: _,
         no_builtin_tools: _,
+        skill_paths: _,
+        no_skills: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -1830,8 +1834,13 @@ impl MuAgent {
         }
         let no_tools = options.no_tools;
         let persist_session = !options.no_session;
+        let skills = crate::skills::SkillCatalog::discover_with_paths(
+            &config.cwd,
+            &config.agent_dir,
+            &options.skill_paths,
+            !options.no_skills,
+        );
         let (session_path, session, history) = resolve_session_options(&config, options)?;
-        let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
         let mcp_startup = Arc::new(OnceCell::new());
         let background_mcp = Arc::clone(&mcp_startup);
         let mcp_agent_dir = config.agent_dir.clone();
