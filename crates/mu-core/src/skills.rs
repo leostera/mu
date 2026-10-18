@@ -33,13 +33,19 @@ impl SkillCatalog {
     fn discover_with_home(cwd: &Path, agent_dir: &Path, home: &Path) -> Self {
         let mut catalog = Self::default();
         let mut seen_names = HashSet::new();
+        let mut scanned_directories = HashSet::new();
         for root in [
             agent_dir.join("skills"),
             cwd.join(".pi/skills"),
             cwd.join(".agents/skills"),
             home.join(".agents/skills"),
         ] {
-            scan(&root, &mut catalog, &mut seen_names);
+            scan(
+                &root,
+                &mut catalog,
+                &mut seen_names,
+                &mut scanned_directories,
+            );
         }
         catalog
     }
@@ -78,7 +84,16 @@ fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
-fn scan(root: &Path, catalog: &mut SkillCatalog, names: &mut HashSet<String>) {
+fn scan(
+    root: &Path,
+    catalog: &mut SkillCatalog,
+    names: &mut HashSet<String>,
+    scanned_directories: &mut HashSet<PathBuf>,
+) {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    if !scanned_directories.insert(canonical_root) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
@@ -100,12 +115,12 @@ fn scan(root: &Path, catalog: &mut SkillCatalog, names: &mut HashSet<String>) {
             continue;
         }
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
+        let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
         };
-        if file_type.is_dir() {
-            scan(&path, catalog, names);
-        } else if file_type.is_file() && path.extension().is_some_and(|extension| extension == "md")
+        if metadata.is_dir() {
+            scan(&path, catalog, names, scanned_directories);
+        } else if metadata.is_file() && path.extension().is_some_and(|extension| extension == "md")
         {
             // Pi also accepts described Markdown files directly in a skills root.
             // Unlike declared SKILL.md files, unrelated or malformed Markdown is ignored.
@@ -238,6 +253,30 @@ mod tests {
         )
         .unwrap();
         assert!(!parse_skill(&skill).unwrap().disable_model_invocation);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovers_skills_through_symlinked_directories_without_following_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("mu-skills-links-{}", Uuid::new_v4()));
+        let external_skill = root.join("external/review");
+        let skills_dir = root.join(".pi/skills");
+        std::fs::create_dir_all(&external_skill).unwrap();
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(
+            external_skill.join("SKILL.md"),
+            "---\nname: review\ndescription: Review skill\n---\n",
+        )
+        .unwrap();
+        symlink(&external_skill, skills_dir.join("review-link")).unwrap();
+        symlink(&skills_dir, external_skill.join("cycle")).unwrap();
+
+        let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].name, "review");
         std::fs::remove_dir_all(root).unwrap();
     }
 
