@@ -57,6 +57,7 @@ impl SkillCatalog {
         let mut catalog = Self::default();
         let mut seen_names = HashMap::new();
         let mut scanned_directories = HashSet::new();
+        let mut scanned_skill_files = HashSet::new();
         for root in [
             agent_dir.join("skills"),
             cwd.join(".pi/skills"),
@@ -68,6 +69,7 @@ impl SkillCatalog {
                 &mut catalog,
                 &mut seen_names,
                 &mut scanned_directories,
+                &mut scanned_skill_files,
                 &[],
             );
         }
@@ -113,6 +115,7 @@ fn scan(
     catalog: &mut SkillCatalog,
     names: &mut HashMap<String, PathBuf>,
     scanned_directories: &mut HashSet<PathBuf>,
+    scanned_skill_files: &mut HashSet<PathBuf>,
     inherited_ignore_rules: &[Gitignore],
 ) {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
@@ -131,7 +134,7 @@ fn scan(
         let file = root.join("SKILL.md");
         if !is_ignored(&file, false, &ignore_rules) {
             match parse_skill(&file) {
-                Ok(parsed) => add_skill(parsed, catalog, names),
+                Ok(parsed) => add_skill(parsed, catalog, names, scanned_skill_files),
                 Err(message) => catalog.diagnostics.push(SkillDiagnostic {
                     kind: SkillDiagnosticKind::Warning,
                     path: file,
@@ -155,13 +158,20 @@ fn scan(
             continue;
         }
         if metadata.is_dir() {
-            scan(&path, catalog, names, scanned_directories, &ignore_rules);
+            scan(
+                &path,
+                catalog,
+                names,
+                scanned_directories,
+                scanned_skill_files,
+                &ignore_rules,
+            );
         } else if metadata.is_file() && path.extension().is_some_and(|extension| extension == "md")
         {
             // Pi also accepts described Markdown files directly in a skills root.
             // Unlike declared SKILL.md files, unrelated or malformed Markdown is ignored.
             if let Ok(parsed) = parse_skill(&path) {
-                add_skill(parsed, catalog, names);
+                add_skill(parsed, catalog, names, scanned_skill_files);
             }
         }
     }
@@ -195,6 +205,7 @@ fn add_skill(
     parsed: ParsedSkill,
     catalog: &mut SkillCatalog,
     names: &mut HashMap<String, PathBuf>,
+    scanned_files: &mut HashSet<PathBuf>,
 ) {
     let ParsedSkill { skill, warnings } = parsed;
     catalog
@@ -205,6 +216,13 @@ fn add_skill(
             message,
             collision: None,
         }));
+    let canonical_file = skill
+        .file_path
+        .canonicalize()
+        .unwrap_or_else(|_| skill.file_path.clone());
+    if scanned_files.contains(&canonical_file) {
+        return;
+    }
     if let Some(winner_path) = names.get(&skill.name) {
         catalog.diagnostics.push(SkillDiagnostic {
             kind: SkillDiagnosticKind::Collision,
@@ -218,6 +236,7 @@ fn add_skill(
         });
     } else {
         names.insert(skill.name.clone(), skill.file_path.clone());
+        scanned_files.insert(canonical_file);
         catalog.skills.push(skill);
     }
 }
@@ -432,6 +451,28 @@ mod tests {
         let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
         assert_eq!(catalog.skills.len(), 1);
         assert_eq!(catalog.skills[0].name, "review");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_the_same_skill_file_reached_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("mu-skill-file-alias-{}", Uuid::new_v4()));
+        let skill_root = root.join(".pi/skills");
+        std::fs::create_dir_all(&skill_root).unwrap();
+        let original = skill_root.join("original.md");
+        std::fs::write(
+            &original,
+            "---\nname: shared\ndescription: same physical skill\n---\n",
+        )
+        .unwrap();
+        symlink(&original, skill_root.join("alias.md")).unwrap();
+
+        let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
+        assert_eq!(catalog.skills.len(), 1);
+        assert!(catalog.diagnostics.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
