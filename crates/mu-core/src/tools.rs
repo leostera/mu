@@ -1404,9 +1404,15 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         path,
         limit,
     } = parse_find_input(cwd, args)?;
-    if !path.is_dir() {
+    if !path.exists() {
         return Err(ToolError::Command(format!(
             "Path not found: {}",
+            path.display()
+        )));
+    }
+    if !path.is_dir() {
+        return Err(ToolError::Command(format!(
+            "[fd error]: Search path '{}' is not a directory.\n[fd error]: No valid search paths given.",
             path.display()
         )));
     }

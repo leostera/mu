@@ -1028,6 +1028,17 @@ async fn pi_search_tools_return_runtime_path_errors_without_mu_argument_prefixes
         not_directory.to_string(),
         format!("Not a directory: {}", file.display())
     );
+
+    let find_file = execute(&dir, "find", &json!({"path":"file.txt","pattern":"*.txt"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        find_file.to_string(),
+        format!(
+            "[fd error]: Search path '{}' is not a directory.\n[fd error]: No valid search paths given.",
+            file.display()
+        )
+    );
     cleanup(&dir);
 }
 
