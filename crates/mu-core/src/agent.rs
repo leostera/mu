@@ -31,6 +31,59 @@ pub enum AgentError {
     Io(#[from] io::Error),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolSelection {
+    Allowlist(Vec<String>),
+    Modifiers(Vec<ToolModifier>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolModifier {
+    Enable(String),
+    Disable(String),
+}
+
+impl ToolSelection {
+    fn parse(entries: Vec<String>) -> Result<Self, AgentError> {
+        let contains_modifier = entries
+            .iter()
+            .any(|entry| entry.starts_with('+') || entry.starts_with('-'));
+        if !contains_modifier {
+            return Ok(Self::Allowlist(entries));
+        }
+        if entries
+            .iter()
+            .any(|entry| !entry.starts_with('+') && !entry.starts_with('-'))
+        {
+            return Err(AgentError::Configuration(
+                "tool names cannot be mixed with +name or -name entries".into(),
+            ));
+        }
+        entries
+            .into_iter()
+            .map(|entry| {
+                let name = &entry[1..];
+                if name.is_empty() {
+                    return Err(AgentError::Configuration(
+                        "tool modifiers require a tool name".into(),
+                    ));
+                }
+                if name.contains('*') {
+                    return Err(AgentError::Configuration(
+                        "+name and -name entries take exact tool names, not patterns".into(),
+                    ));
+                }
+                Ok(if entry.starts_with('+') {
+                    ToolModifier::Enable(name.to_owned())
+                } else {
+                    ToolModifier::Disable(name.to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self::Modifiers)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionInfo {
     pub id: String,
@@ -353,94 +406,121 @@ fn resolve_default_tools(entries: Option<Vec<String>>) -> Vec<String> {
     ordered
 }
 
-fn apply_tool_selection(
-    defaults: &[String],
-    selection: &[String],
-) -> Result<Vec<String>, AgentError> {
-    let has_modifier = selection
-        .iter()
-        .any(|entry| entry.starts_with('+') || entry.starts_with('-'));
-    if has_modifier
-        && selection
-            .iter()
-            .any(|entry| !entry.starts_with('+') && !entry.starts_with('-'))
-    {
-        return Err(AgentError::Configuration(
-            "tool names cannot be mixed with +name or -name entries".into(),
-        ));
-    }
-    if selection
-        .iter()
-        .any(|entry| (entry.starts_with('+') || entry.starts_with('-')) && entry.contains('*'))
-    {
-        return Err(AgentError::Configuration(
-            "+name and -name entries take exact tool names, not patterns".into(),
-        ));
-    }
-    if !has_modifier {
-        let definitions = crate::tools::definitions();
-        let mut tools = Vec::new();
-        for pattern in selection {
-            for definition in &definitions {
-                let Some(name) = definition.get("name").and_then(Value::as_str) else {
-                    continue;
-                };
-                if tool_name_matches(pattern, name) && !tools.iter().any(|tool| tool == name) {
-                    tools.push(name.to_owned());
+fn apply_tool_selection(defaults: &[String], selection: &ToolSelection) -> Vec<String> {
+    match selection {
+        ToolSelection::Allowlist(patterns) => {
+            let definitions = crate::tools::definitions();
+            let mut tools = Vec::new();
+            for pattern in patterns {
+                for definition in &definitions {
+                    let Some(name) = definition.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if tool_name_matches(pattern, name) && !tools.iter().any(|tool| tool == name) {
+                        tools.push(name.to_owned());
+                    }
                 }
             }
+            tools
         }
-        return Ok(tools);
-    }
-
-    let mut tools = defaults.to_vec();
-    for entry in selection {
-        let name = &entry[1..];
-        if name.is_empty() {
-            return Err(AgentError::Configuration(
-                "tool modifiers require a tool name".into(),
-            ));
-        }
-        if entry.starts_with('+') {
-            if !tools.iter().any(|tool| tool == name) {
-                tools.push(name.to_owned());
+        ToolSelection::Modifiers(modifiers) => {
+            let mut tools = defaults.to_vec();
+            for modifier in modifiers {
+                match modifier {
+                    ToolModifier::Enable(name) if !tools.contains(name) => {
+                        tools.push(name.clone());
+                    }
+                    ToolModifier::Disable(name) => tools.retain(|tool| tool != name),
+                    ToolModifier::Enable(_) => {}
+                }
             }
-        } else {
-            tools.retain(|tool| tool != name);
+            tools
         }
     }
-    Ok(tools)
 }
 
-fn filter_tool_definitions(definitions: Vec<Value>, selection: &[String]) -> Vec<Value> {
-    let modifiers_only = selection
-        .iter()
-        .all(|entry| entry.starts_with('+') || entry.starts_with('-'));
-    if modifiers_only {
-        definitions
+fn mark_strict_builtin_tool(mut definition: Value) -> Value {
+    let name = definition
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(name, "read" | "bash" | "edit" | "write") {
+        if let Some(parameters) = definition.get_mut("parameters") {
+            make_strict_schema(parameters);
+        }
+        definition["strict"] = Value::Bool(true);
+    }
+    definition
+}
+
+fn make_strict_schema(schema: &mut Value) {
+    if let Some(object) = schema.as_object_mut() {
+        if let Some(items) = object.get_mut("items") {
+            make_strict_schema(items);
+        }
+        if let Some(variants) = object.get_mut("anyOf").and_then(Value::as_array_mut) {
+            for variant in variants {
+                make_strict_schema(variant);
+            }
+        }
+        let previously_required = object
+            .get("required")
+            .and_then(Value::as_array)
             .into_iter()
-            .filter(|definition| {
-                let name = definition.get("name").and_then(Value::as_str);
-                !selection
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+            let property_names = properties.keys().cloned().collect::<Vec<_>>();
+            for (name, property) in properties {
+                make_strict_schema(property);
+                if !previously_required.contains(name) && !schema_allows_null(property) {
+                    *property = json!({"anyOf":[property.clone(),{"type":"null"}]});
+                }
+            }
+            object.insert("required".into(), json!(property_names));
+            object.insert("additionalProperties".into(), Value::Bool(false));
+        }
+    }
+}
+
+fn schema_allows_null(schema: &Value) -> bool {
+    schema.get("type").and_then(Value::as_str) == Some("null")
+        || schema
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_some_and(|variants| {
+                variants
                     .iter()
-                    .filter(|entry| entry.starts_with('-'))
-                    .any(|modifier| name == Some(&modifier[1..]))
+                    .any(|variant| variant.get("type").and_then(Value::as_str) == Some("null"))
             })
-            .collect()
-    } else {
-        definitions
+}
+
+fn filter_tool_definitions(definitions: Vec<Value>, selection: &ToolSelection) -> Vec<Value> {
+    match selection {
+        ToolSelection::Allowlist(patterns) => definitions
             .into_iter()
             .filter(|definition| {
                 definition
                     .get("name")
                     .and_then(Value::as_str)
                     .is_some_and(|name| {
-                        selection
+                        patterns
                             .iter()
                             .any(|pattern| tool_name_matches(pattern, name))
                     })
             })
-            .collect()
+            .collect(),
+        ToolSelection::Modifiers(modifiers) => definitions
+            .into_iter()
+            .filter(|definition| {
+                let name = definition.get("name").and_then(Value::as_str);
+                !modifiers.iter().any(|modifier| {
+                    matches!(modifier, ToolModifier::Disable(disabled) if name == Some(disabled))
+                })
+            })
+            .collect(),
     }
 }
 
@@ -1512,7 +1592,7 @@ pub struct MuAgent {
     retry: RetryPolicy,
     enabled_tools: Vec<String>,
     no_tools: bool,
-    tool_selection: Option<Vec<String>>,
+    tool_selection: Option<ToolSelection>,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -1534,14 +1614,18 @@ impl MuAgent {
 
     pub async fn connect_with_options(options: SessionOptions) -> Result<Self, AgentError> {
         let mut config = config()?;
-        if let Some(tools) = options.tools.as_deref() {
-            config.enabled_tools = apply_tool_selection(&config.enabled_tools, tools)?;
+        let tool_selection = options
+            .tools
+            .clone()
+            .map(ToolSelection::parse)
+            .transpose()?;
+        if let Some(selection) = &tool_selection {
+            config.enabled_tools = apply_tool_selection(&config.enabled_tools, selection);
         }
         if options.no_builtin_tools || options.no_tools {
             config.enabled_tools.clear();
         }
         let no_tools = options.no_tools;
-        let tool_selection = options.tools.clone();
         let persist_session = !options.no_session;
         let (session_path, session, history) = resolve_session_options(&config, options)?;
         let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
@@ -1849,6 +1933,7 @@ impl MuAgent {
                     })
                     .cloned()
             })
+            .map(mark_strict_builtin_tool)
             .collect::<Vec<_>>();
         definitions.extend(self.mcp.definitions_for_model(active_mcp_tools));
         if self.mcp.codemode_enabled() {
@@ -2578,38 +2663,107 @@ mod tests {
             })
             .collect::<HashSet<_>>();
         assert_eq!(exposed, ["grep".to_owned()].into_iter().collect());
+        agent.enabled_tools = super::resolve_default_tools(None);
+        let strict_definitions = agent.tool_definitions(&HashSet::new());
+        for definition in &strict_definitions {
+            if matches!(
+                definition["name"].as_str(),
+                Some("read" | "bash" | "edit" | "write")
+            ) {
+                assert_eq!(definition["strict"], true);
+            }
+        }
+        let read = strict_definitions
+            .iter()
+            .find(|definition| definition["name"] == "read")
+            .unwrap();
+        let required = read["parameters"]["required"].as_array().unwrap();
+        assert_eq!(required.len(), 3);
+        assert!(
+            read["parameters"]["properties"]["offset"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|variant| variant["type"] == "null")
+        );
         agent.no_tools = true;
         assert!(agent.tool_definitions(&HashSet::new()).is_empty());
         std::fs::remove_dir_all(root).unwrap();
 
         let defaults = super::resolve_default_tools(None);
         assert_eq!(
-            super::apply_tool_selection(&defaults, &["-bash".into(), "+grep".into()]).unwrap(),
+            super::apply_tool_selection(
+                &defaults,
+                &super::ToolSelection::parse(vec!["-bash".into(), "+grep".into()]).unwrap(),
+            ),
             ["read", "edit", "write", "grep"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            super::apply_tool_selection(&defaults, &["read".into(), "gr*".into()]).unwrap(),
+            super::apply_tool_selection(
+                &defaults,
+                &super::ToolSelection::parse(vec!["read".into(), "gr*".into()]).unwrap(),
+            ),
             ["read", "grep"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         );
-        assert!(super::apply_tool_selection(&defaults, &["read".into(), "+grep".into()]).is_err());
+        assert!(super::ToolSelection::parse(vec!["read".into(), "+grep".into()]).is_err());
         let definitions = vec![
             serde_json::json!({"name":"read"}),
             serde_json::json!({"name":"mcp__docs__search"}),
             serde_json::json!({"name":"tool_search"}),
         ];
-        let allowlisted = super::filter_tool_definitions(
-            definitions.clone(),
-            &["read".into(), "mcp__docs__*".into()],
-        );
+        let allowlist =
+            super::ToolSelection::parse(vec!["read".into(), "mcp__docs__*".into()]).unwrap();
+        let allowlisted = super::filter_tool_definitions(definitions.clone(), &allowlist);
         assert_eq!(allowlisted.len(), 2);
-        let modified = super::filter_tool_definitions(definitions, &["-tool_search".into()]);
+        let modifiers = super::ToolSelection::parse(vec!["-tool_search".into()]).unwrap();
+        let modified = super::filter_tool_definitions(definitions, &modifiers);
         assert_eq!(modified.len(), 2);
+    }
+
+    #[test]
+    fn strict_sampling_builtins_use_required_nullable_optional_parameters() {
+        let definitions = crate::tools::definitions()
+            .into_iter()
+            .map(super::mark_strict_builtin_tool)
+            .collect::<Vec<_>>();
+        let read = definitions
+            .iter()
+            .find(|definition| definition["name"] == "read")
+            .unwrap();
+        assert_eq!(read["strict"], true);
+        assert_eq!(read["parameters"]["required"].as_array().unwrap().len(), 3);
+        assert!(
+            read["parameters"]["properties"]["offset"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|schema| schema["type"] == "null")
+        );
+
+        let edit = definitions
+            .iter()
+            .find(|definition| definition["name"] == "edit")
+            .unwrap();
+        let item_schema = &edit["parameters"]["properties"]["edits"]["items"];
+        assert_eq!(item_schema["required"].as_array().unwrap().len(), 2);
+        assert_eq!(item_schema["additionalProperties"], false);
+        let grep = definitions
+            .iter()
+            .find(|definition| definition["name"] == "grep")
+            .unwrap();
+        assert!(grep.get("strict").is_none());
+        assert_eq!(
+            super::ToolSelection::parse(vec!["+gr*".into()])
+                .unwrap_err()
+                .to_string(),
+            "configuration: +name and -name entries take exact tool names, not patterns"
+        );
     }
 
     #[tokio::test]
