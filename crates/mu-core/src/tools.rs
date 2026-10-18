@@ -1123,11 +1123,17 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         // match events from binary files; Node decodes other invalid UTF-8 with
         // replacement when formatting the matched text.
         let content = String::from_utf8_lossy(&bytes).replace('\0', "\n");
-        let lines = content
+        let match_lines = content
             .split_terminator('\n')
-            .map(|line| line.trim_end_matches('\r'))
+            .map(str::to_owned)
             .collect::<Vec<_>>();
-        for (index, line) in lines.iter().enumerate() {
+        let context_lines = content
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .split('\n')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for (index, line) in match_lines.iter().enumerate() {
             if !regex.is_match(line) {
                 continue;
             }
@@ -1136,9 +1142,22 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
                 break 'files;
             }
             match_count += 1;
-            let first = index.saturating_sub(input.context);
-            let last = (index + input.context).min(lines.len().saturating_sub(1));
-            for (context_index, text) in lines.iter().enumerate().take(last + 1).skip(first) {
+            let (first, last, formatted_lines) = if input.context == 0 {
+                (index, index, match_lines.as_slice())
+            } else {
+                let line_number = index + 1;
+                (
+                    line_number.saturating_sub(input.context).max(1) - 1,
+                    (line_number + input.context).min(context_lines.len()) - 1,
+                    context_lines.as_slice(),
+                )
+            };
+            for (context_index, text) in formatted_lines
+                .iter()
+                .enumerate()
+                .take(last + 1)
+                .skip(first)
+            {
                 let sanitized = text.replace('\r', "");
                 let (text, was_truncated) = truncate_grep_line(&sanitized);
                 lines_truncated |= was_truncated;
