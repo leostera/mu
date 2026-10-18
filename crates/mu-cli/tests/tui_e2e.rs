@@ -13,6 +13,7 @@ use vt100::Parser;
 fn demo_backend_drives_real_tui_without_gateway_or_credentials()
 -> Result<(), Box<dyn std::error::Error>> {
     let agent_dir = tempfile::tempdir()?;
+    // Keep process-level key interactions at a fixed size; resize geometry is covered by TestBackend.
     let pair = native_pty_system().openpty(PtySize {
         rows: 30,
         cols: 100,
@@ -53,15 +54,6 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
             .screen()
             .alternate_screen()
     );
-    *screen.lock().expect("screen mutex") = Parser::new(24, 80, 1000);
-    pair.master.resize(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
-    wait_for(&screen, |text| text.contains("Ctrl+P model"))?;
-
     writer.write_all(&[0x10])?;
     writer.flush()?;
     wait_for(&screen, |text| text.contains("mu-demo-alt"))?;
