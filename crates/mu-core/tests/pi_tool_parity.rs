@@ -110,6 +110,7 @@ fn builtin_definitions_match_pi_descriptions_and_numeric_parameter_shapes() {
             .unwrap()
             .contains("full output is saved to a temp file")
     );
+    assert!(find("edit")["parameters"]["properties"]["edits"]["minItems"].is_null());
     assert_eq!(
         find("edit")["parameters"]["properties"]["edits"]["items"]["properties"]["oldText"]["description"],
         "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
