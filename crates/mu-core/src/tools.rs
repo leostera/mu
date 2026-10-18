@@ -423,7 +423,8 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let edits = parse_edits(args)?;
     let lock = mutation_lock(&path);
     let _guard = lock.lock().await;
-    let original = std::fs::read_to_string(&path)?;
+    let original =
+        std::fs::read_to_string(&path).map_err(|error| edit_file_io_error(display_path, error))?;
     let (bom, content) = original
         .strip_prefix('\u{feff}')
         .map_or(("", original.as_str()), |content| ("\u{feff}", content));
@@ -448,7 +449,8 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     } else {
         updated
     };
-    std::fs::write(&path, format!("{bom}{restored}"))?;
+    std::fs::write(&path, format!("{bom}{restored}"))
+        .map_err(|error| edit_file_io_error(display_path, error))?;
     let mut result = ToolResult::text(format!(
         "Successfully replaced {} block(s) in {}.",
         normalized_edits.len(),
@@ -456,6 +458,23 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     ));
     result.details = Some(details);
     Ok(result)
+}
+
+fn edit_file_io_error(path: &Path, error: std::io::Error) -> ToolError {
+    let code = match error.kind() {
+        std::io::ErrorKind::NotFound => "ENOENT",
+        std::io::ErrorKind::PermissionDenied => "EACCES",
+        _ => {
+            return ToolError::Arguments(format!(
+                "Could not edit file: {}. {error}.",
+                path.display()
+            ));
+        }
+    };
+    ToolError::Arguments(format!(
+        "Could not edit file: {}. Error code: {code}.",
+        path.display()
+    ))
 }
 
 fn edit_details(old_content: &str, new_content: &str, path: &Path) -> Value {

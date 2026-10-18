@@ -112,6 +112,24 @@ async fn pi_edit_applies_disjoint_edits_in_one_atomic_call() {
     cleanup(&dir);
 }
 
+#[tokio::test]
+async fn pi_edit_reports_enoent_with_the_requested_path() {
+    let dir = temp_dir("edit-enoent");
+    let error = execute(
+        &dir,
+        "edit",
+        &json!({"path":"missing.txt","edits":[{"oldText":"a","newText":"b"}]}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid arguments: Could not edit file: missing.txt. Error code: ENOENT."
+    );
+    assert!(!dir.join("missing.txt").exists());
+    cleanup(&dir);
+}
+
 // Pi source: packages/coding-agent/test/edit-tool-legacy-input.test.ts.
 #[tokio::test]
 async fn pi_edit_accepts_legacy_mixed_object_and_stringified_edits() {
