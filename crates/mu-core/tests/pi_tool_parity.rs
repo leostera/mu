@@ -1103,6 +1103,22 @@ async fn pi_find_stops_parent_gitignore_rules_at_nested_repository_boundaries() 
 }
 
 #[cfg(unix)]
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_find_traverses_a_symlink_search_root_like_fd() {
+    let dir = temp_dir("find-symlink-root");
+    fs::create_dir(dir.join("real")).unwrap();
+    fs::write(dir.join("real/a.txt"), "content").unwrap();
+    std::os::unix::fs::symlink("real", dir.join("link")).unwrap();
+
+    let result = execute(&dir, "find", &json!({"path":"link","pattern":"*.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "a.txt");
+    cleanup(&dir);
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn pi_find_preserves_backslashes_in_unix_filenames() {
     let dir = temp_dir("find-backslash-name");
