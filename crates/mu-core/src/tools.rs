@@ -539,7 +539,7 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let lock = mutation_lock(&path);
     let _guard = lock.lock().await;
     let original = std::fs::read(&path)
-        .map_err(|error| edit_file_io_error(display_path, error))
+        .map_err(|error| ToolError::Command(edit_read_io_message(display_path, &path, error)))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
     let (bom, content) = original
         .strip_prefix('\u{feff}')
@@ -580,7 +580,26 @@ fn edit_file_io_error(path: &Path, error: std::io::Error) -> ToolError {
     ToolError::Command(edit_file_io_message(path, error))
 }
 
+fn edit_read_io_message(
+    requested_path: &Path,
+    absolute_path: &Path,
+    error: std::io::Error,
+) -> String {
+    let path = if error.kind() == std::io::ErrorKind::IsADirectory {
+        absolute_path
+    } else {
+        requested_path
+    };
+    edit_file_io_message(path, error)
+}
+
 fn edit_file_io_message(path: &Path, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::IsADirectory {
+        return format!(
+            "EISDIR: illegal operation on a directory, read '{}'",
+            path.display()
+        );
+    }
     let code = match error.kind() {
         std::io::ErrorKind::NotFound => "ENOENT",
         std::io::ErrorKind::PermissionDenied => "EACCES",
@@ -604,7 +623,9 @@ pub fn compute_edit_diff(cwd: &Path, requested_path: &str, edits: &[TextEdit]) -
     let original = match std::fs::read(&path) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(error) => {
-            return json!({"error": edit_file_io_message(Path::new(requested_path), error)});
+            return json!({
+                "error": edit_read_io_message(Path::new(requested_path), &path, error)
+            });
         }
     };
     let content = original

@@ -214,6 +214,26 @@ async fn pi_write_formats_parent_creation_errors_like_node_fs_mkdir() {
 }
 
 #[tokio::test]
+async fn pi_edit_formats_directory_read_errors_like_node_fs_read() {
+    let dir = temp_dir("edit-directory-error");
+    let error = execute(
+        &dir,
+        "edit",
+        &json!({"path":".","edits":[{"oldText":"old","newText":"new"}]}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "EISDIR: illegal operation on a directory, read '{}'",
+            dir.display()
+        )
+    );
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_edit_reports_enoent_with_the_requested_path() {
     let dir = temp_dir("edit-enoent");
     let error = execute(
