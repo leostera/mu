@@ -35,9 +35,17 @@ struct Cli {
     #[arg(short = 'c', long = "continue", conflicts_with = "session")]
     continue_session: bool,
 
-    /// Resume a specific Pi-compatible session file.
-    #[arg(long, conflicts_with = "continue_session")]
-    session: Option<PathBuf>,
+    /// Resume a specific Pi-compatible session file or session ID/prefix.
+    #[arg(long, conflicts_with_all = ["continue_session", "session_id"])]
+    session: Option<String>,
+
+    /// Open an exact project session ID, creating a new session with that ID if absent.
+    #[arg(long, conflicts_with_all = ["continue_session", "session"])]
+    session_id: Option<String>,
+
+    /// Override the directory used for session storage and discovery.
+    #[arg(long)]
+    session_dir: Option<PathBuf>,
 
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
@@ -88,12 +96,33 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.mode != OutputMode::Text {
         return Err(format!("--mode {:?} is not implemented yet", cli.mode).into());
     }
-    let session_file = if cli.continue_session {
-        Some(mu_core::latest_session_for_current_cwd()?.ok_or(
-            "--continue requested, but no previous session exists for this working directory",
-        )?)
+    let (session_file, session_selector) = if cli.continue_session {
+        (
+            Some(
+                mu_core::latest_session_for_current_cwd(cli.session_dir.as_deref())?.ok_or(
+                    "--continue requested, but no previous session exists for this working directory",
+                )?,
+            ),
+            None,
+        )
     } else {
-        cli.session
+        match cli.session {
+            Some(selector)
+                if selector.contains('/')
+                    || selector.contains('\\')
+                    || selector.ends_with(".jsonl") =>
+            {
+                (Some(PathBuf::from(selector)), None)
+            }
+            Some(selector) => (None, Some(selector)),
+            None => (None, None),
+        }
+    };
+    let session_options = mu_core::SessionOptions {
+        path: session_file,
+        directory: cli.session_dir,
+        id: cli.session_id,
+        id_prefix: session_selector,
     };
 
     if cli.print || !cli.prompt.is_empty() || !is_terminal {
@@ -105,11 +134,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if prompt.trim().is_empty() {
             return Ok(());
         }
-        mu_core::run_prompt_with_session(prompt, session_file).await?;
+        mu_core::run_prompt_with_options(prompt, session_options).await?;
         return Ok(());
     }
 
-    tui::run(mu_core::MuAgent::connect_with_session(session_file).await?).await
+    tui::run(mu_core::MuAgent::connect_with_options(session_options).await?).await
 }
 
 fn read_stdin_prompt(is_terminal: bool) -> Result<String, std::io::Error> {
@@ -151,13 +180,22 @@ mod tests {
         assert!(continue_session.continue_session);
         let session = Cli::try_parse_from(["mu", "--session", "/tmp/pi-session.jsonl"])
             .expect("parse explicit session mode");
-        assert_eq!(
-            session.session,
-            Some(PathBuf::from("/tmp/pi-session.jsonl"))
-        );
+        assert_eq!(session.session.as_deref(), Some("/tmp/pi-session.jsonl"));
         assert!(
             Cli::try_parse_from(["mu", "--continue", "--session", "/tmp/pi-session.jsonl"])
                 .is_err()
+        );
+        let session_prefix = Cli::try_parse_from(["mu", "--session", "partial-id"])
+            .expect("parse session ID prefix");
+        assert_eq!(session_prefix.session.as_deref(), Some("partial-id"));
+        let session_id = Cli::try_parse_from(["mu", "--session-id", "my-session"])
+            .expect("parse exact session ID");
+        assert_eq!(session_id.session_id.as_deref(), Some("my-session"));
+        let session_dir = Cli::try_parse_from(["mu", "--session-dir", "/tmp/sessions"])
+            .expect("parse session directory");
+        assert_eq!(
+            session_dir.session_dir,
+            Some(PathBuf::from("/tmp/sessions"))
         );
     }
 
@@ -169,6 +207,8 @@ mod tests {
         assert!(help.contains("--mode"));
         assert!(help.contains("--continue"));
         assert!(help.contains("--session"));
+        assert!(help.contains("--session-id"));
+        assert!(help.contains("--session-dir"));
         assert!(help.contains("PROMPT"));
     }
 }

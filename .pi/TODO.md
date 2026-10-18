@@ -14,7 +14,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 
 ## CLI and session behavior
 
-- [ ] Implement remaining session workflows and CLI forms: interactive `--resume`, session-ID lookup, fork/clone, branch navigation/tree selection, and import/export. `--continue` now chooses the newest current-project JSONL session; `--session <path>` loads a specific file and reconstructs the active branch's text/tool-call history.
+- [ ] Implement remaining session workflows and CLI forms: interactive `--resume`, cross-project session-ID lookup/fork prompt, fork/clone, branch navigation/tree selection, and import/export. Mu now supports `--continue`, `--session <path|local-id-prefix>`, exact `--session-id` (opens or creates), and custom `--session-dir`; loaded files restore active-branch text/tool history and MCP/codemode state.
 - [ ] Port Pi session compaction, branch selection, summaries, and context projection behavior end to end.
 
 ## Built-in tools and skills

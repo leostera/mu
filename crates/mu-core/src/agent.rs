@@ -31,6 +31,14 @@ pub enum AgentError {
     Io(#[from] io::Error),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    pub path: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub id: Option<String>,
+    pub id_prefix: Option<String>,
+}
+
 struct Config {
     agent_dir: PathBuf,
     cwd: PathBuf,
@@ -867,7 +875,10 @@ fn session_history(session: &SessionDocument) -> Vec<Value> {
     history
 }
 
-fn session_directory(agent_dir: &Path, cwd: &Path) -> PathBuf {
+fn session_directory(agent_dir: &Path, cwd: &Path, override_dir: Option<&Path>) -> PathBuf {
+    if let Some(directory) = override_dir {
+        return directory.to_owned();
+    }
     let cwd = cwd
         .to_string_lossy()
         .trim_start_matches(['/', '\\'])
@@ -875,9 +886,86 @@ fn session_directory(agent_dir: &Path, cwd: &Path) -> PathBuf {
     agent_dir.join("sessions").join(format!("--{cwd}--"))
 }
 
-fn latest_session_path(agent_dir: &Path, cwd: &Path) -> Option<PathBuf> {
-    let directory = session_directory(agent_dir, cwd);
-    let expected_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
+fn resolved_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+fn session_header(path: &Path) -> Option<Value> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let header = serde_json::from_str::<Value>(contents.lines().next()?).ok()?;
+    (header.get("type").and_then(Value::as_str) == Some("session")).then_some(header)
+}
+
+fn find_session_id_path(
+    agent_dir: &Path,
+    cwd: &Path,
+    override_dir: Option<&Path>,
+    id: &str,
+    allow_prefix: bool,
+) -> Option<PathBuf> {
+    let directory = session_directory(agent_dir, cwd, override_dir);
+    let expected_cwd = resolved_path(cwd);
+    let mut sessions = std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file()
+                || path
+                    .extension()
+                    .is_none_or(|extension| extension != "jsonl")
+            {
+                return None;
+            }
+            Some((entry.metadata().ok()?.modified().ok()?, path))
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.0));
+    sessions.into_iter().map(|(_, path)| path).find(|path| {
+        let Some(header) = session_header(path) else {
+            return false;
+        };
+        header
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|session_id| {
+                if allow_prefix {
+                    session_id.starts_with(id)
+                } else {
+                    session_id == id
+                }
+            })
+            && header
+                .get("cwd")
+                .and_then(Value::as_str)
+                .is_some_and(|session_cwd| resolved_path(Path::new(session_cwd)) == expected_cwd)
+    })
+}
+
+fn validate_session_id(id: &str) -> Result<(), AgentError> {
+    let valid_edge = |character: char| character.is_ascii_alphanumeric();
+    let characters = id.chars().collect::<Vec<_>>();
+    if characters.is_empty()
+        || !valid_edge(characters[0])
+        || !valid_edge(*characters.last().expect("non-empty id"))
+        || characters.iter().any(|character| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '.' | '_' | '-')
+        })
+    {
+        return Err(AgentError::Session(
+            "Session id must be non-empty, contain only alphanumeric characters, '-', '_', and '.', and start and end with an alphanumeric character".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn latest_session_path(
+    agent_dir: &Path,
+    cwd: &Path,
+    override_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let directory = session_directory(agent_dir, cwd, override_dir);
+    let expected_cwd = resolved_path(cwd);
     let mut sessions = std::fs::read_dir(directory)
         .ok()?
         .filter_map(Result::ok)
@@ -897,15 +985,7 @@ fn latest_session_path(agent_dir: &Path, cwd: &Path) -> Option<PathBuf> {
     sessions.sort_by_key(|session| std::cmp::Reverse(session.0));
 
     for (_, path) in sessions {
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some(header) = contents
-            .lines()
-            .next()
-            .and_then(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|value| value.get("type").and_then(Value::as_str) == Some("session"))
-        else {
+        let Some(header) = session_header(&path) else {
             continue;
         };
         let Some(session_cwd) = header.get("cwd").and_then(Value::as_str) else {
@@ -921,12 +1001,75 @@ fn latest_session_path(agent_dir: &Path, cwd: &Path) -> Option<PathBuf> {
     None
 }
 
-fn session_path(c: &Config) -> PathBuf {
-    let dir = session_directory(&c.agent_dir, &c.cwd);
+fn session_path(c: &Config, override_dir: Option<&Path>) -> PathBuf {
+    let dir = session_directory(&c.agent_dir, &c.cwd, override_dir);
     let ts = chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         .replace([':', '.'], "-");
     dir.join(format!("{ts}_{}.jsonl", uuid::Uuid::new_v4()))
+}
+
+fn resolve_session_options(
+    config: &Config,
+    options: SessionOptions,
+) -> Result<(PathBuf, SessionDocument, Vec<Value>), AgentError> {
+    if let Some(id) = options.id.as_deref() {
+        validate_session_id(id)?;
+    }
+    let SessionOptions {
+        path,
+        directory,
+        id,
+        id_prefix,
+    } = options;
+    let requested_path = path
+        .or_else(|| {
+            id.as_deref().and_then(|id| {
+                find_session_id_path(
+                    &config.agent_dir,
+                    &config.cwd,
+                    directory.as_deref(),
+                    id,
+                    false,
+                )
+            })
+        })
+        .or_else(|| {
+            id_prefix.as_deref().and_then(|prefix| {
+                find_session_id_path(
+                    &config.agent_dir,
+                    &config.cwd,
+                    directory.as_deref(),
+                    prefix,
+                    true,
+                )
+            })
+        });
+    if id_prefix.is_some() && requested_path.is_none() {
+        return Err(AgentError::Session(format!(
+            "No session found matching '{}' in this working directory",
+            id_prefix.as_deref().unwrap_or_default()
+        )));
+    }
+    match requested_path {
+        Some(path) => {
+            let (session, history) = load_session(&path)?;
+            Ok((path, session, history))
+        }
+        None => {
+            let session = match id {
+                Some(id) => {
+                    SessionDocument::new_with_id(config.cwd.to_string_lossy().into_owned(), id)
+                }
+                None => SessionDocument::new(config.cwd.to_string_lossy().into_owned()),
+            };
+            Ok((
+                session_path(config, directory.as_deref()),
+                session,
+                Vec::new(),
+            ))
+        }
+    }
 }
 
 async fn execute_in_parallel<I, F>(futures: I) -> Vec<F::Output>
@@ -1086,18 +1229,16 @@ impl MuAgent {
     }
 
     pub async fn connect_with_session(session_file: Option<PathBuf>) -> Result<Self, AgentError> {
+        Self::connect_with_options(SessionOptions {
+            path: session_file,
+            ..SessionOptions::default()
+        })
+        .await
+    }
+
+    pub async fn connect_with_options(options: SessionOptions) -> Result<Self, AgentError> {
         let config = config()?;
-        let (session_path, session, history) = match session_file {
-            Some(path) => {
-                let (session, history) = load_session(&path)?;
-                (path, session, history)
-            }
-            None => (
-                session_path(&config),
-                SessionDocument::new(config.cwd.to_string_lossy().into_owned()),
-                Vec::new(),
-            ),
-        };
+        let (session_path, session, history) = resolve_session_options(&config, options)?;
         let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
         let mcp_startup = Arc::new(OnceCell::new());
         let background_mcp = Arc::clone(&mcp_startup);
@@ -1160,7 +1301,7 @@ impl MuAgent {
     }
 
     fn demo_from_config(config: Config) -> Result<Self, AgentError> {
-        let path = session_path(&config);
+        let path = session_path(&config, None);
         let session = SessionDocument::new(config.cwd.to_string_lossy().into_owned());
         let active_mcp_tools = session_active_mcp_tools(&session);
         Ok(Self {
@@ -1606,9 +1747,15 @@ impl MuAgent {
     }
 }
 
-pub fn latest_session_for_current_cwd() -> Result<Option<PathBuf>, AgentError> {
+pub fn latest_session_for_current_cwd(
+    session_dir: Option<&Path>,
+) -> Result<Option<PathBuf>, AgentError> {
     let config = config()?;
-    Ok(latest_session_path(&config.agent_dir, &config.cwd))
+    Ok(latest_session_path(
+        &config.agent_dir,
+        &config.cwd,
+        session_dir,
+    ))
 }
 
 pub async fn run_prompt(prompt: String) -> Result<(), AgentError> {
@@ -1619,7 +1766,21 @@ pub async fn run_prompt_with_session(
     prompt: String,
     session_file: Option<PathBuf>,
 ) -> Result<(), AgentError> {
-    let mut agent = MuAgent::connect_with_session(session_file).await?;
+    run_prompt_with_options(
+        prompt,
+        SessionOptions {
+            path: session_file,
+            ..SessionOptions::default()
+        },
+    )
+    .await
+}
+
+pub async fn run_prompt_with_options(
+    prompt: String,
+    session_options: SessionOptions,
+) -> Result<(), AgentError> {
+    let mut agent = MuAgent::connect_with_options(session_options).await?;
     agent
         .submit(prompt, &mut |event| {
             match event {
@@ -1692,9 +1853,11 @@ pub async fn run_cli() -> Result<(), AgentError> {
 mod tests {
     use super::{
         AgentPromptQueue, FunctionCall, PromptBehavior, Reply, configured_models,
-        execute_in_parallel, latest_session_path, load_session, session_active_mcp_tools,
-        session_codemode_store, session_history, trusted_url,
+        execute_in_parallel, find_session_id_path, latest_session_path, load_session,
+        resolve_session_options, session_active_mcp_tools, session_codemode_store, session_history,
+        trusted_url, validate_session_id,
     };
+    use super::{Config, SessionOptions};
     use mu_session::{AssistantToolResponse, MessageUsage, SessionDocument, ToolCallRecord};
     use serde_json::Value;
     use std::path::Path;
@@ -1737,8 +1900,104 @@ mod tests {
         set_mtime(&other_cwd_name, 400);
 
         assert_eq!(
-            latest_session_path(&root, Path::new("/tmp/project")),
+            latest_session_path(&root, Path::new("/tmp/project"), None),
             Some(old_name)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exact_session_id_lookup_honors_custom_directory_and_project_cwd() {
+        let root = std::env::temp_dir().join(format!("mu-session-id-{}", uuid::Uuid::new_v4()));
+        let session_dir = root.join("custom-sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        for (id, cwd, file_name) in [
+            ("wanted-id", "/tmp/project", "project.jsonl"),
+            ("wanted-id-prefix", "/tmp/project", "prefix.jsonl"),
+            ("foreign-id", "/tmp/other-project", "foreign.jsonl"),
+        ] {
+            SessionDocument::new_with_id(cwd, id)
+                .write_atomic(&session_dir.join(file_name))
+                .unwrap();
+        }
+
+        assert_eq!(
+            find_session_id_path(
+                &root,
+                Path::new("/tmp/project"),
+                Some(&session_dir),
+                "wanted-id",
+                false
+            ),
+            Some(session_dir.join("project.jsonl"))
+        );
+        assert!(
+            find_session_id_path(
+                &root,
+                Path::new("/tmp/project"),
+                Some(&session_dir),
+                "wanted",
+                false
+            )
+            .is_none()
+        );
+        assert!(validate_session_id("Session_1.test-2").is_ok());
+        assert!(validate_session_id("-invalid").is_err());
+        assert!(validate_session_id("invalid id").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_id_options_open_prefixes_or_create_the_requested_id_in_custom_directory() {
+        let root =
+            std::env::temp_dir().join(format!("mu-session-options-{}", uuid::Uuid::new_v4()));
+        let cwd = root.join("project");
+        let session_dir = root.join("session-files");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = Config {
+            agent_dir: root.join("agent"),
+            cwd: cwd.clone(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+        };
+
+        let (new_path, new_session, _) = resolve_session_options(
+            &config,
+            SessionOptions {
+                directory: Some(session_dir.clone()),
+                id: Some("requested-id".into()),
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(new_path.parent(), Some(session_dir.as_path()));
+        assert_eq!(new_session.header().unwrap().id.as_str(), "requested-id");
+        new_session.write_atomic(&new_path).unwrap();
+
+        let (opened_path, opened_session, _) = resolve_session_options(
+            &config,
+            SessionOptions {
+                directory: Some(session_dir.clone()),
+                id_prefix: Some("requested".into()),
+                ..SessionOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(opened_path, new_path);
+        assert_eq!(opened_session.header().unwrap().id.as_str(), "requested-id");
+        assert!(
+            resolve_session_options(
+                &config,
+                SessionOptions {
+                    directory: Some(session_dir),
+                    id_prefix: Some("missing".into()),
+                    ..SessionOptions::default()
+                },
+            )
+            .is_err()
         );
         std::fs::remove_dir_all(root).unwrap();
     }

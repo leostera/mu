@@ -269,10 +269,14 @@ pub struct SessionDocument {
 
 impl SessionDocument {
     pub fn new(cwd: impl Into<String>) -> Self {
+        Self::new_with_id(cwd, uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn new_with_id(cwd: impl Into<String>, id: impl Into<String>) -> Self {
         let timestamp = now_timestamp();
         let header = SessionHeader {
             version: Some(CURRENT_SESSION_VERSION),
-            id: SessionId(uuid::Uuid::new_v4().to_string()),
+            id: SessionId(id.into()),
             timestamp,
             cwd: cwd.into(),
             parent_session: None,
