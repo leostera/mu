@@ -1298,21 +1298,21 @@ fn shell_timeout(args: &Value) -> Result<Option<Duration>, ToolError> {
         return Ok(None);
     };
     let seconds = value.as_f64().ok_or_else(|| {
-        ToolError::Arguments("Invalid timeout: must be a finite number of seconds".into())
+        ToolError::Command("Invalid timeout: must be a finite number of seconds".into())
     })?;
     if !seconds.is_finite() || seconds <= 0.0 {
-        return Err(ToolError::Arguments(
+        return Err(ToolError::Command(
             "Invalid timeout: must be a finite number of seconds".into(),
         ));
     }
     if seconds * 1000.0 > 2_147_483_647.0 {
-        return Err(ToolError::Arguments(format!(
+        return Err(ToolError::Command(format!(
             "Invalid timeout: maximum is {MAX_TIMEOUT_SECONDS} seconds"
         )));
     }
     Duration::try_from_secs_f64(seconds)
         .map(Some)
-        .map_err(|_| ToolError::Arguments("Invalid timeout: invalid duration".into()))
+        .map_err(|_| ToolError::Command("Invalid timeout: invalid duration".into()))
 }
 
 fn isolate_process_group(process: &mut tokio::process::Command) {
@@ -2331,10 +2331,9 @@ mod tests {
         let invalid = execute(&dir, "bash", &json!({"command":"true","timeout":0}))
             .await
             .unwrap_err();
-        assert!(
-            invalid
-                .to_string()
-                .contains("Invalid timeout: must be a finite number of seconds")
+        assert_eq!(
+            invalid.to_string(),
+            "Invalid timeout: must be a finite number of seconds"
         );
         let too_long = execute(
             &dir,
@@ -2343,10 +2342,9 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
-            too_long
-                .to_string()
-                .contains("Invalid timeout: maximum is 2147483.647 seconds")
+        assert_eq!(
+            too_long.to_string(),
+            "Invalid timeout: maximum is 2147483.647 seconds"
         );
 
         let timeout = execute(
