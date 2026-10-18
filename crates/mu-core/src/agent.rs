@@ -38,6 +38,7 @@ pub struct SessionOptions {
     pub id: Option<String>,
     pub id_prefix: Option<String>,
     pub continue_latest: bool,
+    pub no_session: bool,
 }
 
 struct Config {
@@ -1023,6 +1024,7 @@ fn resolve_session_options(
         id,
         id_prefix,
         continue_latest,
+        no_session: _,
     } = options;
     let requested_path = path
         .or_else(|| {
@@ -1212,6 +1214,12 @@ fn usage(r: &Reply) -> MessageUsage {
     }
 }
 
+fn write_session(session: &SessionDocument, path: &Path) -> Result<(), AgentError> {
+    session
+        .write_atomic(path)
+        .map_err(|error| AgentError::Session(error.to_string()))
+}
+
 pub struct MuAgent {
     provider: Provider,
     provider_id: String,
@@ -1219,6 +1227,7 @@ pub struct MuAgent {
     session: SessionDocument,
     history: Vec<Value>,
     session_path: PathBuf,
+    persist_session: bool,
     agent_dir: PathBuf,
     cwd: PathBuf,
     skills: crate::skills::SkillCatalog,
@@ -1245,6 +1254,7 @@ impl MuAgent {
 
     pub async fn connect_with_options(options: SessionOptions) -> Result<Self, AgentError> {
         let config = config()?;
+        let persist_session = !options.no_session;
         let (session_path, session, history) = resolve_session_options(&config, options)?;
         let skills = crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir);
         let mcp_startup = Arc::new(OnceCell::new());
@@ -1275,6 +1285,7 @@ impl MuAgent {
             session,
             history,
             session_path,
+            persist_session,
             agent_dir: config.agent_dir.clone(),
             cwd: config.cwd.clone(),
             skills,
@@ -1323,6 +1334,7 @@ impl MuAgent {
             session,
             history: Vec::new(),
             session_path: path,
+            persist_session: true,
             agent_dir: config.agent_dir.clone(),
             cwd: config.cwd.clone(),
             skills: crate::skills::SkillCatalog::discover(&config.cwd, &config.agent_dir),
@@ -1386,6 +1398,13 @@ impl MuAgent {
         &self.model_choices
     }
 
+    fn save_session(&self) -> Result<(), AgentError> {
+        if self.persist_session {
+            write_session(&self.session, &self.session_path)?;
+        }
+        Ok(())
+    }
+
     pub fn select_model(&mut self, model: &str) -> Result<bool, AgentError> {
         if !self.model_choices.iter().any(|choice| choice == model) {
             return Ok(false);
@@ -1395,9 +1414,7 @@ impl MuAgent {
         }
         self.provider.model = model.to_owned();
         self.session.append_model_change(&self.provider_id, model);
-        self.session
-            .write_atomic(&self.session_path)
-            .map_err(|error| AgentError::Session(error.to_string()))?;
+        self.save_session()?;
         Ok(true)
     }
 
@@ -1415,9 +1432,9 @@ impl MuAgent {
             .replace([':', '.'], "-");
         let next_path = parent.join(format!("{timestamp}_{}.jsonl", uuid::Uuid::new_v4()));
         let next_session = SessionDocument::new(self.cwd.to_string_lossy().into_owned());
-        next_session
-            .write_atomic(&next_path)
-            .map_err(|error| AgentError::Session(error.to_string()))?;
+        if self.persist_session {
+            write_session(&next_session, &next_path)?;
+        }
 
         self.session = next_session;
         self.history.clear();
@@ -1452,9 +1469,7 @@ impl MuAgent {
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
         self.session.append_user_text(prompt.clone());
-        self.session
-            .write_atomic(&self.session_path)
-            .map_err(|error| AgentError::Session(error.to_string()))?;
+        self.save_session()?;
         self.history.push(json!({
             "role":"user",
             "content":[{"type":"input_text","text":prompt}],
@@ -1536,9 +1551,7 @@ impl MuAgent {
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
         self.session.append_user_text(prompt.clone());
-        self.session
-            .write_atomic(&self.session_path)
-            .map_err(|error| AgentError::Session(error.to_string()))?;
+        self.save_session()?;
         self.history
             .push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
         self.ensure_mcp_ready().await;
@@ -1572,9 +1585,7 @@ impl MuAgent {
                     usage: usage(&reply),
                 },
             );
-            self.session
-                .write_atomic(&self.session_path)
-                .map_err(|error| AgentError::Session(error.to_string()))?;
+            self.save_session()?;
 
             // Preserve the provider's full assistant output (including reasoning
             // signatures and all sibling calls) for stateless Responses replay.
@@ -1662,9 +1673,7 @@ impl MuAgent {
                                     "mcp-tool-loadout",
                                     json!({"active":active}),
                                 );
-                                self.session
-                                    .write_atomic(&self.session_path)
-                                    .map_err(|error| AgentError::Session(error.to_string()))?;
+                                self.save_session()?;
                             }
                             Ok((output, false, None))
                         }
@@ -1693,9 +1702,7 @@ impl MuAgent {
                 if let Some(store_writes) = store_writes {
                     self.session
                         .append_custom_entry("codemode-store", store_writes);
-                    self.session
-                        .write_atomic(&self.session_path)
-                        .map_err(|error| AgentError::Session(error.to_string()))?;
+                    self.save_session()?;
                 }
                 on_event(AgentEvent::ToolFinished {
                     call_id: call.call_id.clone(),
@@ -1707,9 +1714,7 @@ impl MuAgent {
                 }));
                 self.session
                     .append_tool_result(&call.call_id, &call.name, output, is_error);
-                self.session
-                    .write_atomic(&self.session_path)
-                    .map_err(|error| AgentError::Session(error.to_string()))?;
+                self.save_session()?;
             }
             if let Some(steering) = self.prompt_queue.take_steering() {
                 self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
@@ -1733,9 +1738,7 @@ impl MuAgent {
                 usage: usage(&reply),
             },
         );
-        self.session
-            .write_atomic(&self.session_path)
-            .map_err(|error| AgentError::Session(error.to_string()))?;
+        self.save_session()?;
         if reply.output_items.is_empty() {
             self.history.push(
                 json!({"role":"assistant","content":[{"type":"output_text","text":reply.text}]}),
@@ -2091,6 +2094,32 @@ mod tests {
         assert_eq!(history[2]["type"], "function_call_output");
         assert_eq!(history[2]["output"], "file contents");
         assert_eq!(history[3]["content"][0]["text"], "done");
+    }
+
+    #[tokio::test]
+    async fn ephemeral_sessions_update_memory_without_creating_a_session_file() {
+        let root =
+            std::env::temp_dir().join(format!("mu-ephemeral-session-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.clone(),
+            provider: "mu-demo".into(),
+            model: "mu-demo".into(),
+            model_choices: vec!["mu-demo".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).unwrap();
+        agent.persist_session = false;
+        let path = agent.session_path().to_owned();
+
+        agent.submit("hello".into(), &mut |_| {}).await.unwrap();
+        assert!(!path.exists());
+        assert_eq!(agent.session.active_branch_entries().len(), 2);
+        agent.start_new_session().unwrap();
+        assert!(!agent.session_path().exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

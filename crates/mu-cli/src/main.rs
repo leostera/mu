@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long)]
     session_dir: Option<PathBuf>,
 
+    /// Keep the session in memory without writing it to disk.
+    #[arg(long)]
+    no_session: bool,
+
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     mode: OutputMode,
@@ -113,6 +117,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         id: cli.session_id,
         id_prefix: session_selector,
         continue_latest: cli.continue_session,
+        no_session: cli.no_session,
     };
 
     if cli.print || !cli.prompt.is_empty() || !is_terminal {
@@ -198,6 +203,9 @@ mod tests {
             ])
             .is_err()
         );
+        let no_session =
+            Cli::try_parse_from(["mu", "--no-session"]).expect("parse ephemeral session option");
+        assert!(no_session.no_session);
     }
 
     #[test]
@@ -210,6 +218,7 @@ mod tests {
         assert!(help.contains("--session"));
         assert!(help.contains("--session-id"));
         assert!(help.contains("--session-dir"));
+        assert!(help.contains("--no-session"));
         assert!(help.contains("PROMPT"));
     }
 }
