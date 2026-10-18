@@ -90,10 +90,47 @@ async fn pi_edit_applies_disjoint_edits_in_one_atomic_call() {
     .unwrap();
 
     assert!(result.content.contains("Successfully replaced 2 block(s)"));
+    let details = result.details.as_ref().unwrap();
+    assert!(details["diff"].as_str().unwrap().contains("ALPHA"));
+    assert!(details["diff"].as_str().unwrap().contains("GAMMA"));
+    assert!(details["patch"].as_str().unwrap().contains("--- "));
+    assert!(details["patch"].as_str().unwrap().contains("+++ "));
+    assert!(details["patch"].as_str().unwrap().contains("@@"));
+    assert_eq!(details["firstChangedLine"], 1);
     assert_eq!(
         fs::read_to_string(path).unwrap(),
         "ALPHA\nbeta\nGAMMA\ndelta\n"
     );
+    cleanup(&dir);
+}
+
+// Pi source: packages/coding-agent/test/tools.test.ts, edit diff cases.
+#[tokio::test]
+async fn pi_edit_diff_collapses_large_unchanged_gaps() {
+    let dir = temp_dir("edit-diff-gaps");
+    let path = dir.join("many-lines.txt");
+    let lines = (1..=600)
+        .map(|line| format!("line {line:03}"))
+        .collect::<Vec<_>>();
+    fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+    let result = execute(
+        &dir,
+        "edit",
+        &json!({"path":"many-lines.txt","edits":[
+            {"oldText":"line 100\n","newText":"LINE 100\n"},
+            {"oldText":"line 300\n","newText":"LINE 300\n"},
+            {"oldText":"line 500\n","newText":"LINE 500\n"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    let diff = result.details.unwrap()["diff"].as_str().unwrap().to_owned();
+    assert!(diff.contains("LINE 100"));
+    assert!(diff.contains("LINE 300"));
+    assert!(diff.contains("LINE 500"));
+    assert!(diff.contains("..."));
+    assert!(diff.lines().count() < 50);
     cleanup(&dir);
 }
 

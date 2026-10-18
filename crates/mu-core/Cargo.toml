@@ -17,6 +17,7 @@ mu-session = { path = "../mu-session" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true

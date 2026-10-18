@@ -9,6 +9,7 @@ use ignore::WalkBuilder;
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use similar::{ChangeTag, TextDiff};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
@@ -294,17 +295,64 @@ fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         .collect::<Vec<_>>();
 
     let updated = apply_edits(&normalized, &normalized_edits, &path)?;
+    let details = edit_details(&normalized, &updated, &path);
     let restored = if line_ending == "\r\n" {
         updated.replace('\n', "\r\n")
     } else {
         updated
     };
     std::fs::write(&path, format!("{bom}{restored}"))?;
-    Ok(ToolResult::text(format!(
+    let mut result = ToolResult::text(format!(
         "Successfully replaced {} block(s) in {}.",
         normalized_edits.len(),
         path.display()
-    )))
+    ));
+    result.details = Some(details);
+    Ok(result)
+}
+
+fn edit_details(old_content: &str, new_content: &str, path: &Path) -> Value {
+    let diff = TextDiff::from_lines(old_content, new_content);
+    let old_lines = old_content.lines().count().max(1);
+    let new_lines = new_content.lines().count().max(1);
+    let line_number_width = old_lines.max(new_lines).to_string().len();
+    let mut display_lines = Vec::new();
+    let mut first_changed_line = None;
+    let groups = diff.grouped_ops(4);
+
+    for (group_index, group) in groups.iter().enumerate() {
+        if group_index > 0 {
+            display_lines.push(format!(" {} ...", " ".repeat(line_number_width)));
+        }
+        for op in group {
+            for change in op.iter_changes(diff.old_slices(), diff.new_slices()) {
+                let (marker, line_number) = match change.tag() {
+                    ChangeTag::Equal => (' ', change.old_index().unwrap_or(0) + 1),
+                    ChangeTag::Delete => ('-', change.old_index().unwrap_or(0) + 1),
+                    ChangeTag::Insert => {
+                        let line_number = change.new_index().unwrap_or(0) + 1;
+                        first_changed_line.get_or_insert(line_number);
+                        ('+', line_number)
+                    }
+                };
+                if change.tag() == ChangeTag::Delete {
+                    first_changed_line.get_or_insert(change.new_index().unwrap_or(0) + 1);
+                }
+                let text = change.value_ref().trim_end_matches(['\n', '\r']);
+                display_lines.push(format!("{marker}{line_number:>line_number_width$} {text}"));
+            }
+        }
+    }
+    let patch = diff
+        .unified_diff()
+        .context_radius(4)
+        .header(&path.display().to_string(), &path.display().to_string())
+        .to_string();
+    json!({
+        "diff": display_lines.join("\n"),
+        "patch": patch,
+        "firstChangedLine": first_changed_line,
+    })
 }
 
 #[derive(Clone)]
