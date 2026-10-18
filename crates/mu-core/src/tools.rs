@@ -1122,12 +1122,13 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         // In JSON mode ripgrep treats NUL bytes as line boundaries and emits
         // match events from binary files; Node decodes other invalid UTF-8 with
         // replacement when formatting the matched text.
-        let content = String::from_utf8_lossy(&bytes).replace('\0', "\n");
+        let decoded = String::from_utf8_lossy(&bytes);
+        let content = decoded.replace('\0', "\n");
         let match_lines = content
             .split_terminator('\n')
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        let context_lines = content
+        let context_lines = decoded
             .replace("\r\n", "\n")
             .replace('\r', "\n")
             .split('\n')

@@ -569,6 +569,18 @@ async fn search_tools_resolve_normalized_paths_against_the_execution_cwd() {
 
 // Pi source: packages/coding-agent/test/tools.test.ts, read boundary and empty-file cases.
 #[tokio::test]
+async fn pi_grep_binary_context_uses_original_nul_containing_file_lines() {
+    let dir = temp_dir("grep-nul-context");
+    fs::write(dir.join("binary.txt"), b"left\0right\n").unwrap();
+
+    let result = execute(&dir, "grep", &json!({"pattern":"right","context":1}))
+        .await
+        .unwrap();
+    assert_eq!(result.content, "binary.txt-1- left\0right\nbinary.txt:2: ");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_grep_context_uses_pi_carriage_return_line_normalization() {
     let dir = temp_dir("grep-cr-context");
     fs::write(dir.join("input.txt"), b"target\rcontext\rend\n").unwrap();
