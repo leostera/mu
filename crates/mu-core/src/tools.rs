@@ -1426,28 +1426,12 @@ fn default_bash_shell() -> Result<PathBuf, ToolError> {
     }
     #[cfg(windows)]
     {
-        let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
-        let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
-        let known_locations = program_files
-            .into_iter()
-            .chain(program_files_x86)
-            .map(|directory| directory.join("Git/bin/bash.exe"));
-        if let Some(shell) = known_locations.into_iter().find(|path| path.is_file()) {
-            return Ok(shell);
-        }
-        let path_directories = std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-            .unwrap_or_default();
-        if let Some(shell) = path_directories
-            .into_iter()
-            .map(|directory| directory.join("bash.exe"))
-            .find(|path| path.is_file())
-        {
-            return Ok(shell);
-        }
-        Err(ToolError::Command(
-            "No bash shell found. Install Git for Windows or add bash.exe to PATH.".into(),
-        ))
+        windows_bash_shell(
+            std::env::var_os("ProgramFiles").map(PathBuf::from),
+            std::env::var_os("ProgramFiles(x86)").map(PathBuf::from),
+            std::env::var_os("PATH"),
+        )
+        .map_err(ToolError::Command)
     }
 }
 
@@ -1466,6 +1450,36 @@ fn find_executable_on_path(path: Option<std::ffi::OsString>, names: &[&str]) -> 
 #[cfg(any(windows, test))]
 fn find_powershell_executable(path: Option<std::ffi::OsString>) -> Option<PathBuf> {
     find_executable_on_path(path, &["pwsh.exe", "powershell.exe"])
+}
+
+#[cfg(any(windows, test))]
+fn windows_bash_shell(
+    program_files: Option<PathBuf>,
+    program_files_x86: Option<PathBuf>,
+    path: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    let git_bash_locations = program_files
+        .into_iter()
+        .chain(program_files_x86)
+        .map(|directory| directory.join("Git/bin/bash.exe"))
+        .collect::<Vec<_>>();
+    if let Some(shell) = git_bash_locations
+        .iter()
+        .find(|candidate| candidate.is_file())
+    {
+        return Ok(shell.to_owned());
+    }
+    if let Some(shell) = find_executable_on_path(path, &["bash.exe"]) {
+        return Ok(shell);
+    }
+    let searched = git_bash_locations
+        .iter()
+        .map(|path| format!("  {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!(
+        "No bash shell found. Options:\n  1. Install Git for Windows: https://git-scm.com/download/win\n  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n  3. Set shellPath in settings.json\n\nSearched Git Bash in:\n{searched}"
+    ))
 }
 
 #[cfg(any(not(windows), test))]
@@ -1785,6 +1799,33 @@ mod tests {
         assert_eq!(unix_bash_shell(true, None), PathBuf::from("/bin/bash"));
         assert_eq!(unix_bash_shell(false, Some(path)), bash);
         assert_eq!(unix_bash_shell(false, None), PathBuf::from("sh"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn windows_bash_discovery_prefers_git_locations_then_path_and_reports_searches() {
+        let root = std::env::temp_dir().join(format!("mu-windows-bash-{}", uuid::Uuid::new_v4()));
+        let program_files = root.join("Program Files");
+        let path_dir = root.join("path");
+        std::fs::create_dir_all(program_files.join("Git/bin")).unwrap();
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let git_bash = program_files.join("Git/bin/bash.exe");
+        let path_bash = path_dir.join("bash.exe");
+        let error = windows_bash_shell(Some(program_files.clone()), None, None).unwrap_err();
+        assert!(error.contains("Set shellPath in settings.json"));
+        assert!(error.contains(&git_bash.display().to_string()));
+        std::fs::write(&path_bash, "").unwrap();
+        let path = std::env::join_paths([&path_dir]).unwrap();
+
+        assert_eq!(
+            windows_bash_shell(Some(program_files.clone()), None, Some(path.clone())).unwrap(),
+            path_bash
+        );
+        std::fs::write(&git_bash, "").unwrap();
+        assert_eq!(
+            windows_bash_shell(Some(program_files.clone()), None, Some(path)).unwrap(),
+            git_bash
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
