@@ -488,13 +488,18 @@ fn make_strict_schema(schema: &mut Value) {
 fn schema_allows_null(schema: &Value) -> bool {
     schema.get("type").and_then(Value::as_str) == Some("null")
         || schema
+            .get("type")
+            .and_then(Value::as_array)
+            .is_some_and(|types| types.iter().any(|kind| kind.as_str() == Some("null")))
+        || schema.get("const") == Some(&Value::Null)
+        || schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.contains(&Value::Null))
+        || schema
             .get("anyOf")
             .and_then(Value::as_array)
-            .is_some_and(|variants| {
-                variants
-                    .iter()
-                    .any(|variant| variant.get("type").and_then(Value::as_str) == Some("null"))
-            })
+            .is_some_and(|variants| variants.iter().any(schema_allows_null))
 }
 
 fn filter_tool_definitions(definitions: Vec<Value>, selection: &ToolSelection) -> Vec<Value> {
@@ -2758,6 +2763,18 @@ mod tests {
             .find(|definition| definition["name"] == "grep")
             .unwrap();
         assert!(grep.get("strict").is_none());
+        assert!(super::schema_allows_null(
+            &serde_json::json!({"type":["string","null"]})
+        ));
+        assert!(super::schema_allows_null(
+            &serde_json::json!({"const":null})
+        ));
+        assert!(super::schema_allows_null(
+            &serde_json::json!({"enum":["value",null]})
+        ));
+        assert!(super::schema_allows_null(
+            &serde_json::json!({"anyOf":[{"type":"null"}]})
+        ));
         assert_eq!(
             super::ToolSelection::parse(vec!["+gr*".into()])
                 .unwrap_err()
