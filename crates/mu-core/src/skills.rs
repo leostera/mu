@@ -314,6 +314,21 @@ fn add_skill(
     }
 }
 
+pub fn strip_frontmatter(content: &str) -> String {
+    let normalized = content
+        .strip_prefix('\u{feff}')
+        .unwrap_or(content)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    if !normalized.starts_with("---") {
+        return normalized.trim().to_owned();
+    }
+    normalized
+        .find("\n---")
+        .map(|end| normalized[end + 4..].trim().to_owned())
+        .unwrap_or_else(|| normalized.trim().to_owned())
+}
+
 fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);

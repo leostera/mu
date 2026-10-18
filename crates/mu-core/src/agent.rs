@@ -308,6 +308,35 @@ struct Reply {
     incomplete_reason: Option<String>,
 }
 
+fn expand_skill_command(prompt: String, skills: &crate::skills::SkillCatalog) -> String {
+    let Some(command) = prompt.strip_prefix("/skill:") else {
+        return prompt;
+    };
+    let (name, arguments) = command
+        .split_once(' ')
+        .map_or((command, ""), |(name, arguments)| (name, arguments.trim()));
+    let Some(skill) = skills.skills.iter().find(|skill| skill.name == name) else {
+        return prompt;
+    };
+    let Ok(content) = std::fs::read_to_string(&skill.file_path) else {
+        return prompt;
+    };
+    let body = crate::skills::strip_frontmatter(&content);
+    let base_dir = skill.file_path.parent().unwrap_or_else(|| Path::new(""));
+    let block = format!(
+        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
+        skill.name,
+        skill.file_path.display(),
+        base_dir.display(),
+        body,
+    );
+    if arguments.is_empty() {
+        block
+    } else {
+        format!("{block}\n\n{arguments}")
+    }
+}
+
 fn config() -> Result<Config, AgentError> {
     let cwd = std::env::current_dir()?;
     let home = std::env::var_os("HOME")
@@ -2086,6 +2115,7 @@ impl MuAgent {
         behavior: PromptBehavior,
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
+        let prompt = expand_skill_command(prompt, &self.skills);
         self.session.append_user_text(prompt.clone());
         self.save_session()?;
         self.history.push(json!({
@@ -2187,6 +2217,7 @@ impl MuAgent {
         prompt: String,
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
+        let prompt = expand_skill_command(prompt, &self.skills);
         self.session.append_user_text(prompt.clone());
         self.save_session()?;
         self.history
@@ -2543,6 +2574,44 @@ mod tests {
     use mu_session::{AssistantToolResponse, MessageUsage, SessionDocument, ToolCallRecord};
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn skill_commands_expand_frontmatter_body_and_arguments() {
+        let root = std::env::temp_dir().join(format!("mu-skill-command-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file_path = root.join("review/SKILL.md");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file_path,
+            "---\nname: review\ndescription: review code\n---\nReview this file carefully.\n",
+        )
+        .unwrap();
+        let skills = crate::skills::SkillCatalog {
+            skills: vec![crate::skills::Skill {
+                name: "review".into(),
+                description: "review code".into(),
+                file_path: file_path.clone(),
+                disable_model_invocation: true,
+            }],
+            diagnostics: Vec::new(),
+        };
+
+        let expanded =
+            super::expand_skill_command("/skill:review  check edge cases ".into(), &skills);
+        assert_eq!(
+            expanded,
+            format!(
+                "<skill name=\"review\" location=\"{}\">\nReferences are relative to {}.\n\nReview this file carefully.\n</skill>\n\ncheck edge cases",
+                file_path.display(),
+                file_path.parent().unwrap().display(),
+            )
+        );
+        assert_eq!(
+            super::expand_skill_command("/skill:missing argument".into(), &skills),
+            "/skill:missing argument"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn incomplete_responses_preserve_only_the_output_token_limit_as_a_retryable_result() {
