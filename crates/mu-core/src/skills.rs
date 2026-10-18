@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,
@@ -45,6 +47,7 @@ impl SkillCatalog {
                 &mut catalog,
                 &mut seen_names,
                 &mut scanned_directories,
+                &[],
             );
         }
         catalog
@@ -89,10 +92,15 @@ fn scan(
     catalog: &mut SkillCatalog,
     names: &mut HashSet<String>,
     scanned_directories: &mut HashSet<PathBuf>,
+    inherited_ignore_rules: &[Gitignore],
 ) {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
     if !scanned_directories.insert(canonical_root) {
         return;
+    }
+    let mut ignore_rules = inherited_ignore_rules.to_vec();
+    if let Some(local_rules) = load_ignore_rules(root) {
+        ignore_rules.push(local_rules);
     }
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -100,12 +108,14 @@ fn scan(
     let entries: Vec<_> = entries.filter_map(Result::ok).collect();
     if entries.iter().any(|entry| entry.file_name() == "SKILL.md") {
         let file = root.join("SKILL.md");
-        match parse_skill(&file) {
-            Ok(skill) => add_skill(skill, catalog, names),
-            Err(message) => catalog.diagnostics.push(SkillDiagnostic {
-                path: file,
-                message,
-            }),
+        if !is_ignored(&file, false, &ignore_rules) {
+            match parse_skill(&file) {
+                Ok(skill) => add_skill(skill, catalog, names),
+                Err(message) => catalog.diagnostics.push(SkillDiagnostic {
+                    path: file,
+                    message,
+                }),
+            }
         }
         return;
     }
@@ -118,8 +128,11 @@ fn scan(
         let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
         };
+        if is_ignored(&path, metadata.is_dir(), &ignore_rules) {
+            continue;
+        }
         if metadata.is_dir() {
-            scan(&path, catalog, names, scanned_directories);
+            scan(&path, catalog, names, scanned_directories, &ignore_rules);
         } else if metadata.is_file() && path.extension().is_some_and(|extension| extension == "md")
         {
             // Pi also accepts described Markdown files directly in a skills root.
@@ -129,6 +142,30 @@ fn scan(
             }
         }
     }
+}
+
+fn load_ignore_rules(root: &Path) -> Option<Gitignore> {
+    let mut builder = GitignoreBuilder::new(root);
+    let mut found = false;
+    for file_name in [".gitignore", ".ignore", ".fdignore"] {
+        let path = root.join(file_name);
+        if path.is_file() {
+            found = true;
+            let _ = builder.add(path);
+        }
+    }
+    found.then(|| builder.build().ok()).flatten()
+}
+
+fn is_ignored(path: &Path, is_directory: bool, rules: &[Gitignore]) -> bool {
+    let mut ignored = false;
+    for matcher in rules {
+        let matched = matcher.matched(path, is_directory);
+        if !matched.is_none() {
+            ignored = matched.is_ignore();
+        }
+    }
+    ignored
 }
 
 fn add_skill(skill: Skill, catalog: &mut SkillCatalog, names: &mut HashSet<String>) {
@@ -277,6 +314,52 @@ mod tests {
         let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
         assert_eq!(catalog.skills.len(), 1);
         assert_eq!(catalog.skills[0].name, "review");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn respects_root_and_nested_ignore_rules_for_all_pi_ignore_files() {
+        let root = std::env::temp_dir().join(format!("mu-skills-ignore-{}", Uuid::new_v4()));
+        let skills_dir = root.join(".pi/skills");
+        let nested = skills_dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(skills_dir.join(".gitignore"), "git-ignored.md\n").unwrap();
+        std::fs::write(skills_dir.join(".ignore"), "ignore-ignored.md\n").unwrap();
+        std::fs::write(skills_dir.join(".fdignore"), "fd-ignored.md\n").unwrap();
+        std::fs::write(nested.join(".ignore"), "hidden.md\n").unwrap();
+        for name in [
+            "visible.md",
+            "git-ignored.md",
+            "ignore-ignored.md",
+            "fd-ignored.md",
+        ] {
+            std::fs::write(
+                skills_dir.join(name),
+                format!(
+                    "---\nname: {}\ndescription: test\n---\n",
+                    name.trim_end_matches(".md")
+                ),
+            )
+            .unwrap();
+        }
+        for name in ["kept.md", "hidden.md"] {
+            std::fs::write(
+                nested.join(name),
+                format!(
+                    "---\nname: {}\ndescription: test\n---\n",
+                    name.trim_end_matches(".md")
+                ),
+            )
+            .unwrap();
+        }
+
+        let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
+        let names = catalog
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(names, HashSet::from(["visible", "kept"]));
         std::fs::remove_dir_all(root).unwrap();
     }
 
