@@ -1548,7 +1548,10 @@ fn sanitize_shell_output(input: &str) -> String {
             strip_csi_sequence(&mut characters);
             continue;
         }
-        if character == '\r' || (character.is_control() && !matches!(character, '\t' | '\n')) {
+        if character == '\r'
+            || (character.is_control() && !matches!(character, '\t' | '\n'))
+            || matches!(character, '\u{fff9}'..='\u{fffb}')
+        {
             continue;
         }
         output.push(character);
@@ -2372,8 +2375,10 @@ mod tests {
     #[test]
     fn shell_output_removes_ansi_and_binary_controls_but_keeps_tabs_and_newlines() {
         assert_eq!(
-            super::sanitize_shell_output("\u{1b}[31mred\u{1b}[0m\r\n\u{1}x\t!"),
-            "red\nx\t!"
+            super::sanitize_shell_output(
+                "\u{1b}[31mred\u{1b}[0m\r\n\u{1}x\t!\u{fff9}a\u{fffa}b\u{fffb}",
+            ),
+            "red\nx\t!ab"
         );
         assert_eq!(
             super::sanitize_shell_output(
