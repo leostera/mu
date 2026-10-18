@@ -337,8 +337,8 @@ fn expand_skill_command(prompt: String, skills: &crate::skills::SkillCatalog) ->
     }
 }
 
-fn shell_command_prefix(agent_dir: &Path, cwd: &Path) -> Option<String> {
-    let mut prefix = None;
+fn shell_setting(agent_dir: &Path, cwd: &Path, key: &str) -> Option<String> {
+    let mut setting = None;
     for path in [
         agent_dir.join("settings.json"),
         cwd.join(".pi/settings.json"),
@@ -349,11 +349,11 @@ fn shell_command_prefix(agent_dir: &Path, cwd: &Path) -> Option<String> {
         let Ok(settings) = serde_json::from_str::<Value>(&contents) else {
             continue;
         };
-        if let Some(value) = settings.get("shellCommandPrefix").and_then(Value::as_str) {
-            prefix = Some(value.to_owned());
+        if let Some(value) = settings.get(key).and_then(Value::as_str) {
+            setting = Some(value.to_owned());
         }
     }
-    prefix.filter(|prefix| !prefix.is_empty())
+    setting.filter(|value| !value.is_empty())
 }
 
 fn config() -> Result<Config, AgentError> {
@@ -2125,8 +2125,11 @@ impl MuAgent {
         }
         environment.insert("PI_PROVIDER".into(), self.provider_id.clone());
         environment.insert("PI_MODEL".into(), self.provider.model.clone());
-        if let Some(prefix) = shell_command_prefix(&self.agent_dir, &self.cwd) {
+        if let Some(prefix) = shell_setting(&self.agent_dir, &self.cwd, "shellCommandPrefix") {
             environment.insert(crate::tools::SHELL_COMMAND_PREFIX_ENV.into(), prefix);
+        }
+        if let Some(path) = shell_setting(&self.agent_dir, &self.cwd, "shellPath") {
+            environment.insert(crate::tools::BASH_SHELL_PATH_ENV.into(), path);
         }
         environment
     }
@@ -2611,12 +2614,17 @@ mod tests {
         .unwrap();
         std::fs::write(
             project_dir.join("settings.json"),
-            r#"{"shellCommandPrefix":"project setup"}"#,
+            r#"{"shellCommandPrefix":"project setup","shellPath":"/project/bash"}"#,
         )
         .unwrap();
         assert_eq!(
-            super::shell_command_prefix(&agent_dir, &root.join("project")).as_deref(),
+            super::shell_setting(&agent_dir, &root.join("project"), "shellCommandPrefix")
+                .as_deref(),
             Some("project setup")
+        );
+        assert_eq!(
+            super::shell_setting(&agent_dir, &root.join("project"), "shellPath").as_deref(),
+            Some("/project/bash")
         );
         std::fs::remove_dir_all(root).unwrap();
     }

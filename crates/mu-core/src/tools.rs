@@ -21,6 +21,7 @@ use tokio::{
 use unicode_normalization::UnicodeNormalization;
 
 pub(crate) const SHELL_COMMAND_PREFIX_ENV: &str = "MU_INTERNAL_SHELL_COMMAND_PREFIX";
+pub(crate) const BASH_SHELL_PATH_ENV: &str = "MU_INTERNAL_BASH_SHELL_PATH";
 
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -1906,7 +1907,12 @@ async fn run_shell_process(
 fn shell_child_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
     environment
         .iter()
-        .filter(|(name, _)| name.as_str() != SHELL_COMMAND_PREFIX_ENV)
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                SHELL_COMMAND_PREFIX_ENV | BASH_SHELL_PATH_ENV
+            )
+        })
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
 }
@@ -1927,7 +1933,7 @@ async fn run_bash(
             |prefix| format!("{prefix}\n{command}"),
         );
     let child_environment = shell_child_environment(environment);
-    let shell = default_bash_shell()?;
+    let shell = default_bash_shell(environment.get(BASH_SHELL_PATH_ENV).map(String::as_str))?;
     let mut process = tokio::process::Command::new(shell);
     process.args(["-c", &command]);
     let output =
@@ -1935,7 +1941,13 @@ async fn run_bash(
     Ok(shell_result(output, started_at, "pi-bash"))
 }
 
-fn default_bash_shell() -> Result<PathBuf, ToolError> {
+fn default_bash_shell(custom_path: Option<&str>) -> Result<PathBuf, ToolError> {
+    if let Some(custom_path) = custom_path {
+        let path = PathBuf::from(custom_path);
+        return path.exists().then_some(path).ok_or_else(|| {
+            ToolError::Command(format!("Custom shell path not found: {custom_path}"))
+        });
+    }
     #[cfg(not(windows))]
     {
         Ok(unix_bash_shell(
@@ -2426,6 +2438,21 @@ mod tests {
         assert!(Arc::ptr_eq(&target_lock, &alias_lock));
         assert!(!Arc::ptr_eq(&target_lock, &other_lock));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_bash_shell_path_is_used_or_reports_pi_error() {
+        assert_eq!(
+            default_bash_shell(Some("/bin/bash")).unwrap(),
+            PathBuf::from("/bin/bash")
+        );
+        assert_eq!(
+            default_bash_shell(Some("/missing/custom/bash"))
+                .unwrap_err()
+                .to_string(),
+            "Custom shell path not found: /missing/custom/bash"
+        );
     }
 
     #[test]
@@ -3156,6 +3183,7 @@ mod tests {
             SHELL_COMMAND_PREFIX_ENV.to_owned(),
             "printf prefix".to_owned(),
         );
+        environment.insert(BASH_SHELL_PATH_ENV.to_owned(), "/bin/bash".to_owned());
         let result = execute_with_environment(
             &directory,
             "bash",
