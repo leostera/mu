@@ -30,7 +30,7 @@ Known behavior gaps against pinned Pi revision `698a2d23b86a5045dd54554354a5e0cb
 ### Paths and file tools
 
 - [ ] Port remaining `path-utils.ts`: tool paths now resolve absolute/relative inputs, `~`, `@`, Unicode spaces, and file URLs; `read` retries macOS NFD, curly-quote, and screenshot AM/PM variants. Still port canonicalization/revisions, local-path checks, Windows shell paths, cwd-relative formatting, and exact utility tests.
-- [ ] Complete `read` text parity: UTF-8/byte and line caps, offsets/limits, out-of-range errors, continuation text, first-line-too-long fallback, and structured truncation metadata.
+- [ ] Complete `read` text parity: Mu now handles byte/line caps, offsets/limits, out-of-range errors, continuation text, first-line-too-long fallback, and Pi-shaped truncation details; continue matching exact boundary/empty-file semantics and add a table-driven port of all Pi truncation cases.
 - [ ] Implement `read` image parity: MIME detection by file magic, JPEG/PNG/GIF/WebP/BMP support, BMP conversion, unsupported/corrupt image behavior, resize/model limits, vision-capability handling, and ordered image/text blocks.
 - [ ] Complete `write` behavior and success/error messages; share cancellation-safe canonical per-path mutation serialization with `edit` (same-path order, distinct-path concurrency, symlink aliases, queued/in-flight aborts).
 - [ ] Finish `edit` argument compatibility: JSON-stringified arrays, object-shaped edits, mixed legacy fields, malformed input, and exact Pi errors; match no-op failures.

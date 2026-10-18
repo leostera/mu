@@ -204,7 +204,7 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     } else if let Some(limit_name) = truncated {
         let end_line = start_line + output_lines - 1;
         let next_offset = end_line + 1;
-        let mut output = truncated_by;
+        let mut output = truncated_by.clone();
         if limit_name == "bytes" {
             output.push_str(&format!(
                 "\n\n[Showing lines {start_line}-{end_line} of {total_file_lines} ({} limit). Use offset={next_offset} to continue.]",
@@ -223,9 +223,32 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             "{truncated_by}\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
         )
     } else {
-        truncated_by
+        truncated_by.clone()
     };
-    Ok(ToolResult::text(content))
+    let details = truncated.map(|truncation_kind| {
+        let mut total_lines = selected.split('\n').count();
+        if selected.ends_with('\n') {
+            total_lines = total_lines.saturating_sub(1);
+        }
+        json!({
+            "truncation": {
+                "content": truncated_by,
+                "truncated": true,
+                "truncatedBy": truncation_kind,
+                "totalLines": total_lines,
+                "totalBytes": selected.len(),
+                "outputLines": output_lines,
+                "outputBytes": truncated_by.len(),
+                "lastLinePartial": false,
+                "firstLineExceedsLimit": first_line_exceeds_limit,
+                "maxLines": READ_MAX_LINES,
+                "maxBytes": READ_MAX_BYTES,
+            }
+        })
+    });
+    let mut result = ToolResult::text(content);
+    result.details = details;
+    Ok(result)
 }
 
 /// Apply Pi's head truncation to complete lines only, using UTF-8 byte counts.
@@ -1241,6 +1264,18 @@ mod tests {
                 .content
                 .ends_with("[Showing lines 1-2000 of 2500. Use offset=2001 to continue.]")
         );
+        assert_eq!(
+            result.details.as_ref().unwrap()["truncation"]["truncatedBy"],
+            "lines"
+        );
+        assert_eq!(
+            result.details.as_ref().unwrap()["truncation"]["outputLines"],
+            2000
+        );
+        assert_eq!(
+            result.details.as_ref().unwrap()["truncation"]["totalLines"],
+            2500
+        );
 
         let byte_lines = (1..=500)
             .map(|line| format!("Line {line}: {}", "x".repeat(200)))
@@ -1251,6 +1286,20 @@ mod tests {
             .unwrap();
         assert!(result.content.starts_with("Line 1:"));
         assert!(result.content.contains("(50.0KB limit). Use offset="));
+        assert_eq!(
+            result.details.as_ref().unwrap()["truncation"]["truncatedBy"],
+            "bytes"
+        );
+
+        std::fs::write(&path, "x".repeat(READ_MAX_BYTES + 1)).unwrap();
+        let result = execute(&dir, "read", &json!({"path":"many-lines.txt"}))
+            .await
+            .unwrap();
+        assert!(result.content.contains("Line 1 is 50.0KB"));
+        assert_eq!(
+            result.details.as_ref().unwrap()["truncation"]["firstLineExceedsLimit"],
+            true
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
