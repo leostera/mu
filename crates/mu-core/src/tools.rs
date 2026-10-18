@@ -2180,14 +2180,14 @@ mod tests {
         let timeout = execute(
             &dir,
             "bash",
-            &json!({"command":"printf 'started'; while :; do :; done","timeout":0.5}),
+            &json!({"command":"printf 'started'; while :; do sleep 0.01; done","timeout":2}),
         )
         .await
         .unwrap_err();
         assert!(
             timeout
                 .to_string()
-                .contains("Command timed out after 0.5 seconds")
+                .contains("Command timed out after 2 seconds")
         );
         assert!(timeout.to_string().contains("started\n\n"), "{timeout}");
         std::fs::remove_dir_all(dir).unwrap();
