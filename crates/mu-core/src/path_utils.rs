@@ -6,6 +6,45 @@ pub fn canonicalize_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
 }
 
+/// Revision token used to detect file replacement or modification.
+pub fn file_revision(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(file_revision_from_metadata(&metadata))
+}
+
+#[cfg(unix)]
+fn file_revision_from_metadata(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+
+    let modified_ns =
+        i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec());
+    let changed_ns =
+        i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec());
+    format!(
+        "{}:{}:{}:{modified_ns}:{changed_ns}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len()
+    )
+}
+
+#[cfg(not(unix))]
+fn file_revision_from_metadata(metadata: &std::fs::Metadata) -> String {
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let created_ns = metadata
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{}:{modified_ns}:{created_ns}", metadata.len())
+}
+
 /// Return the path relative to `cwd` when its lexical resolution stays inside it.
 pub fn cwd_relative_path(file_path: &Path, cwd: &Path) -> Option<PathBuf> {
     let cwd = absolute_cwd(cwd);
@@ -93,6 +132,21 @@ pub fn normalize_windows_shell_path(path: &str) -> String {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn file_revisions_exist_for_files_and_are_absent_for_missing_paths() {
+        let root = std::env::temp_dir().join(format!("mu-file-revision-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("file.txt");
+        let missing = root.join("missing.txt");
+        std::fs::write(&file, "one").unwrap();
+        let first = file_revision(&file).expect("file revision");
+        std::fs::write(&file, "a longer version").unwrap();
+        let second = file_revision(&file).expect("updated file revision");
+        assert_ne!(first, second);
+        assert_eq!(file_revision(&missing), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn canonicalization_follows_symlinks_and_preserves_unresolvable_paths() {
