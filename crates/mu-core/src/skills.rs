@@ -332,58 +332,40 @@ pub fn strip_frontmatter(content: &str) -> String {
 fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    let mut lines = text.lines().peekable();
-    if lines.next() != Some("---") {
+    if text.lines().next() != Some("---") {
         return Err("missing YAML frontmatter".into());
     }
-    let mut name = None;
-    let mut description = None;
-    let mut disabled = false;
-    let mut closed = false;
-    while let Some(line) = lines.next() {
-        if line.trim() == "---" {
-            closed = true;
-            break;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_matches(['\"', '\'']);
-        match key.trim() {
-            "name" => {
-                name = line
-                    .split_once(':')
-                    .and_then(|(_, raw)| parse_frontmatter_string(raw));
-            }
-            "description" if matches!(value, "|" | "|-" | "|+" | ">" | ">-" | ">+") => {
-                let folded = value.starts_with('>');
-                let mut block_lines = Vec::new();
-                while lines
-                    .peek()
-                    .is_some_and(|next| next.trim().is_empty() || next.starts_with([' ', '\t']))
-                {
-                    let block_line = lines.next().expect("peeked description block line");
-                    block_lines.push(block_line.trim_start().to_owned());
-                }
-                let separator = if folded { " " } else { "\n" };
-                description = Some(block_lines.join(separator).trim().to_owned());
-            }
-            "description" => {
-                description = line
-                    .split_once(':')
-                    .and_then(|(_, raw)| parse_frontmatter_string(raw));
-            }
-            "disable-model-invocation" => {
-                disabled = line
-                    .split_once(':')
-                    .is_some_and(|(_, raw)| raw.trim() == "true");
-            }
-            _ => {}
-        }
-    }
+    let yaml = text
+        .lines()
+        .skip(1)
+        .take_while(|line| line.trim() != "---")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let closed = text.lines().skip(1).any(|line| line.trim() == "---");
     if !closed {
         return Err("unterminated YAML frontmatter".into());
     }
+    let documents = yaml_rust2::YamlLoader::load_from_str(&yaml)
+        .map_err(|error| format!("invalid YAML frontmatter: {error}"))?;
+    let mapping = documents.first().and_then(|document| match document {
+        yaml_rust2::Yaml::Hash(mapping) => Some(mapping),
+        _ => None,
+    });
+    let string_field = |field: &str| {
+        mapping
+            .and_then(|mapping| mapping.get(&yaml_rust2::Yaml::String(field.to_owned())))
+            .and_then(|value| match value {
+                yaml_rust2::Yaml::String(value) => Some(value.clone()),
+                _ => None,
+            })
+    };
+    let name = string_field("name");
+    let description = string_field("description");
+    let disabled = mapping
+        .and_then(|mapping| {
+            mapping.get(&yaml_rust2::Yaml::String("disable-model-invocation".into()))
+        })
+        .is_some_and(|value| matches!(value, yaml_rust2::Yaml::Boolean(true)));
     let dir_name = path
         .parent()
         .and_then(Path::file_name)
@@ -428,45 +410,6 @@ fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
         },
         warnings,
     })
-}
-
-fn parse_frontmatter_string(raw_value: &str) -> Option<String> {
-    let value = strip_yaml_comment(raw_value).trim();
-    if value.is_empty() || matches!(value, "~" | "null" | "Null" | "NULL" | "true" | "false") {
-        return None;
-    }
-    if let Some(value) = value.strip_prefix('\'') {
-        return value
-            .strip_suffix('\'')
-            .map(|value| value.replace("''", "'"));
-    }
-    if value.starts_with('"') {
-        return serde_json::from_str(value).ok();
-    }
-    if value.parse::<f64>().is_ok() || value.starts_with(['[', '{']) {
-        return None;
-    }
-    Some(value.to_owned())
-}
-
-fn strip_yaml_comment(value: &str) -> &str {
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, character) in value.char_indices() {
-        match (quote, character) {
-            (Some('"'), '\\') if !escaped => escaped = true,
-            (Some(active), current) if active == current && !escaped => quote = None,
-            (None, '\'' | '"') => quote = Some(character),
-            (None, '#') if index == 0 || value[..index].ends_with(char::is_whitespace) => {
-                return &value[..index];
-            }
-            _ => escaped = false,
-        }
-        if character != '\\' {
-            escaped = false;
-        }
-    }
-    value
 }
 
 fn escape_xml(value: &str) -> String {
@@ -686,15 +629,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_scalar_quotes_and_ignores_only_unquoted_yaml_comments() {
-        assert_eq!(
-            parse_frontmatter_string(" 'it''s # literal' # comment"),
-            Some("it's # literal".into())
-        );
-        assert_eq!(
-            parse_frontmatter_string("\"quoted # literal\" # comment"),
-            Some("quoted # literal".into())
-        );
+    fn parses_quoted_yaml_scalars_and_comments() {
+        let root = std::env::temp_dir().join(format!("mu-skill-scalars-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("SKILL.md");
+        std::fs::write(
+            &file,
+            "---\nname: shared\ndescription: \"quoted # literal\" # comment\ndisable-model-invocation: true\n---\nbody",
+        )
+        .unwrap();
+        let parsed = parse_skill(&file).unwrap();
+        assert_eq!(parsed.skill.description, "quoted # literal");
+        assert!(parsed.skill.disable_model_invocation);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
