@@ -972,7 +972,7 @@ async fn pi_find_trims_whitespace_from_fd_output_paths() {
     let result = execute(&dir, "find", &json!({"pattern":"*leading.txt*"}))
         .await
         .unwrap();
-    assert_eq!(result.content, "leading.txt");
+    assert_eq!(result.content, " leading.txt");
     cleanup(&dir);
 }
 

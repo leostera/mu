@@ -937,7 +937,7 @@ fn parse_list_directory_input(cwd: &Path, args: &Value) -> Result<ListDirectoryI
 }
 
 fn trim_fd_output_line(line: &str) -> &str {
-    line.trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}')
+    line.trim_end_matches(|character: char| character.is_whitespace() || character == '\u{feff}')
 }
 
 fn sort_directory_entries(entries: &mut [String]) {
@@ -2056,7 +2056,7 @@ mod tests {
 
     #[test]
     fn find_output_trim_matches_javascript_bom_whitespace_behavior() {
-        assert_eq!(trim_fd_output_line("\u{feff} file \u{feff}"), "file");
+        assert_eq!(trim_fd_output_line(" file \u{feff}"), " file");
     }
 
     #[test]
