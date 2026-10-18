@@ -2199,7 +2199,7 @@ mod tests {
         let timeout = execute(
             &dir,
             "bash",
-            &json!({"command":"printf 'started'; while :; do sleep 0.01; done","timeout":2}),
+            &json!({"command":"echo started; while :; do :; done","timeout":2}),
         )
         .await
         .unwrap_err();
