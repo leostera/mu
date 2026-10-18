@@ -1143,7 +1143,10 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
 
     let mut results = Vec::new();
     let mut walker = WalkBuilder::new(&path);
-    walker.hidden(false).require_git(false);
+    walker
+        .hidden(false)
+        .require_git(false)
+        .sort_by_file_name(|left, right| left.cmp(right));
     for entry in walker.build() {
         let Ok(entry) = entry else {
             continue;

@@ -417,6 +417,22 @@ async fn pi_find_includes_hidden_files_and_respects_gitignore() {
 }
 
 #[tokio::test]
+async fn pi_find_orders_results_like_fd_default_sorting() {
+    let dir = temp_dir("find-order");
+    fs::create_dir_all(dir.join("nested")).unwrap();
+    for path in ["z.txt", "a.txt", "nested/b.txt", "10.txt", "2.txt"] {
+        fs::write(dir.join(path), "file").unwrap();
+    }
+
+    let result = execute(&dir, "find", &json!({"pattern":"**/*.txt","path":"."}))
+        .await
+        .unwrap();
+
+    assert_eq!(result.content, "10.txt\n2.txt\na.txt\nnested/b.txt\nz.txt");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_treats_flag_like_patterns_as_globs_and_reports_invalid_globs() {
     let dir = temp_dir("find-flags");
     fs::write(dir.join("-report.txt"), "report").unwrap();
