@@ -2813,7 +2813,7 @@ mod tests {
         assert!(bottom > 0);
 
         handle_mouse(MouseEventKind::ScrollUp, &mut app);
-        assert!(app.messages.scroll.offset() < bottom);
+        assert_eq!(app.messages.scroll.offset(), bottom - 1);
         handle_mouse(MouseEventKind::ScrollDown, &mut app);
         assert_eq!(app.messages.scroll.offset(), bottom);
         assert!(app.messages.scroll.is_following_end());
