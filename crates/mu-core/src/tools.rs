@@ -203,6 +203,12 @@ const READ_MAX_LINES: usize = 2000;
 const READ_MAX_BYTES: usize = 50 * 1024;
 
 fn read_file_io_error(path: &Path, error: std::io::Error) -> ToolError {
+    if error.kind() == std::io::ErrorKind::IsADirectory {
+        return ToolError::Command(format!(
+            "EISDIR: illegal operation on a directory, read '{}'",
+            path.display()
+        ));
+    }
     let (code, message) = match error.kind() {
         std::io::ErrorKind::NotFound => ("ENOENT", "no such file or directory"),
         std::io::ErrorKind::PermissionDenied => ("EACCES", "permission denied"),

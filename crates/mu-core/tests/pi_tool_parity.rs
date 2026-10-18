@@ -669,6 +669,22 @@ async fn pi_grep_decodes_invalid_utf8_and_treats_nul_as_a_line_boundary() {
 }
 
 #[tokio::test]
+async fn pi_read_formats_directory_errors_like_node_fs_read() {
+    let dir = temp_dir("read-directory-error");
+    let error = execute(&dir, "read", &json!({"path":"."}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "EISDIR: illegal operation on a directory, read '{}'",
+            dir.display()
+        )
+    );
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_read_formats_missing_file_errors_like_node_fs_access() {
     let dir = temp_dir("read-missing-error");
     let path = dir.join("missing.txt");
