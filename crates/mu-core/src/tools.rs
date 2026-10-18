@@ -1337,6 +1337,7 @@ async fn capture_streams<Out, Err>(
     mut stdout: Out,
     mut stderr: Err,
     captured: Arc<AsyncMutex<Vec<u8>>>,
+    updates: tokio::sync::mpsc::UnboundedSender<()>,
 ) where
     Out: AsyncRead + Unpin,
     Err: AsyncRead + Unpin,
@@ -1349,22 +1350,40 @@ async fn capture_streams<Out, Err>(
         tokio::select! {
             result = stdout.read(&mut stdout_chunk), if stdout_open => match result {
                 Ok(0) | Err(_) => stdout_open = false,
-                Ok(bytes_read) => captured.lock().await.extend_from_slice(&stdout_chunk[..bytes_read]),
+                Ok(bytes_read) => {
+                    captured.lock().await.extend_from_slice(&stdout_chunk[..bytes_read]);
+                    let _ = updates.send(());
+                },
             },
             result = stderr.read(&mut stderr_chunk), if stderr_open => match result {
                 Ok(0) | Err(_) => stderr_open = false,
-                Ok(bytes_read) => captured.lock().await.extend_from_slice(&stderr_chunk[..bytes_read]),
+                Ok(bytes_read) => {
+                    captured.lock().await.extend_from_slice(&stderr_chunk[..bytes_read]);
+                    let _ = updates.send(());
+                },
             },
         }
     }
 }
 
-async fn finish_capture(mut capture: JoinHandle<()>) {
-    if tokio::time::timeout(Duration::from_millis(250), &mut capture)
-        .await
-        .is_err()
-    {
-        capture.abort();
+async fn finish_capture(
+    mut capture: JoinHandle<()>,
+    updates: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+) {
+    loop {
+        while updates.try_recv().is_ok() {}
+        tokio::select! {
+            _ = &mut capture => return,
+            update = updates.recv() => {
+                if update.is_none() {
+                    return;
+                }
+            },
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                capture.abort();
+                return;
+            }
+        }
     }
 }
 
@@ -1395,10 +1414,12 @@ async fn run_shell_process(
     isolate_process_group(&mut process);
     let mut child = process.spawn().map_err(ToolError::Io)?;
     let captured = Arc::new(AsyncMutex::new(Vec::new()));
+    let (updates_sender, mut updates_receiver) = tokio::sync::mpsc::unbounded_channel();
     let capture = tokio::spawn(capture_streams(
         child.stdout.take().expect("stdout is piped"),
         child.stderr.take().expect("stderr is piped"),
         Arc::clone(&captured),
+        updates_sender,
     ));
 
     let status = match timeout {
@@ -1407,7 +1428,7 @@ async fn run_shell_process(
             Err(_) => {
                 terminate_process_tree(&mut child).await;
                 let _ = child.wait().await;
-                finish_capture(capture).await;
+                finish_capture(capture, &mut updates_receiver).await;
                 let partial = String::from_utf8_lossy(&captured.lock().await).into_owned();
                 let partial = sanitize_shell_output(&partial);
                 let timeout_message =
@@ -1422,7 +1443,7 @@ async fn run_shell_process(
         },
         None => child.wait().await.map_err(ToolError::Io)?,
     };
-    finish_capture(capture).await;
+    finish_capture(capture, &mut updates_receiver).await;
     Ok(Output {
         status,
         stdout: captured.lock().await.clone(),
@@ -2363,6 +2384,23 @@ mod tests {
                 .contains("Command timed out after 2 seconds")
         );
         assert!(timeout.to_string().contains("started\n\n"), "{timeout}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_collects_output_from_recently_exited_shell_descendants() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = execute(
+            &dir,
+            "bash",
+            &json!({"command":"(sleep 0.08; printf a; sleep 0.08; printf b; sleep 0.08; printf c; sleep 0.08; printf d) &"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.structured_content.unwrap()["output"], "abcd");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
