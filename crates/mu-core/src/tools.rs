@@ -884,21 +884,21 @@ fn sort_directory_entries(entries: &mut [String]) {
 fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let ListDirectoryInput { path, limit } = parse_list_directory_input(cwd, args)?;
     if !path.exists() {
-        return Err(ToolError::Arguments(format!(
+        return Err(ToolError::Command(format!(
             "Path not found: {}",
             path.display()
         )));
     }
     let metadata = std::fs::metadata(&path)?;
     if !metadata.is_dir() {
-        return Err(ToolError::Arguments(format!(
+        return Err(ToolError::Command(format!(
             "Not a directory: {}",
             path.display()
         )));
     }
 
     let mut entries = std::fs::read_dir(&path)
-        .map_err(|error| ToolError::Arguments(format!("Cannot read directory: {error}")))?
+        .map_err(|error| ToolError::Command(format!("Cannot read directory: {error}")))?
         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
         .collect::<Result<Vec<_>, _>>()?;
     sort_directory_entries(&mut entries);
@@ -1105,7 +1105,7 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let input = parse_grep_input(cwd, args)?;
     let is_directory = input.path.is_dir();
     if !is_directory && !input.path.is_file() {
-        return Err(ToolError::Arguments(format!(
+        return Err(ToolError::Command(format!(
             "Path not found: {}",
             input.path.display()
         )));
@@ -1346,7 +1346,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         limit,
     } = parse_find_input(cwd, args)?;
     if !path.is_dir() {
-        return Err(ToolError::Arguments(format!(
+        return Err(ToolError::Command(format!(
             "Path not found: {}",
             path.display()
         )));

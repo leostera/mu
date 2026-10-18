@@ -910,6 +910,32 @@ async fn pi_find_treats_flag_like_patterns_as_globs_and_reports_invalid_globs() 
 }
 
 #[tokio::test]
+async fn pi_search_tools_return_runtime_path_errors_without_mu_argument_prefixes() {
+    let dir = temp_dir("search-path-errors");
+    let missing = dir.join("missing");
+    let expected_missing = format!("Path not found: {}", missing.display());
+    for (tool, arguments) in [
+        ("grep", json!({"path":"missing","pattern":"needle"})),
+        ("find", json!({"path":"missing","pattern":"*.txt"})),
+        ("ls", json!({"path":"missing"})),
+    ] {
+        let error = execute(&dir, tool, &arguments).await.unwrap_err();
+        assert_eq!(error.to_string(), expected_missing, "{tool}");
+    }
+
+    let file = dir.join("file.txt");
+    fs::write(&file, "content").unwrap();
+    let not_directory = execute(&dir, "ls", &json!({"path":"file.txt"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        not_directory.to_string(),
+        format!("Not a directory: {}", file.display())
+    );
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_ls_lists_dotfiles_and_marks_directories() {
     let dir = temp_dir("ls");
     fs::write(dir.join(".hidden-file"), "secret").unwrap();
