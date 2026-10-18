@@ -1119,12 +1119,10 @@ fn grep_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         let Ok(bytes) = std::fs::read(&file) else {
             continue;
         };
-        // ripgrep skips files containing NUL bytes, but streams other invalid
-        // UTF-8 bytes through stdout where Node decodes them with replacement.
-        if bytes.contains(&0) {
-            continue;
-        }
-        let content = String::from_utf8_lossy(&bytes);
+        // In JSON mode ripgrep treats NUL bytes as line boundaries and emits
+        // match events from binary files; Node decodes other invalid UTF-8 with
+        // replacement when formatting the matched text.
+        let content = String::from_utf8_lossy(&bytes).replace('\0', "\n");
         let lines = content
             .split_terminator('\n')
             .map(|line| line.trim_end_matches('\r'))
