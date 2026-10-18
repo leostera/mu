@@ -433,6 +433,26 @@ async fn pi_find_orders_results_like_fd_default_sorting() {
 }
 
 #[tokio::test]
+async fn pi_find_stops_parent_gitignore_rules_at_nested_repository_boundaries() {
+    let dir = temp_dir("find-nested-repo");
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::create_dir_all(dir.join("nested/.git")).unwrap();
+    fs::write(dir.join(".gitignore"), "nested/secret.txt\n").unwrap();
+    fs::write(
+        dir.join("nested/secret.txt"),
+        "visible in nested repository",
+    )
+    .unwrap();
+
+    let result = execute(&dir, "find", &json!({"pattern":"**/*.txt","path":"."}))
+        .await
+        .unwrap();
+
+    assert_eq!(result.content, "nested/secret.txt");
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_find_treats_flag_like_patterns_as_globs_and_reports_invalid_globs() {
     let dir = temp_dir("find-flags");
     fs::write(dir.join("-report.txt"), "report").unwrap();

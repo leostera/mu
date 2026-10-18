@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::{Output, Stdio},
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
@@ -1128,6 +1128,41 @@ fn parse_find_input(cwd: &Path, args: &Value) -> Result<FindInput, ToolError> {
     })
 }
 
+fn find_candidates_with_nested_repositories(search_root: &Path) -> Vec<PathBuf> {
+    let mut pending_roots = vec![(search_root.to_owned(), true)];
+    let mut visited_roots = HashSet::from([search_root.to_owned()]);
+    let mut candidates = HashSet::new();
+
+    while let Some((repository_root, is_search_root)) = pending_roots.pop() {
+        let mut walker = WalkBuilder::new(&repository_root);
+        walker
+            .hidden(false)
+            .require_git(false)
+            .sort_by_file_name(|left, right| left.cmp(right));
+        if !is_search_root {
+            walker.parents(false);
+        }
+        for entry in walker.build() {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let entry_path = entry.path();
+            if entry_path == repository_root {
+                continue;
+            }
+            candidates.insert(entry_path.to_owned());
+            if entry.file_type().is_some_and(|kind| kind.is_dir())
+                && entry_path.join(".git").exists()
+                && visited_roots.insert(entry_path.to_owned())
+            {
+                pending_roots.push((entry_path.to_owned(), false));
+            }
+        }
+    }
+
+    candidates.into_iter().collect()
+}
+
 fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let FindInput {
         pattern,
@@ -1142,20 +1177,10 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     }
 
     let mut results = Vec::new();
-    let mut walker = WalkBuilder::new(&path);
-    walker
-        .hidden(false)
-        .require_git(false)
-        .sort_by_file_name(|left, right| left.cmp(right));
-    for entry in walker.build() {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let entry_path = entry.path();
-        if entry_path == path {
-            continue;
-        }
-        let relative = entry_path.strip_prefix(&path).unwrap_or(entry_path);
+    let mut candidates = find_candidates_with_nested_repositories(&path);
+    candidates.sort();
+    for entry_path in candidates {
+        let relative = entry_path.strip_prefix(&path).unwrap_or(&entry_path);
         let mut display = relative.to_string_lossy().replace('\\', "/");
         let matches = pattern.is_match(&display)
             || relative
@@ -1167,7 +1192,7 @@ fn find_files(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
         if results.len() >= limit {
             break;
         }
-        if entry.file_type().is_some_and(|kind| kind.is_dir()) {
+        if entry_path.is_dir() {
             display.push('/');
         }
         results.push(display);
