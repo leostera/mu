@@ -1611,6 +1611,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("new", "Start a new session"),
     ("clear", "Start a fresh session"),
     ("clone", "Clone the current session"),
+    ("name", "Set the current session display name"),
     ("export", "Export the current session as JSONL"),
     ("import", "Import and resume a JSONL session"),
     ("mcp", "Show MCP server status"),
@@ -1697,6 +1698,38 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 .unwrap_or(0);
             app.model_selector_open = true;
         }
+        "name" => match agent.try_lock() {
+            Ok(mut agent) if !argument.is_empty() => match agent.name_session(argument) {
+                Ok(()) => app.messages.push(Message {
+                    role: Role::Assistant,
+                    text: format!("Session named: {}", argument.trim()),
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    error: false,
+                }),
+                Err(error) => app.messages.push(Message {
+                    role: Role::Assistant,
+                    text: format!("Could not name session: {error}"),
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    error: true,
+                }),
+            },
+            Ok(_) => app.messages.push(Message {
+                role: Role::Assistant,
+                text: "Usage: /name <session name>".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: true,
+            }),
+            Err(_) => app.messages.push(Message {
+                role: Role::Assistant,
+                text: "Could not name session while Mu is busy.".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: true,
+            }),
+        },
         "export" => match agent.try_lock() {
             Ok(agent) if !argument.is_empty() => {
                 let path = std::path::Path::new(argument);
@@ -1776,7 +1809,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         "help" => app.messages.push(Message {
             role: Role::Assistant,
-            text: "Commands: /help, /model, /mcp, /new, /clear, /clone, /export, /import, /quit"
+            text: "Commands: /help, /model, /mcp, /new, /clear, /clone, /name, /export, /import, /quit"
                 .into(),
             thinking: String::new(),
             tools: Vec::new(),
@@ -2414,7 +2447,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "model", "new", "clear", "clone", "export", "import", "mcp", "help", "quit",
+                "model", "new", "clear", "clone", "name", "export", "import", "mcp", "help",
+                "quit",
             ]
         );
     }
@@ -2431,6 +2465,13 @@ mod tests {
         ));
         let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
         let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.input = "/name test session".chars().collect();
+        execute_command(&mut app, &agent);
+        assert_eq!(
+            app.messages.last().unwrap().text,
+            "Session named: test session"
+        );
+
         app.input = format!("/export {}", path.display()).chars().collect();
         execute_command(&mut app, &agent);
         assert!(path.is_file());

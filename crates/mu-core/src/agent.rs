@@ -2129,6 +2129,20 @@ impl MuAgent {
         &self.session_path
     }
 
+    pub fn name_session(&mut self, name: &str) -> Result<(), AgentError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AgentError::Session("Session name must not be empty".into()));
+        }
+        let mut session = self.session.clone();
+        session.append_session_name(name);
+        if self.persist_session {
+            write_session(&session, &self.session_path)?;
+        }
+        self.session = session;
+        Ok(())
+    }
+
     /// Start a fresh Pi-format session while preserving this agent's provider and settings.
     pub fn export_session(&self, path: &Path) -> Result<(), AgentError> {
         if path
@@ -2828,6 +2842,11 @@ mod tests {
         assert_eq!(agent.session.header().unwrap().id.as_str(), clone_id);
         assert_eq!(agent.session.active_branch_entries().len(), entry_count);
         assert_eq!(agent.session_path(), export_path);
+        agent.name_session("  Refactor session  ").unwrap();
+        assert_eq!(agent.session.session_name(), Some("Refactor session"));
+        let (saved_session, _) = load_session(&export_path).unwrap();
+        assert_eq!(saved_session.session_name(), Some("Refactor session"));
+        assert!(agent.name_session("  ").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
