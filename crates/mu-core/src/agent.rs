@@ -2130,6 +2130,29 @@ impl MuAgent {
     }
 
     /// Start a fresh Pi-format session while preserving this agent's provider and settings.
+    pub fn export_session(&self, path: &Path) -> Result<(), AgentError> {
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
+            return Err(AgentError::Session(
+                "Only Pi-compatible .jsonl session export is supported".into(),
+            ));
+        }
+        write_session(&self.session, path)
+    }
+
+    pub fn import_session(&mut self, path: &Path) -> Result<(), AgentError> {
+        let (session, history) = load_session(path)?;
+        self.session = session;
+        self.history = history;
+        self.session_path = path.to_owned();
+        self.persist_session = true;
+        self.active_mcp_tools = session_active_mcp_tools(&self.session);
+        self.prompt_queue.clear();
+        Ok(())
+    }
+
     pub fn clone_session(&mut self) -> Result<(), AgentError> {
         if !self.persist_session {
             return Err(AgentError::Session(
@@ -2795,6 +2818,16 @@ mod tests {
         assert_eq!(agent.session.active_branch_entries().len(), entry_count);
         assert!(agent.session_path().is_file());
         assert_ne!(agent.session_path(), original_path);
+
+        let clone_id = cloned_header.id.as_str().to_owned();
+        let export_path = root.join("export.jsonl");
+        assert!(agent.export_session(&root.join("export.html")).is_err());
+        agent.export_session(&export_path).unwrap();
+        agent.start_new_session().unwrap();
+        agent.import_session(&export_path).unwrap();
+        assert_eq!(agent.session.header().unwrap().id.as_str(), clone_id);
+        assert_eq!(agent.session.active_branch_entries().len(), entry_count);
+        assert_eq!(agent.session_path(), export_path);
         std::fs::remove_dir_all(root).unwrap();
     }
 

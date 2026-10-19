@@ -1611,6 +1611,8 @@ const COMMANDS: &[(&str, &str)] = &[
     ("new", "Start a new session"),
     ("clear", "Start a fresh session"),
     ("clone", "Clone the current session"),
+    ("export", "Export the current session as JSONL"),
+    ("import", "Import and resume a JSONL session"),
     ("mcp", "Show MCP server status"),
     ("help", "Show available commands"),
     ("quit", "Exit Mu"),
@@ -1626,10 +1628,11 @@ fn filtered_commands(app: &App) -> Vec<&'static (&'static str, &'static str)> {
 
 fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
     let input = app.input_text();
-    let command = input
-        .trim_start_matches('/')
-        .split_whitespace()
-        .next()
+    let command_line = input.trim_start_matches('/');
+    let command = command_line.split_whitespace().next().unwrap_or_default();
+    let argument = command_line
+        .split_once(' ')
+        .map(|(_, argument)| argument.trim())
         .unwrap_or_default();
     app.composer.clear();
     app.command_menu_open = false;
@@ -1694,6 +1697,70 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 .unwrap_or(0);
             app.model_selector_open = true;
         }
+        "export" => match agent.try_lock() {
+            Ok(agent) if !argument.is_empty() => {
+                let path = std::path::Path::new(argument);
+                let (text, error) = match agent.export_session(path) {
+                    Ok(()) => (format!("Exported session to {}", path.display()), false),
+                    Err(error) => (format!("Could not export session: {error}"), true),
+                };
+                app.messages.push(Message {
+                    role: Role::Assistant,
+                    text,
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    error,
+                });
+            }
+            Ok(_) => app.messages.push(Message {
+                role: Role::Assistant,
+                text: "Usage: /export <path.jsonl>".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: true,
+            }),
+            Err(_) => app.messages.push(Message {
+                role: Role::Assistant,
+                text: "Could not export session while Mu is busy.".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: true,
+            }),
+        },
+        "import" => match agent.try_lock() {
+            Ok(mut agent) if !argument.is_empty() => {
+                let (text, error) = match agent.import_session(std::path::Path::new(argument)) {
+                    Ok(()) => {
+                        app.messages.clear();
+                        app.queued_prompts.clear();
+                        app.session_path = agent.session_path().display().to_string();
+                        (format!("Imported session from {}", argument), false)
+                    }
+                    Err(error) => (format!("Could not import session: {error}"), true),
+                };
+                app.messages.push(Message {
+                    role: Role::Assistant,
+                    text,
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    error,
+                });
+            }
+            Ok(_) => app.messages.push(Message {
+                role: Role::Assistant,
+                text: "Usage: /import <path.jsonl>".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: true,
+            }),
+            Err(_) => app.messages.push(Message {
+                role: Role::Assistant,
+                text: "Could not import session while Mu is busy.".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: true,
+            }),
+        },
         "mcp" => {
             let text = agent
                 .try_lock()
@@ -1709,7 +1776,8 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         "help" => app.messages.push(Message {
             role: Role::Assistant,
-            text: "Commands: /help, /model, /mcp, /new, /clear, /clone, /quit".into(),
+            text: "Commands: /help, /model, /mcp, /new, /clear, /clone, /export, /import, /quit"
+                .into(),
             thinking: String::new(),
             tools: Vec::new(),
             error: false,
@@ -2345,7 +2413,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            ["model", "new", "clear", "clone", "mcp", "help", "quit"]
+            [
+                "model", "new", "clear", "clone", "export", "import", "mcp", "help", "quit",
+            ]
         );
     }
 
