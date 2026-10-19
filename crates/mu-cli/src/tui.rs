@@ -2334,8 +2334,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 mod tests {
     use super::{
         AgentEvent, App, Composer, ComposerAction, Message, Role, ToolActivity, UiEvent,
-        filtered_commands, handle_key, handle_mouse, handle_startup_key, insert_char, render,
-        skill_name, tool_label, tool_output_visible,
+        execute_command, filtered_commands, handle_key, handle_mouse, handle_startup_key,
+        insert_char, render, skill_name, tool_label, tool_output_visible,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use mu_core::{MuAgent, PromptBehavior};
@@ -2417,6 +2417,42 @@ mod tests {
                 "model", "new", "clear", "clone", "export", "import", "mcp", "help", "quit",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn export_and_import_commands_round_trip_a_jsonl_session() {
+        let path = std::env::temp_dir().join(format!(
+            "mu-tui-session-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.input = format!("/export {}", path.display()).chars().collect();
+        execute_command(&mut app, &agent);
+        assert!(path.is_file());
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .text
+                .starts_with("Exported session to")
+        );
+
+        app.input = format!("/import {}", path.display()).chars().collect();
+        execute_command(&mut app, &agent);
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .text
+                .starts_with("Imported session from")
+        );
+        assert_eq!(app.session_path, path.display().to_string());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
