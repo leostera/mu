@@ -2129,6 +2129,20 @@ impl MuAgent {
         &self.session_path
     }
 
+    pub fn session_info(&self) -> SessionInfo {
+        let header = self.session.header();
+        SessionInfo {
+            id: header
+                .map(|header| header.id.as_str().to_owned())
+                .unwrap_or_default(),
+            name: self.session.session_name().map(str::to_owned),
+            path: self.session_path.clone(),
+            timestamp: header
+                .map(|header| header.timestamp.as_str().to_owned())
+                .unwrap_or_default(),
+        }
+    }
+
     pub fn name_session(&mut self, name: &str) -> Result<(), AgentError> {
         let name = name.trim();
         if name.is_empty() {

@@ -1612,6 +1612,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("clear", "Start a fresh session"),
     ("clone", "Clone the current session"),
     ("name", "Set the current session display name"),
+    ("session", "Show current session info"),
     ("export", "Export the current session as JSONL"),
     ("import", "Import and resume a JSONL session"),
     ("mcp", "Show MCP server status"),
@@ -1730,6 +1731,28 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "session" => {
+            let text = agent
+                .try_lock()
+                .map(|agent| {
+                    let info = agent.session_info();
+                    format!(
+                        "Session: {}\nName: {}\nFile: {}\nCreated: {}",
+                        info.id,
+                        info.name.as_deref().unwrap_or("(unnamed)"),
+                        info.path.display(),
+                        info.timestamp
+                    )
+                })
+                .unwrap_or_else(|_| "Session info is unavailable while Mu is busy.".into());
+            app.messages.push(Message {
+                role: Role::Assistant,
+                text,
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: false,
+            });
+        }
         "export" => match agent.try_lock() {
             Ok(agent) if !argument.is_empty() => {
                 let path = std::path::Path::new(argument);
@@ -1809,7 +1832,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         "help" => app.messages.push(Message {
             role: Role::Assistant,
-            text: "Commands: /help, /model, /mcp, /new, /clear, /clone, /name, /export, /import, /quit"
+            text: "Commands: /help, /model, /mcp, /new, /clear, /clone, /name, /session, /export, /import, /quit"
                 .into(),
             thinking: String::new(),
             tools: Vec::new(),
@@ -2447,8 +2470,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "model", "new", "clear", "clone", "name", "export", "import", "mcp", "help",
-                "quit",
+                "model", "new", "clear", "clone", "name", "session", "export", "import", "mcp",
+                "help", "quit",
             ]
         );
     }
@@ -2470,6 +2493,15 @@ mod tests {
         assert_eq!(
             app.messages.last().unwrap().text,
             "Session named: test session"
+        );
+        app.input = "/session".chars().collect();
+        execute_command(&mut app, &agent);
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("Name: test session")
         );
 
         app.input = format!("/export {}", path.display()).chars().collect();
