@@ -372,6 +372,26 @@ fn skill_commands_enabled(agent_dir: &Path, cwd: &Path) -> bool {
     configured_setting(agent_dir, cwd, "enableSkillCommands", Value::as_bool).unwrap_or(true)
 }
 
+fn configured_bash_shell_path(agent_dir: &Path, cwd: &Path) -> Option<String> {
+    let configured = shell_setting(agent_dir, cwd, "shellPath")?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let path = match home {
+        Some(home) if configured == "~" => home,
+        Some(home) if configured.starts_with("~/") || configured.starts_with("~\\") => {
+            home.join(&configured[2..])
+        }
+        _ => PathBuf::from(configured),
+    };
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    Some(path.to_string_lossy().into_owned())
+}
+
 fn config() -> Result<Config, AgentError> {
     let cwd = std::env::current_dir()?;
     let home = std::env::var_os("HOME")
@@ -2152,7 +2172,7 @@ impl MuAgent {
         if let Some(prefix) = shell_setting(&self.agent_dir, &self.cwd, "shellCommandPrefix") {
             environment.insert(crate::tools::SHELL_COMMAND_PREFIX_ENV.into(), prefix);
         }
-        if let Some(path) = shell_setting(&self.agent_dir, &self.cwd, "shellPath") {
+        if let Some(path) = configured_bash_shell_path(&self.agent_dir, &self.cwd) {
             environment.insert(crate::tools::BASH_SHELL_PATH_ENV.into(), path);
         }
         environment
@@ -2638,7 +2658,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             project_dir.join("settings.json"),
-            r#"{"shellCommandPrefix":"project setup","shellPath":"/project/bash","enableSkillCommands":false}"#,
+            r#"{"shellCommandPrefix":"project setup","shellPath":"bin/bash","enableSkillCommands":false}"#,
         )
         .unwrap();
         assert_eq!(
@@ -2647,8 +2667,8 @@ mod tests {
             Some("project setup")
         );
         assert_eq!(
-            super::shell_setting(&agent_dir, &root.join("project"), "shellPath").as_deref(),
-            Some("/project/bash")
+            super::configured_bash_shell_path(&agent_dir, &root.join("project")).as_deref(),
+            Some(root.join("project/bin/bash").to_string_lossy().as_ref())
         );
         assert!(!super::skill_commands_enabled(
             &agent_dir,
