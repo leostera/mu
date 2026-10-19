@@ -88,6 +88,7 @@ impl ToolSelection {
 pub struct SessionInfo {
     pub id: String,
     pub name: Option<String>,
+    pub preview: Option<String>,
     pub path: PathBuf,
     pub timestamp: String,
 }
@@ -1377,6 +1378,45 @@ fn load_session(path: &Path) -> Result<(SessionDocument, Vec<Value>), AgentError
     Ok((session, history))
 }
 
+fn session_preview(session: &SessionDocument) -> Option<String> {
+    let content = session
+        .active_branch_entries()
+        .into_iter()
+        .rev()
+        .filter(|entry| entry.entry_type.as_str() == "message")
+        .find_map(|entry| {
+            let message = entry.extra_fields().get("message")?;
+            (message.get("role")?.as_str()? == "user")
+                .then(|| message.get("content"))
+                .flatten()
+        })?;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                let kind = block.get("type")?.as_str()?;
+                matches!(kind, "text" | "input_text" | "output_text")
+                    .then(|| block.get("text")?.as_str())
+                    .flatten()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    };
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut chars = normalized.chars();
+    let preview = chars.by_ref().take(160).collect::<String>();
+    Some(if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    })
+}
+
 fn session_history(session: &SessionDocument) -> Vec<Value> {
     let mut history = Vec::new();
     for entry in session.active_branch_entries() {
@@ -2144,6 +2184,7 @@ impl MuAgent {
                 .map(|header| header.id.as_str().to_owned())
                 .unwrap_or_default(),
             name: self.session.session_name().map(str::to_owned),
+            preview: session_preview(&self.session),
             path: self.session_path.clone(),
             timestamp: header
                 .map(|header| header.timestamp.as_str().to_owned())
@@ -2656,6 +2697,7 @@ pub fn list_sessions_for_current_cwd(
                 Some(SessionInfo {
                     id: header.get("id")?.as_str()?.to_owned(),
                     name: document.session_name().map(str::to_owned),
+                    preview: session_preview(&document),
                     path,
                     timestamp: header.get("timestamp")?.as_str()?.to_owned(),
                 })
@@ -2774,13 +2816,31 @@ mod tests {
         AgentPromptQueue, FunctionCall, PromptBehavior, Reply, TerminalResponse, configured_models,
         execute_in_parallel, find_session_id_path, latest_session_path, load_session,
         merge_final_response_text, resolve_session_options, response_message_text,
-        session_active_mcp_tools, session_codemode_store, session_history, trusted_url,
-        validate_session_id,
+        session_active_mcp_tools, session_codemode_store, session_history, session_preview,
+        trusted_url, validate_session_id,
     };
     use super::{Config, SessionOptions};
     use mu_session::{AssistantToolResponse, MessageUsage, SessionDocument, ToolCallRecord};
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn session_preview_uses_the_latest_user_text_and_compacts_whitespace() {
+        let mut session = SessionDocument::new("/tmp/project");
+        session.append_user_text("earlier prompt");
+        session.append_user_text("  latest\n prompt   text  ");
+        assert_eq!(
+            session_preview(&session).as_deref(),
+            Some("latest prompt text")
+        );
+
+        let long_prompt = "x".repeat(200);
+        session.append_user_text(&long_prompt);
+        assert_eq!(
+            session_preview(&session).unwrap(),
+            format!("{}…", "x".repeat(160))
+        );
+    }
 
     #[test]
     fn project_shell_command_prefix_overrides_agent_settings() {

@@ -259,11 +259,16 @@ fn select_session(
             let title = session.name.as_deref().unwrap_or(&session.id);
             writeln!(
                 output,
-                "  {}. {}  [{}]  {}",
+                "  {}. {}  [{}]  {}{}",
                 index + 1,
                 title,
                 session.id,
-                session.timestamp
+                session.timestamp,
+                session
+                    .preview
+                    .as_deref()
+                    .map(|preview| format!("  — {preview}"))
+                    .unwrap_or_default()
             )?;
         }
         write!(
@@ -298,6 +303,10 @@ fn select_session(
                         .name
                         .as_deref()
                         .is_some_and(|name| name.to_lowercase().contains(&query))
+                    || session
+                        .preview
+                        .as_deref()
+                        .is_some_and(|preview| preview.to_lowercase().contains(&query))
             })
             .collect();
         if visible.is_empty() {
@@ -430,12 +439,14 @@ mod tests {
             mu_core::SessionInfo {
                 id: "first".into(),
                 name: Some("First session".into()),
+                preview: Some("Refactor the session picker".into()),
                 path: PathBuf::from("/tmp/first.jsonl"),
                 timestamp: "2025-01-01T00:00:00Z".into(),
             },
             mu_core::SessionInfo {
                 id: "second".into(),
                 name: None,
+                preview: None,
                 path: PathBuf::from("/tmp/second.jsonl"),
                 timestamp: "2025-01-02T00:00:00Z".into(),
             },
@@ -453,6 +464,16 @@ mod tests {
         let search_output = String::from_utf8(search_output).unwrap();
         assert!(search_output.contains("Choose a session"));
         assert!(search_output.contains("second"));
+        let mut preview_output = Vec::new();
+        assert_eq!(
+            select_session(&sessions, &mut &b"picker\n1\n"[..], &mut preview_output).unwrap(),
+            Some(PathBuf::from("/tmp/first.jsonl"))
+        );
+        assert!(
+            String::from_utf8(preview_output)
+                .unwrap()
+                .contains("Refactor the session picker")
+        );
         assert!(
             select_session(&sessions, &mut &b"q\n"[..], &mut output)
                 .unwrap()
