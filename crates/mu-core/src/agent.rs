@@ -1614,11 +1614,15 @@ fn latest_session_path(
 }
 
 fn session_path(c: &Config, override_dir: Option<&Path>) -> PathBuf {
-    let dir = session_directory(&c.agent_dir, &c.cwd, override_dir);
-    let ts = chrono::Utc::now()
+    new_session_path(&c.agent_dir, &c.cwd, override_dir)
+}
+
+fn new_session_path(agent_dir: &Path, cwd: &Path, override_dir: Option<&Path>) -> PathBuf {
+    let dir = session_directory(agent_dir, cwd, override_dir);
+    let timestamp = chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         .replace([':', '.'], "-");
-    dir.join(format!("{ts}_{}.jsonl", uuid::Uuid::new_v4()))
+    dir.join(format!("{timestamp}_{}.jsonl", uuid::Uuid::new_v4()))
 }
 
 fn resolve_session_options(
@@ -2126,6 +2130,32 @@ impl MuAgent {
     }
 
     /// Start a fresh Pi-format session while preserving this agent's provider and settings.
+    pub fn clone_session(&mut self) -> Result<(), AgentError> {
+        if !self.persist_session {
+            return Err(AgentError::Session(
+                "Cannot clone a session that is not persisted to disk".into(),
+            ));
+        }
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let new_session = self
+            .session
+            .fork_with_id(
+                self.cwd.to_string_lossy().into_owned(),
+                new_id,
+                self.session_path.to_string_lossy().into_owned(),
+            )
+            .ok_or_else(|| AgentError::Session("Current session has no header".into()))?;
+        let new_path = new_session_path(&self.agent_dir, &self.cwd, None);
+        write_session(&new_session, &new_path)?;
+
+        self.session = new_session;
+        self.history = session_history(&self.session);
+        self.session_path = new_path;
+        self.active_mcp_tools = session_active_mcp_tools(&self.session);
+        self.prompt_queue.clear();
+        Ok(())
+    }
+
     pub fn start_new_session(&mut self) -> Result<(), AgentError> {
         let parent = self.session_path.parent().ok_or_else(|| {
             AgentError::Session("current session path has no parent directory".into())
@@ -2727,6 +2757,44 @@ mod tests {
             &root.join("missing-agent"),
             &root
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cloning_session_copies_the_active_branch_to_a_new_file() {
+        let root = std::env::temp_dir().join(format!("mu-session-clone-{}", uuid::Uuid::new_v4()));
+        let cwd = root.join("project");
+        let agent_dir = root.join("agent");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let config = super::Config {
+            agent_dir,
+            cwd: cwd.clone(),
+            provider: "demo".into(),
+            model: "demo".into(),
+            model_choices: vec!["demo".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
+        };
+        let mut agent = super::MuAgent::demo_from_config(config).unwrap();
+        agent.session.append_user_text("keep this turn");
+        agent.save_session().unwrap();
+        let original_path = agent.session_path().to_owned();
+        let original_id = agent.session.header().unwrap().id.as_str().to_owned();
+        let entry_count = agent.session.active_branch_entries().len();
+
+        agent.clone_session().unwrap();
+
+        let cloned_header = agent.session.header().unwrap();
+        assert_ne!(cloned_header.id.as_str(), original_id);
+        assert_eq!(
+            cloned_header.parent_session.as_deref(),
+            Some(original_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(agent.session.active_branch_entries().len(), entry_count);
+        assert!(agent.session_path().is_file());
+        assert_ne!(agent.session_path(), original_path);
         std::fs::remove_dir_all(root).unwrap();
     }
 

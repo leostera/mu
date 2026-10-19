@@ -1610,6 +1610,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("model", "Select model (opens selector UI)"),
     ("new", "Start a new session"),
     ("clear", "Start a fresh session"),
+    ("clone", "Clone the current session"),
     ("mcp", "Show MCP server status"),
     ("help", "Show available commands"),
     ("quit", "Exit Mu"),
@@ -1657,6 +1658,34 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "clone" => match agent.try_lock() {
+            Ok(mut agent) => match agent.clone_session() {
+                Ok(()) => {
+                    app.session_path = agent.session_path().display().to_string();
+                    app.messages.push(Message {
+                        role: Role::Assistant,
+                        text: format!("Cloned session to {}", app.session_path),
+                        thinking: String::new(),
+                        tools: Vec::new(),
+                        error: false,
+                    });
+                }
+                Err(error) => app.messages.push(Message {
+                    role: Role::Assistant,
+                    text: format!("Could not clone session: {error}"),
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                    error: true,
+                }),
+            },
+            Err(_) => app.messages.push(Message {
+                role: Role::Assistant,
+                text: "Could not clone session while Mu is busy.".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: true,
+            }),
+        },
         "model" => {
             app.model_selection = app
                 .models
@@ -1680,7 +1709,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         "help" => app.messages.push(Message {
             role: Role::Assistant,
-            text: "Commands: /help, /model, /mcp, /new, /clear, /quit".into(),
+            text: "Commands: /help, /model, /mcp, /new, /clear, /clone, /quit".into(),
             thinking: String::new(),
             tools: Vec::new(),
             error: false,
@@ -2314,7 +2343,10 @@ mod tests {
             .into_iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["model", "new", "clear", "mcp", "help", "quit"]);
+        assert_eq!(
+            names,
+            ["model", "new", "clear", "clone", "mcp", "help", "quit"]
+        );
     }
 
     #[tokio::test]
