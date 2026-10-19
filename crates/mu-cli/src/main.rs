@@ -84,7 +84,7 @@ struct Cli {
     #[arg(short = 'n', long)]
     name: Option<String>,
 
-    /// Enable a comma-separated list of tools or apply +name/-name modifiers.
+    /// Enable coding, read-only, or all tools; use names/patterns or ordered +name/-name modifiers.
     #[arg(short = 't', long, value_delimiter = ',')]
     tools: Option<Vec<String>>,
 

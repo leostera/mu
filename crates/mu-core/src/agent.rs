@@ -49,7 +49,23 @@ impl ToolSelection {
             .iter()
             .any(|entry| entry.starts_with('+') || entry.starts_with('-'));
         if !contains_modifier {
-            return Ok(Self::Allowlist(entries));
+            let mut patterns = Vec::new();
+            for entry in entries {
+                let loadout: &[&str] = match entry.as_str() {
+                    "coding" => &["read", "bash", "edit", "write"],
+                    "read-only" => &["read", "grep", "find", "ls"],
+                    "all" => &["*"],
+                    _ => &[],
+                };
+                if loadout.is_empty() {
+                    patterns.push(entry);
+                } else {
+                    patterns.extend(loadout.iter().map(|name| (*name).to_owned()));
+                }
+            }
+            let mut seen = HashSet::new();
+            patterns.retain(|pattern| seen.insert(pattern.clone()));
+            return Ok(Self::Allowlist(patterns));
         }
         if entries
             .iter()
@@ -3449,6 +3465,34 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(super::ToolSelection::parse(vec!["read".into(), "+grep".into()]).is_err());
+        assert_eq!(
+            super::apply_tool_selection(
+                &defaults,
+                &super::ToolSelection::parse(vec!["coding".into()]).unwrap(),
+            ),
+            ["read", "bash", "edit", "write"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            super::apply_tool_selection(
+                &defaults,
+                &super::ToolSelection::parse(vec!["read-only".into()]).unwrap(),
+            ),
+            ["read", "grep", "find", "ls"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            super::apply_tool_selection(
+                &defaults,
+                &super::ToolSelection::parse(vec!["all".into()]).unwrap(),
+            )
+            .len(),
+            8
+        );
         let definitions = vec![
             serde_json::json!({"name":"read"}),
             serde_json::json!({"name":"mcp__docs__search"}),
