@@ -12,7 +12,9 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use mu_core::{AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior};
+use mu_core::{
+    AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior, SessionTranscriptRole,
+};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -1053,6 +1055,31 @@ impl App {
         self.prompt_queue = agent.prompt_queue();
         self.hide_thinking = agent.hide_thinking_block();
         self.models = agent.model_choices().to_vec();
+        self.messages.messages = agent
+            .session_transcript()
+            .into_iter()
+            .map(|message| Message {
+                role: match message.role {
+                    SessionTranscriptRole::User => Role::User,
+                    SessionTranscriptRole::Assistant => Role::Assistant,
+                },
+                text: message.text,
+                thinking: message.thinking,
+                tools: message
+                    .tools
+                    .into_iter()
+                    .map(|tool| ToolActivity {
+                        call_id: tool.call_id,
+                        name: tool.name,
+                        arguments: tool.arguments,
+                        output: tool.output,
+                        error: tool.is_error,
+                    })
+                    .collect(),
+                error: false,
+            })
+            .collect();
+        self.messages.scroll.scroll_to_end();
         self.model_selection = self
             .models
             .iter()
@@ -1787,9 +1814,9 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             Ok(mut agent) if !argument.is_empty() => {
                 let (text, error) = match agent.import_session(std::path::Path::new(argument)) {
                     Ok(()) => {
-                        app.messages.clear();
                         app.queued_prompts.clear();
                         app.session_path = agent.session_path().display().to_string();
+                        app.apply_agent_metadata(&agent);
                         (format!("Imported session from {}", argument), false)
                     }
                     Err(error) => (format!("Could not import session: {error}"), true),

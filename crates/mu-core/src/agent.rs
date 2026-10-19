@@ -109,6 +109,29 @@ pub struct SessionInfo {
     pub timestamp: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionTranscriptRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionTranscriptTool {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: Value,
+    pub output: Option<String>,
+    pub is_error: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionTranscriptMessage {
+    pub role: SessionTranscriptRole,
+    pub text: String,
+    pub thinking: String,
+    pub tools: Vec<SessionTranscriptTool>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionOptions {
     pub path: Option<PathBuf>,
@@ -1394,6 +1417,114 @@ fn load_session(path: &Path) -> Result<(SessionDocument, Vec<Value>), AgentError
     Ok((session, history))
 }
 
+fn session_transcript(session: &SessionDocument) -> Vec<SessionTranscriptMessage> {
+    let mut transcript: Vec<SessionTranscriptMessage> = Vec::new();
+    for entry in session.active_branch_entries() {
+        let Some(message) = entry
+            .extra_fields()
+            .get("message")
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let blocks = message
+            .get("content")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        match role {
+            "user" => {
+                let text = blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    transcript.push(SessionTranscriptMessage {
+                        role: SessionTranscriptRole::User,
+                        text,
+                        thinking: String::new(),
+                        tools: Vec::new(),
+                    });
+                }
+            }
+            "assistant" => {
+                let mut text = Vec::new();
+                let mut thinking = Vec::new();
+                let mut tools = Vec::new();
+                for block in blocks {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(value) = block.get("text").and_then(Value::as_str) {
+                                text.push(value);
+                            }
+                        }
+                        Some("thinking") => {
+                            if let Some(value) = block.get("thinking").and_then(Value::as_str) {
+                                thinking.push(value);
+                            }
+                        }
+                        Some("toolCall") => {
+                            let (Some(call_id), Some(name)) = (
+                                block.get("id").and_then(Value::as_str),
+                                block.get("name").and_then(Value::as_str),
+                            ) else {
+                                continue;
+                            };
+                            tools.push(SessionTranscriptTool {
+                                call_id: call_id.to_owned(),
+                                name: name.to_owned(),
+                                arguments: block.get("arguments").cloned().unwrap_or(Value::Null),
+                                output: None,
+                                is_error: false,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                let text = text.join("\n");
+                let thinking = thinking.join("\n");
+                if !text.is_empty() || !thinking.is_empty() || !tools.is_empty() {
+                    transcript.push(SessionTranscriptMessage {
+                        role: SessionTranscriptRole::Assistant,
+                        text,
+                        thinking,
+                        tools,
+                    });
+                }
+            }
+            "toolResult" => {
+                let Some(call_id) = message.get("toolCallId").and_then(Value::as_str) else {
+                    continue;
+                };
+                let output = blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if let Some(tool) = transcript
+                    .iter_mut()
+                    .rev()
+                    .flat_map(|message| message.tools.iter_mut())
+                    .find(|tool| tool.call_id == call_id)
+                {
+                    tool.output = Some(output);
+                    tool.is_error = message
+                        .get("isError")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                }
+            }
+            _ => {}
+        }
+    }
+    transcript
+}
+
 fn session_preview(session: &SessionDocument) -> Option<String> {
     let content = session
         .active_branch_entries()
@@ -2193,6 +2324,10 @@ impl MuAgent {
         &self.session_path
     }
 
+    pub fn session_transcript(&self) -> Vec<SessionTranscriptMessage> {
+        session_transcript(&self.session)
+    }
+
     pub fn session_info(&self) -> SessionInfo {
         let header = self.session.header();
         SessionInfo {
@@ -2833,12 +2968,63 @@ mod tests {
         execute_in_parallel, find_session_id_path, latest_session_path, load_session,
         merge_final_response_text, resolve_session_options, response_message_text,
         session_active_mcp_tools, session_codemode_store, session_history, session_preview,
-        trusted_url, validate_session_id,
+        session_transcript, trusted_url, validate_session_id,
     };
     use super::{Config, SessionOptions};
-    use mu_session::{AssistantToolResponse, MessageUsage, SessionDocument, ToolCallRecord};
+    use mu_session::{
+        AssistantToolResponse, AssistantTurnResponse, MessageUsage, SessionDocument, ToolCallRecord,
+    };
     use serde_json::Value;
     use std::path::Path;
+
+    #[test]
+    fn session_transcript_reconstructs_text_thinking_and_completed_tools() {
+        let mut session = SessionDocument::new("/tmp/project");
+        session.append_user_text("Run the command");
+        session.append_assistant_tool_calls(
+            "openai-responses",
+            "provider",
+            "model",
+            AssistantToolResponse {
+                thinking: "Checking first".into(),
+                thinking_signature: None,
+                text: "I will inspect this.".into(),
+                calls: vec![ToolCallRecord {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command":"pwd"}),
+                }],
+                usage: MessageUsage::default(),
+            },
+        );
+        session.append_tool_result("call-1", "bash", "success: /tmp/project".into(), true);
+        session.append_assistant_response(
+            "openai-responses",
+            "provider",
+            "model",
+            AssistantTurnResponse {
+                thinking: String::new(),
+                thinking_signature: None,
+                text: "Done.".into(),
+                usage: MessageUsage::default(),
+            },
+        );
+
+        let transcript = session_transcript(&session);
+        assert_eq!(transcript.len(), 3);
+        assert_eq!(transcript[0].role, super::SessionTranscriptRole::User);
+        assert_eq!(transcript[0].text, "Run the command");
+        assert_eq!(transcript[1].role, super::SessionTranscriptRole::Assistant);
+        assert_eq!(transcript[1].thinking, "Checking first");
+        assert_eq!(transcript[1].text, "I will inspect this.");
+        assert_eq!(transcript[1].tools[0].name, "bash");
+        assert_eq!(
+            transcript[1].tools[0].output.as_deref(),
+            Some("success: /tmp/project")
+        );
+        assert!(transcript[1].tools[0].is_error);
+        assert_eq!(transcript[2].text, "Done.");
+    }
 
     #[test]
     fn session_preview_uses_the_latest_user_text_and_compacts_whitespace() {
