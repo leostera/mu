@@ -252,26 +252,27 @@ fn select_session(
         writeln!(output, "No sessions found for this working directory.")?;
         return Ok(None);
     }
-    writeln!(output, "Sessions:")?;
-    for (index, session) in sessions.iter().enumerate() {
-        let title = session.name.as_deref().unwrap_or(&session.id);
-        writeln!(
-            output,
-            "  {}. {}  [{}]  {}",
-            index + 1,
-            title,
-            session.id,
-            session.timestamp
-        )?;
-    }
-    write!(
-        output,
-        "Choose a session (1-{}, or q to cancel): ",
-        sessions.len()
-    )?;
-    output.flush()?;
-
+    let mut visible = sessions.iter().collect::<Vec<_>>();
     loop {
+        writeln!(output, "Sessions:")?;
+        for (index, session) in visible.iter().enumerate() {
+            let title = session.name.as_deref().unwrap_or(&session.id);
+            writeln!(
+                output,
+                "  {}. {}  [{}]  {}",
+                index + 1,
+                title,
+                session.id,
+                session.timestamp
+            )?;
+        }
+        write!(
+            output,
+            "Choose a session (1-{}, search text, or q to cancel): ",
+            visible.len()
+        )?;
+        output.flush()?;
+
         let mut choice = String::new();
         if input.read_line(&mut choice)? == 0 {
             return Ok(None);
@@ -283,15 +284,28 @@ fn select_session(
         if let Some(index) = choice
             .parse::<usize>()
             .ok()
-            .filter(|index| (1..=sessions.len()).contains(index))
+            .filter(|index| (1..=visible.len()).contains(index))
         {
-            return Ok(Some(sessions[index - 1].path.clone()));
+            return Ok(Some(visible[index - 1].path.clone()));
         }
-        writeln!(
-            output,
-            "Enter a number from 1 to {}, or q to cancel.",
-            sessions.len()
-        )?;
+
+        let query = choice.to_lowercase();
+        visible = sessions
+            .iter()
+            .filter(|session| {
+                session.id.to_lowercase().contains(&query)
+                    || session
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.to_lowercase().contains(&query))
+            })
+            .collect();
+        if visible.is_empty() {
+            writeln!(
+                output,
+                "No sessions match '{choice}'. Try another search or q to cancel."
+            )?;
+        }
     }
 }
 
@@ -431,6 +445,14 @@ mod tests {
             select_session(&sessions, &mut &b"2\n"[..], &mut output).unwrap(),
             Some(PathBuf::from("/tmp/second.jsonl"))
         );
+        let mut search_output = Vec::new();
+        assert_eq!(
+            select_session(&sessions, &mut &b"second\n1\n"[..], &mut search_output).unwrap(),
+            Some(PathBuf::from("/tmp/second.jsonl"))
+        );
+        let search_output = String::from_utf8(search_output).unwrap();
+        assert!(search_output.contains("Choose a session"));
+        assert!(search_output.contains("second"));
         assert!(
             select_session(&sessions, &mut &b"q\n"[..], &mut output)
                 .unwrap()
