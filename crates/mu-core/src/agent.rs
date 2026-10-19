@@ -2062,6 +2062,14 @@ impl MuAgent {
         &self.provider_id
     }
 
+    pub fn mcp_tools(&self) -> Vec<String> {
+        self.mcp
+            .codemode_definitions()
+            .into_iter()
+            .filter_map(|definition| definition.get("name")?.as_str().map(str::to_owned))
+            .collect()
+    }
+
     pub fn mcp_status(&self) -> String {
         self.mcp_startup
             .as_ref()

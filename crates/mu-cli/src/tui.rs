@@ -1615,7 +1615,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("session", "Show current session info"),
     ("export", "Export the current session as JSONL"),
     ("import", "Import and resume a JSONL session"),
-    ("mcp", "Show MCP server status"),
+    ("mcp", "Show MCP status or list connected tools"),
     ("help", "Show available commands"),
     ("quit", "Exit Mu"),
 ];
@@ -1818,16 +1818,29 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             }),
         },
         "mcp" => {
-            let text = agent
-                .try_lock()
-                .map(|agent| agent.mcp_status())
-                .unwrap_or_else(|_| "MCP status is unavailable while Mu is busy.".into());
+            let result = agent.try_lock().map(|agent| match argument {
+                "" | "status" => Ok(agent.mcp_status()),
+                "tools" => {
+                    let tools = agent.mcp_tools();
+                    if tools.is_empty() {
+                        Ok("No connected MCP tools. Use /mcp status to inspect servers.".into())
+                    } else {
+                        Ok(format!("MCP tools:\n{}", tools.join("\n")))
+                    }
+                }
+                _ => Err("Usage: /mcp [status|tools]".to_owned()),
+            });
+            let (text, error) = match result {
+                Ok(Ok(text)) => (text, false),
+                Ok(Err(message)) => (message, true),
+                Err(_) => ("MCP status is unavailable while Mu is busy.".into(), true),
+            };
             app.messages.push(Message {
                 role: Role::Assistant,
                 text,
                 thinking: String::new(),
                 tools: Vec::new(),
-                error: false,
+                error,
             });
         }
         "help" => app.messages.push(Message {
@@ -2502,6 +2515,15 @@ mod tests {
                 .unwrap()
                 .text
                 .contains("Name: test session")
+        );
+        app.input = "/mcp tools".chars().collect();
+        execute_command(&mut app, &agent);
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .text
+                .contains("No connected MCP tools")
         );
 
         app.input = format!("/export {}", path.display()).chars().collect();
