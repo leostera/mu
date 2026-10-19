@@ -3502,6 +3502,11 @@ mod tests {
             super::ToolSelection::parse(vec!["read".into(), "mcp__docs__*".into()]).unwrap();
         let allowlisted = super::filter_tool_definitions(definitions.clone(), &allowlist);
         assert_eq!(allowlisted.len(), 2);
+        let all = super::ToolSelection::parse(vec!["all".into()]).unwrap();
+        assert_eq!(
+            super::filter_tool_definitions(definitions.clone(), &all).len(),
+            definitions.len()
+        );
         let modifiers = super::ToolSelection::parse(vec!["-tool_search".into()]).unwrap();
         let modified = super::filter_tool_definitions(definitions, &modifiers);
         assert_eq!(modified.len(), 2);

@@ -1845,7 +1845,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         "help" => app.messages.push(Message {
             role: Role::Assistant,
-            text: "Commands: /help, /model, /mcp, /new, /clear, /clone, /name, /session, /export, /import, /quit"
+            text: "Commands: /help, /model, /mcp [status|tools], /new, /clear, /clone, /name, /session, /export, /import, /quit"
                 .into(),
             thinking: String::new(),
             tools: Vec::new(),
