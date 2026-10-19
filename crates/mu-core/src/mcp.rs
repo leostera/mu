@@ -1268,6 +1268,18 @@ mod tests {
     }
 
     #[test]
+    fn preserves_mcp_structured_content_with_tool_result() {
+        let result = parse_tool_result(json!({
+            "content":[{"type":"text","text":"answer"}],
+            "structuredContent":{"answer":42},
+            "isError":false
+        }))
+        .unwrap();
+        assert_eq!(result.content, "answer");
+        assert_eq!(result.structured_content, Some(json!({"answer":42})));
+    }
+
+    #[test]
     fn config_accepts_streamable_http_with_headers() {
         let root =
             std::env::temp_dir().join(format!("mu-mcp-http-config-{}", uuid::Uuid::new_v4()));

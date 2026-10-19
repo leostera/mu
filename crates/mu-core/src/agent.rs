@@ -142,6 +142,24 @@ struct FunctionCall {
     arguments: Value,
 }
 
+struct ToolExecutionResult {
+    output: String,
+    is_error: bool,
+    store_writes: Option<Value>,
+    details: Option<Value>,
+}
+
+impl ToolExecutionResult {
+    fn text(output: impl Into<String>, is_error: bool) -> Self {
+        Self {
+            output: output.into(),
+            is_error,
+            store_writes: None,
+            details: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PromptBehavior {
     Steer,
@@ -1736,9 +1754,14 @@ async fn execute_independent_tool(
     cwd: &Path,
     shell_environment: &HashMap<String, String>,
     call: &FunctionCall,
-) -> Result<(String, bool, Option<Value>), String> {
+) -> Result<ToolExecutionResult, String> {
     match mcp.call(&call.name, &call.arguments).await {
-        Some(Ok(result)) => Ok((result.content, result.is_error, None)),
+        Some(Ok(result)) => Ok(ToolExecutionResult {
+            output: result.content,
+            is_error: result.is_error,
+            store_writes: None,
+            details: result.structured_content,
+        }),
         Some(Err(error)) => Err(error),
         None => crate::tools::execute_with_environment(
             cwd,
@@ -1747,7 +1770,12 @@ async fn execute_independent_tool(
             shell_environment,
         )
         .await
-        .map(|result| (result.content, result.is_error, None))
+        .map(|result| ToolExecutionResult {
+            output: result.content,
+            is_error: result.is_error,
+            store_writes: None,
+            details: result.details.or(result.structured_content),
+        })
         .map_err(|error| error.to_string()),
     }
 }
@@ -2422,7 +2450,7 @@ impl MuAgent {
                                 );
                                 self.save_session()?;
                             }
-                            Ok((output, false, None))
+                            Ok(ToolExecutionResult::text(output, false))
                         }
                         None => Err("tool_search requires a non-empty query".into()),
                     }
@@ -2436,37 +2464,58 @@ impl MuAgent {
                         &self.shell_environment(),
                     )
                     .await
+                    .map(|(output, is_error, store_writes)| ToolExecutionResult {
+                        output,
+                        is_error,
+                        store_writes,
+                        details: None,
+                    })
                     .map_err(|error| error.to_string())
                 } else {
                     match self.mcp.call(&call.name, &call.arguments).await {
-                        Some(Ok(result)) => Ok((result.content, result.is_error, None)),
+                        Some(Ok(result)) => Ok(ToolExecutionResult {
+                            output: result.content,
+                            is_error: result.is_error,
+                            store_writes: None,
+                            details: result.structured_content,
+                        }),
                         Some(Err(error)) => Err(error),
                         None => self
                             .execute_tool(&call.name, &call.arguments)
                             .await
-                            .map(|result| (result.content, result.is_error, None))
+                            .map(|result| ToolExecutionResult {
+                                output: result.content,
+                                is_error: result.is_error,
+                                store_writes: None,
+                                details: result.details.or(result.structured_content),
+                            })
                             .map_err(|error| error.to_string()),
                     }
                 };
-                let (output, is_error, store_writes) = match result {
+                let result = match result {
                     Ok(result) => result,
-                    Err(error) => (error, true, None),
+                    Err(error) => ToolExecutionResult::text(error, true),
                 };
-                if let Some(store_writes) = store_writes {
+                if let Some(store_writes) = result.store_writes {
                     self.session
                         .append_custom_entry("codemode-store", store_writes);
                     self.save_session()?;
                 }
                 on_event(AgentEvent::ToolFinished {
                     call_id: call.call_id.clone(),
-                    output: output.clone(),
-                    is_error,
+                    output: result.output.clone(),
+                    is_error: result.is_error,
                 });
                 self.history.push(json!({
-                    "type":"function_call_output", "call_id":call.call_id, "output":output,
+                    "type":"function_call_output", "call_id":call.call_id, "output":result.output,
                 }));
-                self.session
-                    .append_tool_result(&call.call_id, &call.name, output, is_error);
+                self.session.append_tool_result_with_details(
+                    &call.call_id,
+                    &call.name,
+                    result.output,
+                    result.is_error,
+                    result.details,
+                );
                 self.save_session()?;
             }
             if let Some(steering) = self.prompt_queue.take_steering() {

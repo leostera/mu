@@ -450,15 +450,30 @@ impl SessionDocument {
         content: String,
         is_error: bool,
     ) {
+        self.append_tool_result_with_details(call_id, name, content, is_error, None);
+    }
+
+    pub fn append_tool_result_with_details(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        content: String,
+        is_error: bool,
+        details: Option<Value>,
+    ) {
         let message_timestamp = chrono::Utc::now().timestamp_millis();
-        self.append_message(serde_json::json!({
+        let mut message = serde_json::json!({
             "role": "toolResult",
             "toolCallId": call_id,
             "toolName": name,
             "content": [{"type":"text","text":content}],
             "isError": is_error,
             "timestamp": message_timestamp,
-        }));
+        });
+        if let Some(details) = details {
+            message["details"] = details;
+        }
+        self.append_message(message);
     }
 
     /// Append a Pi-compatible custom entry on the active session branch.
@@ -1063,6 +1078,21 @@ mod tests {
         assert_eq!(message["content"].as_array().unwrap().len(), 4);
         assert_eq!(message["content"][2]["id"], "c1");
         assert_eq!(message["content"][3]["id"], "c2");
+    }
+
+    #[test]
+    fn tool_result_details_round_trip_in_the_pi_message_shape() {
+        let mut session = SessionDocument::new("/workspace");
+        session.append_tool_result_with_details(
+            "call-1",
+            "mcp_tool",
+            "done".into(),
+            false,
+            Some(serde_json::json!({"resource":"example"})),
+        );
+        let message = &session.entries().next().unwrap().extra_fields()["message"];
+        assert_eq!(message["details"]["resource"], "example");
+        assert_eq!(message["content"][0]["text"], "done");
     }
 
     #[test]
