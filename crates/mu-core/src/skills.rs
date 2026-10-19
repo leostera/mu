@@ -645,6 +645,24 @@ mod tests {
     }
 
     #[test]
+    fn resolves_yaml_aliases_in_skill_metadata() {
+        let root = std::env::temp_dir().join(format!("mu-skill-yaml-alias-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("SKILL.md");
+        std::fs::write(
+            &file,
+            "---\nname_source: &skill-name alias-skill\ndescription_source: &skill-description aliased description\ndisabled_source: &disabled true\nname: *skill-name\ndescription: *skill-description\ndisable-model-invocation: *disabled\n---\nbody",
+        )
+        .unwrap();
+
+        let parsed = parse_skill(&file).unwrap();
+        assert_eq!(parsed.skill.name, "alias-skill");
+        assert_eq!(parsed.skill.description, "aliased description");
+        assert!(parsed.skill.disable_model_invocation);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parses_bom_crlf_and_folded_yaml_descriptions() {
         let root = std::env::temp_dir().join(format!("mu-skills-yaml-{}", Uuid::new_v4()));
         let skill_dir = root.join(".pi/skills");
