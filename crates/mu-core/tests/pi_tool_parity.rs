@@ -22,6 +22,60 @@ fn cleanup(path: &Path) {
     fs::remove_dir_all(path).expect("remove temporary fixture directory");
 }
 
+fn apply_unified_patch(original: &str, patch: &str) -> String {
+    let source = original.lines().collect::<Vec<_>>();
+    let mut output = Vec::new();
+    let mut source_index = 0;
+    let mut in_hunk = false;
+
+    for line in patch.lines() {
+        if line.starts_with("@@ ") {
+            in_hunk = true;
+            let old_range = line
+                .split_whitespace()
+                .nth(1)
+                .expect("hunk has old range")
+                .strip_prefix('-')
+                .expect("old range starts with minus");
+            let old_start = old_range
+                .split(',')
+                .next()
+                .expect("old range has start")
+                .parse::<usize>()
+                .expect("old range start is numeric");
+            let hunk_start = old_start.saturating_sub(1);
+            output.extend(source[source_index..hunk_start].iter().copied());
+            source_index = hunk_start;
+            continue;
+        }
+        if !in_hunk || line.starts_with("\\ No newline at end of file") {
+            continue;
+        }
+
+        let (kind, content) = line.split_at(1);
+        match kind {
+            " " => {
+                assert_eq!(source.get(source_index), Some(&content));
+                output.push(content);
+                source_index += 1;
+            }
+            "-" => {
+                assert_eq!(source.get(source_index), Some(&content));
+                source_index += 1;
+            }
+            "+" => output.push(content),
+            _ => panic!("unexpected unified diff line: {line:?}"),
+        }
+    }
+
+    output.extend(source[source_index..].iter().copied());
+    let mut result = output.join("\n");
+    if original.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
 #[test]
 fn builtin_definition_order_matches_pi_tool_registry() {
     let tool_definitions = definitions();
@@ -174,6 +228,56 @@ async fn pi_edit_applies_disjoint_edits_in_one_atomic_call() {
         fs::read_to_string(path).unwrap(),
         "ALPHA\nbeta\nGAMMA\ndelta\n"
     );
+    cleanup(&dir);
+}
+
+#[tokio::test]
+async fn pi_edit_fuzzy_multi_edit_patch_applies_to_the_original_content() {
+    let dir = temp_dir("edit-fuzzy-patch");
+    let path = dir.join("file.txt");
+    let original = [
+        "keep before  ",
+        "first target  ",
+        "first after",
+        "keep middle   ",
+        "second target  ",
+        "second after",
+        "keep after  ",
+        "",
+    ]
+    .join("\n");
+    let expected = [
+        "keep before  ",
+        "FIRST",
+        "FIRST2",
+        "keep middle   ",
+        "SECOND",
+        "SECOND2",
+        "keep after  ",
+        "",
+    ]
+    .join("\n");
+    fs::write(&path, &original).unwrap();
+
+    let result = execute(
+        &dir,
+        "edit",
+        &json!({
+            "path":"file.txt",
+            "edits":[
+                {"oldText":"first target\nfirst after","newText":"FIRST\nFIRST2"},
+                {"oldText":"second target\nsecond after","newText":"SECOND\nSECOND2"}
+            ]
+        }),
+    )
+    .await
+    .unwrap();
+
+    let patch = result.details.as_ref().unwrap()["patch"]
+        .as_str()
+        .expect("edit result includes unified patch");
+    assert_eq!(apply_unified_patch(&original, patch), expected);
+    assert_eq!(fs::read_to_string(path).unwrap(), expected);
     cleanup(&dir);
 }
 
