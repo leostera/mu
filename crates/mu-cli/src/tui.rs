@@ -2609,6 +2609,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ctrl_o_toggles_expanded_tool_output() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &mut app,
+            Arc::clone(&agent),
+            tx.clone(),
+        );
+        assert!(app.tools_expanded);
+        assert!(app.input_text().is_empty());
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            &mut app,
+            agent,
+            tx,
+        );
+        assert!(!app.tools_expanded);
+    }
+
+    #[tokio::test]
     async fn enter_while_generating_queues_steering_and_alt_enter_queues_follow_up() {
         let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
         let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
