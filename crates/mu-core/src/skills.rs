@@ -331,21 +331,19 @@ pub fn strip_frontmatter(content: &str) -> String {
 
 fn parse_skill(path: &Path) -> Result<ParsedSkill, String> {
     let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    if text.lines().next() != Some("---") {
+    let text = text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&text)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    if !text.starts_with("---") {
         return Err("missing YAML frontmatter".into());
     }
-    let yaml = text
-        .lines()
-        .skip(1)
-        .take_while(|line| line.trim() != "---")
-        .collect::<Vec<_>>()
-        .join("\n");
-    let closed = text.lines().skip(1).any(|line| line.trim() == "---");
-    if !closed {
-        return Err("unterminated YAML frontmatter".into());
-    }
-    let documents = yaml_rust2::YamlLoader::load_from_str(&yaml)
+    let delimiter_end = text
+        .find("\n---")
+        .ok_or_else(|| "unterminated YAML frontmatter".to_owned())?;
+    let yaml = &text[4..delimiter_end];
+    let documents = yaml_rust2::YamlLoader::load_from_str(yaml)
         .map_err(|error| format!("invalid YAML frontmatter: {error}"))?;
     let mapping = documents.first().and_then(|document| match document {
         yaml_rust2::Yaml::Hash(mapping) => Some(mapping),
@@ -647,6 +645,23 @@ mod tests {
         let parsed = parse_skill(&file).unwrap();
         assert_eq!(parsed.skill.description, "quoted # literal");
         assert!(parsed.skill.disable_model_invocation);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_frontmatter_with_pi_style_delimiter_whitespace() {
+        let root = std::env::temp_dir().join(format!("mu-skill-delimiter-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("SKILL.md");
+        std::fs::write(
+            &file,
+            "---\nname: delimiter\ndescription: whitespace delimiter\n---   \nbody",
+        )
+        .unwrap();
+
+        let parsed = parse_skill(&file).unwrap();
+        assert_eq!(parsed.skill.name, "delimiter");
+        assert_eq!(parsed.skill.description, "whitespace delimiter");
         std::fs::remove_dir_all(root).unwrap();
     }
 
