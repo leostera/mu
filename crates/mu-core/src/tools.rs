@@ -2446,6 +2446,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_path_write_then_edit_preserves_fifo_mutation_order() {
+        let cwd = std::env::temp_dir().join(format!("mu-mutation-order-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let path = cwd.join("shared.txt");
+        std::fs::write(&path, "initial").unwrap();
+
+        let lock = mutation_lock(&path);
+        let held_guard = lock.lock().await;
+        let write_cwd = cwd.clone();
+        let write_path = path.clone();
+        let write = tokio::spawn(async move {
+            write_file(&write_cwd, &json!({"path":write_path,"content":"written"})).await
+        });
+        tokio::task::yield_now().await;
+        let edit_cwd = cwd.clone();
+        let edit_path = path.clone();
+        let edit = tokio::spawn(async move {
+            edit_file(
+                &edit_cwd,
+                &json!({
+                    "path":edit_path,
+                    "edits":[{"oldText":"written","newText":"edited"}]
+                }),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        assert!(!write.is_finished());
+        assert!(!edit.is_finished());
+        drop(held_guard);
+
+        write.await.unwrap().unwrap();
+        edit.await.unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited");
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[tokio::test]
     async fn cancelled_mutation_waiter_does_not_block_later_file_operations() {
         let path = std::env::temp_dir().join(format!(
             "mu-cancelled-mutation-{}.txt",
