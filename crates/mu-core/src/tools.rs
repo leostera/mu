@@ -2440,6 +2440,32 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn cancelled_mutation_waiter_does_not_block_later_file_operations() {
+        let path = std::env::temp_dir().join(format!(
+            "mu-cancelled-mutation-{}.txt",
+            uuid::Uuid::new_v4()
+        ));
+        let lock = mutation_lock(&path);
+        let held_guard = lock.lock().await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let waiter_lock = Arc::clone(&lock);
+        let waiter_started = Arc::clone(&started);
+        let waiter = tokio::spawn(async move {
+            waiter_started.notify_one();
+            let _guard = waiter_lock.lock().await;
+        });
+
+        started.notified().await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(held_guard);
+
+        let _guard = tokio::time::timeout(std::time::Duration::from_secs(1), lock.lock())
+            .await
+            .expect("cancelled waiter must not strand the mutation lock");
+    }
+
     #[cfg(unix)]
     #[test]
     fn explicit_bash_shell_path_is_used_or_reports_pi_error() {
