@@ -343,6 +343,40 @@ impl std::fmt::Display for SkillCommandError {
     }
 }
 
+fn response_failed_error(event: &Value) -> AgentError {
+    let error = event.pointer("/response/error");
+    let message = if let Some(error) = error {
+        format!(
+            "{}: {}",
+            error
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("no message")
+        )
+    } else if let Some(reason) = event
+        .pointer("/response/incomplete_details/reason")
+        .and_then(Value::as_str)
+    {
+        format!("incomplete: {reason}")
+    } else {
+        "Unknown error (no error details in response)".into()
+    };
+    AgentError::Provider(message)
+}
+
+fn response_error_event(event: &Value) -> AgentError {
+    let code = event.get("code").and_then(Value::as_str);
+    let message = event.get("message").and_then(Value::as_str);
+    AgentError::Provider(match (code, message) {
+        (Some(code), Some(message)) => format!("Error Code {code}: {message}"),
+        _ => "Unknown error".into(),
+    })
+}
+
 impl TerminalResponse {
     fn error_message(&self) -> Option<String> {
         match self {
@@ -1271,40 +1305,8 @@ impl Provider {
                                 .and_then(Value::as_u64)
                                 .unwrap_or(raw_input + output_tokens);
                         }
-                        "response.failed" => {
-                            let error = event.pointer("/response/error");
-                            let message = if let Some(error) = error {
-                                format!(
-                                    "{}: {}",
-                                    error
-                                        .get("code")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("unknown"),
-                                    error
-                                        .get("message")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("no message")
-                                )
-                            } else if let Some(reason) = event
-                                .pointer("/response/incomplete_details/reason")
-                                .and_then(Value::as_str)
-                            {
-                                format!("incomplete: {reason}")
-                            } else {
-                                "Unknown error (no error details in response)".into()
-                            };
-                            return Err(AgentError::Provider(message));
-                        }
-                        "error" => {
-                            let code = event.get("code").and_then(Value::as_str);
-                            let message = event.get("message").and_then(Value::as_str);
-                            return Err(AgentError::Provider(match (code, message) {
-                                (Some(code), Some(message)) => {
-                                    format!("Error Code {code}: {message}")
-                                }
-                                _ => "Unknown error".into(),
-                            }));
-                        }
+                        "response.failed" => return Err(response_failed_error(&event)),
+                        "error" => return Err(response_error_event(&event)),
                         _ => {}
                     }
                 }
@@ -3364,6 +3366,39 @@ mod tests {
                 .error_message()
                 .as_deref(),
             Some("Response incomplete without a provider reason")
+        );
+    }
+
+    #[test]
+    fn responses_failure_events_preserve_provider_error_details() {
+        assert_eq!(
+            super::response_failed_error(&serde_json::json!({
+                "response":{"error":{"code":"server_error","message":"unavailable"}}
+            }))
+            .to_string(),
+            "provider: server_error: unavailable"
+        );
+        assert_eq!(
+            super::response_failed_error(&serde_json::json!({
+                "response":{"incomplete_details":{"reason":"content_filter"}}
+            }))
+            .to_string(),
+            "provider: incomplete: content_filter"
+        );
+        assert_eq!(
+            super::response_failed_error(&serde_json::json!({"response":{}})).to_string(),
+            "provider: Unknown error (no error details in response)"
+        );
+        assert_eq!(
+            super::response_error_event(&serde_json::json!({
+                "code":"rate_limit_exceeded","message":"slow down"
+            }))
+            .to_string(),
+            "provider: Error Code rate_limit_exceeded: slow down"
+        );
+        assert_eq!(
+            super::response_error_event(&serde_json::json!({})).to_string(),
+            "provider: Unknown error"
         );
     }
 
