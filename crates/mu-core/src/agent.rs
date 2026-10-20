@@ -330,14 +330,12 @@ enum TerminalResponse {
 
 #[derive(Debug)]
 enum SkillCommandError {
-    UnknownSkill(String),
     ReadFile { skill: String, error: String },
 }
 
 impl std::fmt::Display for SkillCommandError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownSkill(name) => write!(formatter, "Unknown skill command: {name}"),
             Self::ReadFile { skill, error } => {
                 write!(formatter, "Could not read skill '{skill}': {error}")
             }
@@ -409,7 +407,7 @@ fn expand_skill_command(
         .split_once(' ')
         .map_or((command, ""), |(name, arguments)| (name, arguments.trim()));
     let Some(skill) = skills.skills.iter().find(|skill| skill.name == name) else {
-        return Err(SkillCommandError::UnknownSkill(name.to_owned()));
+        return Ok(prompt);
     };
     let content =
         std::fs::read_to_string(&skill.file_path).map_err(|error| SkillCommandError::ReadFile {
@@ -3202,11 +3200,9 @@ mod tests {
                 file_path.parent().unwrap().display(),
             )
         );
-        assert!(
-            super::expand_skill_command("/skill:missing argument".into(), &skills)
-                .unwrap_err()
-                .to_string()
-                .contains("Unknown skill command: missing")
+        assert_eq!(
+            super::expand_skill_command("/skill:missing argument".into(), &skills).unwrap(),
+            "/skill:missing argument"
         );
         let mut warning = None;
         let unchanged =
@@ -3214,18 +3210,20 @@ mod tests {
                 warning = Some(event)
             });
         assert_eq!(unchanged, "/skill:missing argument");
+        assert!(warning.is_none());
+        std::fs::remove_file(&file_path).unwrap();
+        let mut warning = None;
+        assert_eq!(
+            super::expand_skill_prompt("/skill:review".into(), &skills, &mut |event| {
+                warning = Some(event)
+            }),
+            "/skill:review"
+        );
         assert!(matches!(
             warning,
             Some(super::AgentEvent::SkillCommandWarning(message))
-                if message.contains("Unknown skill command: missing")
+                if message.contains("Could not read skill 'review'")
         ));
-        std::fs::remove_file(&file_path).unwrap();
-        assert!(
-            super::expand_skill_command("/skill:review".into(), &skills)
-                .unwrap_err()
-                .to_string()
-                .contains("Could not read skill 'review'")
-        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
