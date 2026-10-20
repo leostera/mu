@@ -682,6 +682,28 @@ mod tests {
     }
 
     #[test]
+    fn malformed_yaml_frontmatter_is_reported_and_skill_is_skipped() {
+        let root = std::env::temp_dir().join(format!("mu-skills-yaml-error-{}", Uuid::new_v4()));
+        let skill_dir = root.join(".pi/skills/broken");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: broken\ndescription: [unterminated\n---\nbody",
+        )
+        .unwrap();
+
+        let catalog = SkillCatalog::discover_with_home(&root, &root.join("global"), &root);
+        assert!(catalog.skills.is_empty());
+        assert!(
+            catalog
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.message.starts_with("invalid YAML frontmatter:") })
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn invalid_skill_metadata_warns_but_does_not_drop_the_skill() {
         let root = std::env::temp_dir().join(format!("mu-skills-warnings-{}", Uuid::new_v4()));
         let skill_dir = root.join(".pi/skills");
