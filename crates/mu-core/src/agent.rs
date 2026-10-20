@@ -3224,7 +3224,7 @@ mod tests {
             "call-1",
             "read",
             "<script>tool output</script>".into(),
-            false,
+            true,
         );
         agent.save_session().unwrap();
         let original_path = agent.session_path().to_owned();
@@ -3250,7 +3250,7 @@ mod tests {
         assert!(html.contains("keep &lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"));
         assert!(html.contains("thinking &lt;private&gt;"));
         assert!(html.contains("assistant says &lt;hello&gt;"));
-        assert!(html.contains("Tool: read"));
+        assert!(html.contains("<details class=\"error\"><summary>Tool: read"));
         assert!(html.contains("a&amp;b.txt"));
         assert!(html.contains("&lt;script&gt;tool output&lt;/script&gt;"));
         assert!(!html.contains("<script>alert('x')</script>"));
