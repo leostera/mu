@@ -321,10 +321,28 @@ pub enum AgentEvent {
     RetryAttemptStarted {
         attempt: u32,
     },
+    SkillCommandWarning(String),
 }
 enum TerminalResponse {
     Completed,
     Incomplete { reason: Option<String> },
+}
+
+#[derive(Debug)]
+enum SkillCommandError {
+    UnknownSkill(String),
+    ReadFile { skill: String, error: String },
+}
+
+impl std::fmt::Display for SkillCommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownSkill(name) => write!(formatter, "Unknown skill command: {name}"),
+            Self::ReadFile { skill, error } => {
+                write!(formatter, "Could not read skill '{skill}': {error}")
+            }
+        }
+    }
 }
 
 impl TerminalResponse {
@@ -366,19 +384,38 @@ struct Reply {
     incomplete_reason: Option<String>,
 }
 
-fn expand_skill_command(prompt: String, skills: &crate::skills::SkillCatalog) -> String {
+fn expand_skill_prompt(
+    prompt: String,
+    skills: &crate::skills::SkillCatalog,
+    on_event: &mut impl FnMut(AgentEvent),
+) -> String {
+    match expand_skill_command(prompt.clone(), skills) {
+        Ok(expanded) => expanded,
+        Err(error) => {
+            on_event(AgentEvent::SkillCommandWarning(error.to_string()));
+            prompt
+        }
+    }
+}
+
+fn expand_skill_command(
+    prompt: String,
+    skills: &crate::skills::SkillCatalog,
+) -> Result<String, SkillCommandError> {
     let Some(command) = prompt.strip_prefix("/skill:") else {
-        return prompt;
+        return Ok(prompt);
     };
     let (name, arguments) = command
         .split_once(' ')
         .map_or((command, ""), |(name, arguments)| (name, arguments.trim()));
     let Some(skill) = skills.skills.iter().find(|skill| skill.name == name) else {
-        return prompt;
+        return Err(SkillCommandError::UnknownSkill(name.to_owned()));
     };
-    let Ok(content) = std::fs::read_to_string(&skill.file_path) else {
-        return prompt;
-    };
+    let content =
+        std::fs::read_to_string(&skill.file_path).map_err(|error| SkillCommandError::ReadFile {
+            skill: name.to_owned(),
+            error: error.to_string(),
+        })?;
     let body = crate::skills::strip_frontmatter(&content);
     let base_dir = skill.file_path.parent().unwrap_or_else(|| Path::new(""));
     let block = format!(
@@ -388,11 +425,11 @@ fn expand_skill_command(prompt: String, skills: &crate::skills::SkillCatalog) ->
         base_dir.display(),
         body,
     );
-    if arguments.is_empty() {
+    Ok(if arguments.is_empty() {
         block
     } else {
         format!("{block}\n\n{arguments}")
-    }
+    })
 }
 
 fn configured_setting<T>(
@@ -2433,12 +2470,11 @@ impl MuAgent {
         &self.skills
     }
 
-    fn expand_prompt(&self, prompt: String) -> String {
-        if skill_commands_enabled(&self.agent_dir, &self.cwd) {
-            expand_skill_command(prompt, &self.skills)
-        } else {
-            prompt
+    fn expand_prompt(&self, prompt: String, on_event: &mut impl FnMut(AgentEvent)) -> String {
+        if !skill_commands_enabled(&self.agent_dir, &self.cwd) {
+            return prompt;
         }
+        expand_skill_prompt(prompt, &self.skills, on_event)
     }
 
     pub fn hide_thinking_block(&self) -> bool {
@@ -2493,7 +2529,7 @@ impl MuAgent {
         behavior: PromptBehavior,
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
-        let prompt = self.expand_prompt(prompt);
+        let prompt = self.expand_prompt(prompt, on_event);
         self.session.append_user_text(prompt.clone());
         self.save_session()?;
         self.history.push(json!({
@@ -2595,7 +2631,7 @@ impl MuAgent {
         prompt: String,
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
-        let prompt = self.expand_prompt(prompt);
+        let prompt = self.expand_prompt(prompt, on_event);
         self.session.append_user_text(prompt.clone());
         self.save_session()?;
         self.history
@@ -3156,7 +3192,8 @@ mod tests {
         };
 
         let expanded =
-            super::expand_skill_command("/skill:review  check edge cases ".into(), &skills);
+            super::expand_skill_command("/skill:review  check edge cases ".into(), &skills)
+                .unwrap();
         assert_eq!(
             expanded,
             format!(
@@ -3165,9 +3202,29 @@ mod tests {
                 file_path.parent().unwrap().display(),
             )
         );
-        assert_eq!(
-            super::expand_skill_command("/skill:missing argument".into(), &skills),
-            "/skill:missing argument"
+        assert!(
+            super::expand_skill_command("/skill:missing argument".into(), &skills)
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown skill command: missing")
+        );
+        let mut warning = None;
+        let unchanged =
+            super::expand_skill_prompt("/skill:missing argument".into(), &skills, &mut |event| {
+                warning = Some(event)
+            });
+        assert_eq!(unchanged, "/skill:missing argument");
+        assert!(matches!(
+            warning,
+            Some(super::AgentEvent::SkillCommandWarning(message))
+                if message.contains("Unknown skill command: missing")
+        ));
+        std::fs::remove_file(&file_path).unwrap();
+        assert!(
+            super::expand_skill_command("/skill:review".into(), &skills)
+                .unwrap_err()
+                .to_string()
+                .contains("Could not read skill 'review'")
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -1262,6 +1262,9 @@ impl App {
                     AgentEvent::RetryAttemptStarted { attempt } => {
                         self.retry_status = Some(format!("Retry attempt {attempt} started…"));
                     }
+                    AgentEvent::SkillCommandWarning(warning) => {
+                        self.retry_status = Some(warning);
+                    }
                     AgentEvent::ToolStarted {
                         call_id,
                         name,
