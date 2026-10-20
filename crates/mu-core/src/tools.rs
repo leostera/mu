@@ -2047,6 +2047,18 @@ fn unix_bash_shell(bin_bash_exists: bool, path: Option<std::ffi::OsString>) -> P
 }
 
 #[cfg(any(windows, test))]
+fn powershell_arguments(command: &str) -> [&str; 6] {
+    [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    ]
+}
+
+#[cfg(any(windows, test))]
 fn powershell_command_with_utf8_output(command: &str) -> String {
     format!(
         "try {{ [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 }} catch {{}}\n{command}"
@@ -2078,14 +2090,7 @@ async fn run_powershell(
             )
         })?;
         let mut process = tokio::process::Command::new(powershell);
-        process.args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &command,
-        ]);
+        process.args(powershell_arguments(&command));
         let output = run_shell_process(
             cwd,
             "PowerShell",
@@ -2549,6 +2554,21 @@ mod tests {
         assert_eq!(find_powershell_executable(Some(path)), Some(pwsh));
         assert_eq!(find_powershell_executable(None), None);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn powershell_uses_pi_noninteractive_command_arguments() {
+        assert_eq!(
+            powershell_arguments("Get-Location"),
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Get-Location",
+            ]
+        );
     }
 
     #[test]
