@@ -2464,6 +2464,34 @@ mod tests {
         assert!(app.quit);
     }
 
+    #[test]
+    fn skill_command_read_error_is_visible_in_the_tui() {
+        let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
+        app.messages.push(Message {
+            role: Role::Assistant,
+            text: String::new(),
+            thinking: String::new(),
+            tools: Vec::new(),
+            error: false,
+        });
+        app.apply(UiEvent::Agent(AgentEvent::SkillCommandWarning(
+            "Could not read skill 'review': permission denied".into(),
+        )));
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..24)
+            .map(|y| {
+                (0..100)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Could not read skill 'review': permission denied"));
+    }
+
     #[tokio::test]
     async fn retry_status_is_visible_and_cancel_marks_the_turn_interrupted() {
         let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
