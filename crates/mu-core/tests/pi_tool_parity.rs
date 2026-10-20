@@ -400,6 +400,29 @@ async fn pi_edit_application_errors_are_returned_without_mu_prefixes() {
 }
 
 #[tokio::test]
+async fn pi_edit_failed_multi_edit_does_not_write_partial_changes() {
+    let dir = temp_dir("edit-no-partial");
+    let path = dir.join("file.txt");
+    let original = "alpha\nbeta\ngamma\n";
+    fs::write(&path, original).unwrap();
+
+    let error = execute(
+        &dir,
+        "edit",
+        &json!({"path":"file.txt","edits":[
+            {"oldText":"alpha\n","newText":"ALPHA\n"},
+            {"oldText":"missing\n","newText":"MISSING\n"}
+        ]}),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("Could not find"));
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
+    cleanup(&dir);
+}
+
+#[tokio::test]
 async fn pi_edit_diff_line_number_width_counts_trailing_empty_line() {
     let dir = temp_dir("edit-diff-line-width");
     let path = dir.join("nine-lines.txt");
