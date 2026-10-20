@@ -3204,6 +3204,18 @@ mod tests {
             super::expand_skill_command("/skill:missing argument".into(), &skills).unwrap(),
             "/skill:missing argument"
         );
+        assert_eq!(
+            super::expand_skill_command("/skill:review ".into(), &skills).unwrap(),
+            expanded.strip_suffix("\n\ncheck edge cases").unwrap(),
+            "a space with no remaining argument still expands the skill"
+        );
+        for prompt in ["/skill:review\targument", "/skill:review\u{00a0}argument"] {
+            assert_eq!(
+                super::expand_skill_command(prompt.into(), &skills).unwrap(),
+                prompt,
+                "Pi uses a literal ASCII space as the skill-argument delimiter"
+            );
+        }
         let mut warning = None;
         let unchanged =
             super::expand_skill_prompt("/skill:missing argument".into(), &skills, &mut |event| {
