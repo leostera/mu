@@ -3202,6 +3202,28 @@ mod tests {
         agent
             .session
             .append_user_text("keep <script>alert('x')</script>");
+        agent.session.append_assistant_turn(
+            "responses",
+            "demo",
+            "demo",
+            "thinking <private>",
+            "assistant says <hello>",
+            mu_session::MessageUsage::default(),
+        );
+        agent.session.append_tool_call(
+            "call-1",
+            "read",
+            serde_json::json!({"path":"a&b.txt"}),
+            "responses",
+            "demo",
+            "demo",
+        );
+        agent.session.append_tool_result(
+            "call-1",
+            "read",
+            "<script>tool output</script>".into(),
+            false,
+        );
         agent.save_session().unwrap();
         let original_path = agent.session_path().to_owned();
         let original_id = agent.session.header().unwrap().id.as_str().to_owned();
@@ -3224,7 +3246,13 @@ mod tests {
         agent.export_session(&html_path).unwrap();
         let html = std::fs::read_to_string(html_path).unwrap();
         assert!(html.contains("keep &lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"));
+        assert!(html.contains("thinking &lt;private&gt;"));
+        assert!(html.contains("assistant says &lt;hello&gt;"));
+        assert!(html.contains("Tool: read"));
+        assert!(html.contains("a&amp;b.txt"));
+        assert!(html.contains("&lt;script&gt;tool output&lt;/script&gt;"));
         assert!(!html.contains("<script>alert('x')</script>"));
+        assert!(!html.contains("<script>tool output</script>"));
         assert!(agent.export_session(&root.join("export.txt")).is_err());
 
         let export_path = root.join("export.jsonl");
