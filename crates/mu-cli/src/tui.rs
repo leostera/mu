@@ -2717,19 +2717,28 @@ mod tests {
     }
 
     #[test]
-    fn renders_skill_reads_compactly_then_expands_on_ctrl_o_state() {
+    fn renders_compact_tool_output_and_expands_with_ctrl_o() {
         let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
         app.messages.push(Message {
             role: Role::Assistant,
             text: String::new(),
             thinking: String::new(),
-            tools: vec![ToolActivity {
-                call_id: "skill-read".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path":"/project/.pi/skills/rust/SKILL.md"}),
-                output: Some("specialized instructions".into()),
-                error: false,
-            }],
+            tools: vec![
+                ToolActivity {
+                    call_id: "skill-read".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path":"/project/.pi/skills/rust/SKILL.md"}),
+                    output: Some("specialized instructions".into()),
+                    error: false,
+                },
+                ToolActivity {
+                    call_id: "regular-read".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path":"/project/README.md"}),
+                    output: Some("line one\nline two\nline three\nline four\nline five".into()),
+                    error: false,
+                },
+            ],
             error: false,
         });
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
@@ -2744,6 +2753,10 @@ mod tests {
             .collect::<String>();
         assert!(compact.contains("[skill] rust"));
         assert!(compact.contains("ctrl+o to expand"));
+        assert!(compact.contains("line one"));
+        assert!(compact.contains("line four"));
+        assert!(!compact.contains("line five"));
+        assert!(compact.contains("output truncated"));
         assert!(!compact.contains("specialized instructions"));
 
         app.tools_expanded = true;
@@ -2758,6 +2771,8 @@ mod tests {
         assert!(expanded.contains("read"));
         assert!(expanded.contains("SKILL.md"));
         assert!(expanded.contains("specialized instructions"));
+        assert!(expanded.contains("line five"));
+        assert!(!expanded.contains("output truncated"));
     }
 
     #[test]
