@@ -1800,7 +1800,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             }
             Ok(_) => app.messages.push(Message {
                 role: Role::Assistant,
-                text: "Usage: /export <path.jsonl>".into(),
+                text: "Usage: /export <path.jsonl|path.html>".into(),
                 thinking: String::new(),
                 tools: Vec::new(),
                 error: true,
