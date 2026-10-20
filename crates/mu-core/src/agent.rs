@@ -368,6 +368,22 @@ fn response_failed_error(event: &Value) -> AgentError {
     AgentError::Provider(message)
 }
 
+fn format_mcp_tool_summary(definition: &Value) -> Option<String> {
+    let name = definition.get("name")?.as_str()?;
+    let description = definition
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default();
+    Some(if description.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}: {description}")
+    })
+}
+
 fn response_error_event(event: &Value) -> AgentError {
     // Pi interpolates absent JavaScript event fields as the literal `undefined`.
     let code = event
@@ -2343,8 +2359,8 @@ impl MuAgent {
     pub fn mcp_tools(&self) -> Vec<String> {
         self.mcp
             .codemode_definitions()
-            .into_iter()
-            .filter_map(|definition| definition.get("name")?.as_str().map(str::to_owned))
+            .iter()
+            .filter_map(format_mcp_tool_summary)
             .collect()
     }
 
@@ -3370,6 +3386,27 @@ mod tests {
                 .error_message()
                 .as_deref(),
             Some("Response incomplete without a provider reason")
+        );
+    }
+
+    #[test]
+    fn mcp_tool_summaries_show_first_description_line() {
+        assert_eq!(
+            super::format_mcp_tool_summary(&serde_json::json!({
+                "name":"mcp__fs__read",
+                "description":"Read a file.\nReturns the content."
+            }))
+            .as_deref(),
+            Some("mcp__fs__read: Read a file.")
+        );
+        assert_eq!(
+            super::format_mcp_tool_summary(&serde_json::json!({"name":"mcp__fs__empty"}))
+                .as_deref(),
+            Some("mcp__fs__empty")
+        );
+        assert_eq!(
+            super::format_mcp_tool_summary(&serde_json::json!({"description":"missing name"})),
+            None
         );
     }
 
