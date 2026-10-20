@@ -2548,7 +2548,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_and_import_commands_round_trip_a_jsonl_session() {
+    async fn export_command_supports_html_and_jsonl_import_round_trips() {
         let path = std::env::temp_dir().join(format!(
             "mu-tui-session-{}-{}.jsonl",
             std::process::id(),
@@ -2594,6 +2594,16 @@ mod tests {
                 .text
                 .starts_with("Exported session to")
         );
+
+        let html_path = path.with_extension("html");
+        app.input = format!("/export {}", html_path.display()).chars().collect();
+        execute_command(&mut app, &agent);
+        assert!(
+            std::fs::read_to_string(&html_path)
+                .unwrap()
+                .starts_with("<!doctype html>")
+        );
+        std::fs::remove_file(html_path).unwrap();
 
         app.input = format!("/import {}", path.display()).chars().collect();
         execute_command(&mut app, &agent);
