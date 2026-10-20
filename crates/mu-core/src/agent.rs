@@ -369,12 +369,16 @@ fn response_failed_error(event: &Value) -> AgentError {
 }
 
 fn response_error_event(event: &Value) -> AgentError {
-    let code = event.get("code").and_then(Value::as_str);
-    let message = event.get("message").and_then(Value::as_str);
-    AgentError::Provider(match (code, message) {
-        (Some(code), Some(message)) => format!("Error Code {code}: {message}"),
-        _ => "Unknown error".into(),
-    })
+    // Pi interpolates absent JavaScript event fields as the literal `undefined`.
+    let code = event
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or("undefined");
+    let message = event
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("undefined");
+    AgentError::Provider(format!("Error Code {code}: {message}"))
 }
 
 impl TerminalResponse {
@@ -3398,7 +3402,7 @@ mod tests {
         );
         assert_eq!(
             super::response_error_event(&serde_json::json!({})).to_string(),
-            "provider: Unknown error"
+            "provider: Error Code undefined: undefined"
         );
     }
 
