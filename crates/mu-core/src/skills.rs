@@ -83,23 +83,6 @@ impl SkillCatalog {
         let mut seen_names = HashMap::new();
         let mut scanned_directories = HashSet::new();
         let mut scanned_skill_files = HashSet::new();
-        if include_defaults {
-            for root in [
-                agent_dir.join("skills"),
-                cwd.join(".pi/skills"),
-                cwd.join(".agents/skills"),
-                home.join(".agents/skills"),
-            ] {
-                scan(
-                    &root,
-                    &mut catalog,
-                    &mut seen_names,
-                    &mut scanned_directories,
-                    &mut scanned_skill_files,
-                    &[],
-                );
-            }
-        }
         for path in skill_paths {
             let path = if path.is_absolute() {
                 path.clone()
@@ -144,6 +127,23 @@ impl SkillCatalog {
                     message: "skill path is not a Markdown file or directory".into(),
                     collision: None,
                 });
+            }
+        }
+        if include_defaults {
+            for root in [
+                agent_dir.join("skills"),
+                cwd.join(".pi/skills"),
+                cwd.join(".agents/skills"),
+                home.join(".agents/skills"),
+            ] {
+                scan(
+                    &root,
+                    &mut catalog,
+                    &mut seen_names,
+                    &mut scanned_directories,
+                    &mut scanned_skill_files,
+                    &[],
+                );
             }
         }
         catalog
@@ -427,7 +427,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn explicit_skill_paths_load_after_or_instead_of_default_discovery() {
+    fn explicit_skill_paths_precede_default_discovery() {
         let root = std::env::temp_dir().join(format!("mu-skill-paths-{}", Uuid::new_v4()));
         let agent_dir = root.join("agent");
         let default_file = agent_dir.join("skills/default/SKILL.md");
@@ -436,12 +436,12 @@ mod tests {
         std::fs::create_dir_all(explicit_file.parent().unwrap()).unwrap();
         std::fs::write(
             &default_file,
-            "---\nname: default\ndescription: discovered\n---\n",
+            "---\nname: shared\ndescription: discovered\n---\n",
         )
         .unwrap();
         std::fs::write(
             &explicit_file,
-            "---\nname: explicit\ndescription: selected directly\n---\n",
+            "---\nname: shared\ndescription: selected directly\n---\n",
         )
         .unwrap();
 
@@ -453,7 +453,7 @@ mod tests {
             &root,
         );
         assert_eq!(defaults_disabled.skills.len(), 1);
-        assert_eq!(defaults_disabled.skills[0].name, "explicit");
+        assert_eq!(defaults_disabled.skills[0].name, "shared");
 
         let defaults_enabled = SkillCatalog::discover_with_paths_and_home(
             &root,
@@ -462,8 +462,14 @@ mod tests {
             true,
             &root,
         );
-        assert_eq!(defaults_enabled.skills.len(), 2);
-        assert_eq!(defaults_enabled.skills[0].name, "default");
+        assert_eq!(defaults_enabled.skills.len(), 1);
+        assert_eq!(defaults_enabled.skills[0].file_path, explicit_file);
+        let collision = defaults_enabled.diagnostics[0]
+            .collision
+            .as_ref()
+            .expect("default skill collision is diagnosed");
+        assert_eq!(collision.winner_path, explicit_file);
+        assert_eq!(collision.loser_path, default_file);
         std::fs::remove_dir_all(root).unwrap();
     }
 
