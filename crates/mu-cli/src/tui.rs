@@ -1243,7 +1243,51 @@ impl App {
             return;
         }
         self.composer.add_to_history(&prompt);
+        if let Some(command) = prompt.strip_prefix('!') {
+            // `!cmd` and `!!cmd` run a shell command locally; the output is shown, not sent to the model.
+            let command = command
+                .strip_prefix('!')
+                .unwrap_or(command)
+                .trim()
+                .to_owned();
+            self.composer.clear();
+            self.run_shell_command(command, agent);
+            return;
+        }
         self.submit_prompt(prompt, agent, tx);
+    }
+
+    fn run_shell_command(&mut self, command: String, agent: Arc<Mutex<MuAgent>>) {
+        if command.is_empty() {
+            return;
+        }
+        let arguments = serde_json::json!({ "command": command });
+        let outcome = agent.try_lock().ok().map(|agent| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(agent.run_local_tool("bash", &arguments))
+            })
+        });
+        let (output, error) = match outcome {
+            Some(Ok(result)) => (result.content, result.is_error),
+            Some(Err(error)) => (error.to_string(), true),
+            None => ("Mu is busy.".to_owned(), true),
+        };
+        self.messages.push(Message {
+            role: Role::Assistant,
+            text: String::new(),
+            thinking: String::new(),
+            tools: vec![ToolActivity {
+                call_id: "local-shell".into(),
+                name: "bash".into(),
+                arguments,
+                output: Some(output),
+                error,
+                details: None,
+                duration_ms: None,
+            }],
+            error: false,
+        });
+        self.messages.scroll.scroll_to_end();
     }
 
     fn submit_queued_prompt(
@@ -2845,6 +2889,19 @@ mod tests {
                     .contains("not supported in Mu")
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bang_prefix_runs_a_local_shell_command_and_shows_its_output() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.composer.insert_text("!!echo local-ok");
+        app.submit(agent, tx);
+        let tool = &app.messages.last().unwrap().tools[0];
+        assert_eq!(tool.name, "bash");
+        assert!(tool.output.as_deref().unwrap().contains("local-ok"));
+        assert!(app.input.is_empty() && !app.loading);
     }
 
     #[test]

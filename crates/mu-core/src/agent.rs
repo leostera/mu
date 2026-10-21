@@ -3875,6 +3875,21 @@ impl MuAgent {
         self.hide_thinking_block
     }
 
+    /// Run a built-in tool directly in the project directory (the TUI's `!command`).
+    pub async fn run_local_tool(
+        &self,
+        name: &str,
+        arguments: &Value,
+    ) -> Result<crate::tools::ToolResult, crate::tools::ToolError> {
+        crate::tools::execute_with_environment(
+            &self.cwd,
+            name,
+            arguments,
+            &self.shell_environment(),
+        )
+        .await
+    }
+
     /// Execute one of Mu's Pi-compatible built-in tools in the project directory.
     pub async fn execute_tool(
         &self,
