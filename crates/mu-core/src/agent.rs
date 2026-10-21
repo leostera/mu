@@ -157,6 +157,8 @@ pub struct SessionOptions {
     pub append_system_prompt: Vec<String>,
     /// `--no-context-files`: skip `AGENTS.md`/`CLAUDE.md` discovery.
     pub no_context_files: bool,
+    /// `--exclude-tools`: names or `*` patterns to disable, applied after selection.
+    pub exclude_tools: Vec<String>,
 }
 
 /// Resolved prompt customizations.
@@ -2006,6 +2008,7 @@ fn resolve_session_options(
         system_prompt: _,
         append_system_prompt: _,
         no_context_files: _,
+        exclude_tools: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2296,6 +2299,7 @@ struct Prepared {
     session: SessionDocument,
     transcript: Vec<AgentMessage>,
     prompt: PromptOptions,
+    excluded_tools: Vec<String>,
 }
 
 impl Prepared {
@@ -2313,6 +2317,7 @@ impl Prepared {
         }
         let no_tools = options.no_tools;
         let persist_session = !options.no_session;
+        let excluded_tools = options.exclude_tools.clone();
         let prompt = PromptOptions::from_session_options(&options).with_context_files(
             &config.cwd,
             &config.agent_dir,
@@ -2335,6 +2340,7 @@ impl Prepared {
             session,
             transcript,
             prompt,
+            excluded_tools,
         })
     }
 
@@ -2360,6 +2366,7 @@ impl Prepared {
             enabled_tools: self.config.enabled_tools,
             no_tools: self.no_tools,
             tool_selection: self.tool_selection,
+            excluded_tools: self.excluded_tools,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup,
             active_mcp_tools,
@@ -2385,6 +2392,7 @@ pub struct MuAgent {
     enabled_tools: Vec<String>,
     no_tools: bool,
     tool_selection: Option<ToolSelection>,
+    excluded_tools: Vec<String>,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -2494,6 +2502,7 @@ impl MuAgent {
             enabled_tools: config.enabled_tools,
             no_tools: false,
             tool_selection: None,
+            excluded_tools: Vec::new(),
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup: None,
             active_mcp_tools,
@@ -2811,6 +2820,7 @@ impl MuAgent {
             enabled_tools: self.enabled_tools.clone(),
             no_tools: self.no_tools,
             selection: self.tool_selection.clone(),
+            excluded: self.excluded_tools.clone(),
         };
         plan.definitions(&self.mcp, active_mcp_tools)
             .iter()
@@ -4494,6 +4504,21 @@ mod tests {
         assert_eq!(options.system_prompt.as_deref(), Some("literal prompt"));
         assert_eq!(options.appendix(), "from file\n\ninline");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn excluded_tools_remove_exact_and_wildcard_matches_after_selection() {
+        let root = std::env::temp_dir().join(format!("mu-exclude-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![]);
+        agent.enabled_tools = ["read", "bash", "grep", "find"].map(String::from).to_vec();
+        agent.excluded_tools = vec!["bash".into(), "gr*".into()];
+        let names = agent
+            .tool_definitions(&HashSet::new())
+            .iter()
+            .filter_map(|d| d["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["read", "find"]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -75,6 +75,15 @@ struct Cli {
     #[arg(short = 't', long, value_delimiter = ',')]
     tools: Option<Vec<String>>,
 
+    /// Disable tools by name or `*` pattern, after selection.
+    #[arg(
+        short = 'x',
+        long = "exclude-tools",
+        value_delimiter = ',',
+        value_name = "TOOLS"
+    )]
+    exclude_tools: Vec<String>,
+
     /// Disable all tools.
     #[arg(long)]
     no_tools: bool,
@@ -207,6 +216,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         system_prompt: cli.system_prompt,
         append_system_prompt: cli.append_system_prompt,
         no_context_files: cli.no_context_files,
+        exclude_tools: cli.exclude_tools,
     };
 
     if cli.print || !is_terminal {

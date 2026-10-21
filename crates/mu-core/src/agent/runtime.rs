@@ -286,6 +286,7 @@ pub(super) struct ToolPlan {
     pub(super) enabled_tools: Vec<String>,
     pub(super) no_tools: bool,
     pub(super) selection: Option<ToolSelection>,
+    pub(super) excluded: Vec<String>,
 }
 
 impl ToolPlan {
@@ -316,10 +317,21 @@ impl ToolPlan {
         if mcp.has_deferred_tools() {
             definitions.push(crate::tool_search::definition());
         }
-        match &self.selection {
+        let mut definitions = match &self.selection {
             Some(selection) => filter_tool_definitions(definitions, selection),
             None => definitions,
-        }
+        };
+        definitions.retain(|definition| {
+            let name = definition
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            !self
+                .excluded
+                .iter()
+                .any(|pattern| super::tool_name_matches(pattern, name))
+        });
+        definitions
     }
 }
 
@@ -835,6 +847,7 @@ impl MuAgent {
             enabled_tools: self.enabled_tools.clone(),
             no_tools: self.no_tools,
             selection: self.tool_selection.clone(),
+            excluded: self.excluded_tools.clone(),
         };
         let tools = build_tools(&plan(), &runtime);
         let hooks = Arc::new(RuntimeHooks {
