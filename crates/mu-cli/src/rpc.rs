@@ -166,6 +166,42 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
             .clone_session()
             .map(|()| Some(json!({"cancelled": false})))
             .map_err(|error| error.to_string()),
+        "set_session_name" => match command["name"].as_str().map(str::trim) {
+            Some(name) if !name.is_empty() => agent
+                .name_session(name)
+                .map(|()| None)
+                .map_err(|error| error.to_string()),
+            _ => Err("Session name cannot be empty".into()),
+        },
+        "export_html" => {
+            let path = command["outputPath"].as_str().map_or_else(
+                || {
+                    agent
+                        .cwd()
+                        .join(format!("mu-session-{}.html", agent.session_info().id))
+                },
+                std::path::PathBuf::from,
+            );
+            agent
+                .export_session(&path)
+                .map(|()| Some(json!({"path": path})))
+                .map_err(|error| error.to_string())
+        }
+        "bash" => match command["command"].as_str() {
+            None => Err("bash requires a string `command`".into()),
+            Some(shell_command) => agent
+                .run_local_tool("bash", &json!({"command": shell_command}))
+                .await
+                .map(|result| {
+                    Some(json!({
+                        "output": result.content,
+                        "exitCode": if result.is_error { 1 } else { 0 },
+                        "cancelled": false,
+                        "truncated": false,
+                    }))
+                })
+                .map_err(|error| error.to_string()),
+        },
         "get_session_stats" => Ok(Some(json!({"summary": agent.session_summary()}))),
         "get_last_assistant_text" => Ok(Some(json!({"text": agent.last_assistant_text()}))),
         other => Err(format!("Unknown command: {other}")),
@@ -304,6 +340,21 @@ mod tests {
         );
         let bad_fork = handle(&mut agent, &json!({"type":"fork","entryId":"nope"})).await;
         assert_eq!(bad_fork["success"], false);
+        let named = handle(
+            &mut agent,
+            &json!({"type":"set_session_name","name":"rpc-named"}),
+        )
+        .await;
+        assert_eq!(named["success"], true);
+        assert_eq!(agent.session_name(), Some("rpc-named"));
+        let blank = handle(&mut agent, &json!({"type":"set_session_name","name":"  "})).await;
+        assert_eq!(blank["success"], false);
+        let ran = handle(
+            &mut agent,
+            &json!({"type":"bash","command":"echo rpc-bash"}),
+        )
+        .await;
+        assert!(ran["data"]["output"].as_str().unwrap().contains("rpc-bash"));
         let nothing = handle(&mut agent, &json!({"type":"compact"})).await;
         assert_eq!(nothing["error"], "Nothing to compact");
         let missing = handle(&mut agent, &json!({"type":"prompt"})).await;
