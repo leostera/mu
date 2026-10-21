@@ -230,6 +230,8 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
                     "role": match message.role {
                         mu_core::SessionTranscriptRole::User => "user",
                         mu_core::SessionTranscriptRole::Assistant => "assistant",
+                        mu_core::SessionTranscriptRole::CompactionSummary(_) => "compactionSummary",
+                        mu_core::SessionTranscriptRole::BranchSummary => "branchSummary",
                     },
                     "text": message.text,
                     "thinking": message.thinking,

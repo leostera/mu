@@ -147,6 +147,10 @@ pub struct SessionInfo {
 pub enum SessionTranscriptRole {
     User,
     Assistant,
+    /// A compaction entry; the text is its summary and the value the tokens before compaction.
+    CompactionSummary(u64),
+    /// A branch summary entry left when navigating the tree.
+    BranchSummary,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2717,6 +2721,8 @@ fn append_transcript_message_html(html: &mut String, message: SessionTranscriptM
     let (role, class) = match message.role {
         SessionTranscriptRole::User => ("User", "user"),
         SessionTranscriptRole::Assistant => ("Assistant", "assistant"),
+        SessionTranscriptRole::CompactionSummary(_) => ("Compaction summary", "assistant"),
+        SessionTranscriptRole::BranchSummary => ("Branch summary", "assistant"),
     };
     html.push_str(&format!("<article class=\"{class}\"><h2>{role}</h2>"));
     if !message.thinking.is_empty() {
@@ -2764,6 +2770,33 @@ fn escape_html(text: &str) -> String {
 fn session_transcript(session: &SessionDocument) -> Vec<SessionTranscriptMessage> {
     let mut transcript: Vec<SessionTranscriptMessage> = Vec::new();
     for entry in session.active_branch_entries() {
+        let summary_role = match entry.entry_type.as_str() {
+            "compaction" => Some(SessionTranscriptRole::CompactionSummary(
+                entry
+                    .extra_fields()
+                    .get("tokensBefore")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            )),
+            "branch_summary" => Some(SessionTranscriptRole::BranchSummary),
+            _ => None,
+        };
+        if let Some(role) = summary_role {
+            let summary = entry
+                .extra_fields()
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !summary.is_empty() {
+                transcript.push(SessionTranscriptMessage {
+                    role,
+                    text: summary.to_owned(),
+                    thinking: String::new(),
+                    tools: Vec::new(),
+                });
+            }
+            continue;
+        }
         let Some(message) = entry
             .extra_fields()
             .get("message")
@@ -6661,6 +6694,26 @@ mod tests {
             ]
         );
         assert_eq!(out[1]["output"], "plain");
+    }
+
+    #[test]
+    fn compaction_and_branch_summaries_appear_in_the_transcript() {
+        let mut session = SessionDocument::new("/w".to_owned());
+        session.append_user_text("one");
+        let kept = session.entries().last().unwrap().id.clone().unwrap();
+        session.append_compaction("COMPACTED", kept.as_str(), 77);
+        session.append_branch_summary("BRANCHED", "x");
+        let transcript = super::session_transcript(&session);
+        let roles = transcript.iter().map(|m| m.role).collect::<Vec<_>>();
+        assert_eq!(
+            roles,
+            [
+                super::SessionTranscriptRole::User,
+                super::SessionTranscriptRole::CompactionSummary(77),
+                super::SessionTranscriptRole::BranchSummary
+            ]
+        );
+        assert_eq!(transcript[1].text, "COMPACTED");
     }
 
     #[test]

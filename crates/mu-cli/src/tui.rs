@@ -68,6 +68,11 @@ struct ToolActivity {
 enum Role {
     User,
     Assistant,
+    /// Pi's `[compaction]` / `[branch]` boxes: `label`, the summary text, tokens before (compaction).
+    Summary {
+        label: &'static str,
+        tokens: Option<u64>,
+    },
 }
 
 enum UiEvent {
@@ -1165,6 +1170,14 @@ impl App {
                 role: match message.role {
                     SessionTranscriptRole::User => Role::User,
                     SessionTranscriptRole::Assistant => Role::Assistant,
+                    SessionTranscriptRole::CompactionSummary(tokens) => Role::Summary {
+                        label: "[compaction]",
+                        tokens: Some(tokens),
+                    },
+                    SessionTranscriptRole::BranchSummary => Role::Summary {
+                        label: "[branch]",
+                        tokens: None,
+                    },
                 },
                 text: message.text,
                 thinking: message.thinking,
@@ -3055,6 +3068,19 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     push_statuses(&mut lines, &app.statuses, 0, &app.theme);
     for (index, message) in app.messages.iter().enumerate() {
+        if let Role::Summary { label, tokens } = message.role {
+            lines.push(Line::from(""));
+            lines.extend(summary_message_lines(
+                label,
+                tokens,
+                &message.text,
+                app.tools_expanded,
+                area.width,
+                &app.theme,
+            ));
+            push_statuses(&mut lines, &app.statuses, index + 1, &app.theme);
+            continue;
+        }
         if matches!(message.role, Role::User) {
             lines.push(Line::from(""));
             lines.extend(user_message_lines(&message.text, area.width, &app.theme));
@@ -3230,6 +3256,36 @@ fn push_statuses(
 }
 
 /// A user message: Markdown on the `userMessageBg` background with one row of padding.
+/// Pi's compaction/branch summary box: a bold label, then either a one-line collapsed note or the
+/// full summary, on the `customMessageBg` background.
+fn summary_message_lines(
+    label: &str,
+    tokens: Option<u64>,
+    summary: &str,
+    expanded: bool,
+    width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let body = match (expanded, tokens) {
+        (true, Some(tokens)) => format!("**Compacted from {tokens} tokens**\n\n{summary}"),
+        (true, None) => format!("**Branch Summary**\n\n{summary}"),
+        (false, Some(tokens)) => format!("Compacted from {tokens} tokens (ctrl+o to expand)"),
+        (false, None) => "Branch summary (ctrl+o to expand)".to_owned(),
+    };
+    render_markdown(
+        &format!("**{label}**\n\n{body}"),
+        usize::from(width),
+        &MarkdownStyle::from_theme(theme),
+        &MarkdownOptions {
+            padding_x: 1,
+            padding_y: 1,
+            text: theme.fg("customMessageText"),
+            background: Some(theme.color("customMessageBg")),
+            preserve_list_markers: true,
+        },
+    )
+}
+
 fn user_message_lines(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     render_markdown(
         text,
@@ -3807,6 +3863,54 @@ mod tests {
             tx,
         );
         assert_eq!(app.picker.as_ref().unwrap().values, ["a"]);
+    }
+
+    #[test]
+    fn summary_boxes_collapse_and_expand_like_pi() {
+        let theme = super::Theme::dark();
+        let text = |lines: Vec<ratatui::text::Line<'static>>| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let collapsed = text(super::summary_message_lines(
+            "[compaction]",
+            Some(1234),
+            "THE SUMMARY",
+            false,
+            80,
+            &theme,
+        ));
+        assert!(
+            collapsed.contains("[compaction]")
+                && collapsed.contains("Compacted from 1234 tokens (ctrl+o to expand)"),
+            "{collapsed}"
+        );
+        assert!(!collapsed.contains("THE SUMMARY"));
+        let expanded = text(super::summary_message_lines(
+            "[compaction]",
+            Some(1234),
+            "THE SUMMARY",
+            true,
+            80,
+            &theme,
+        ));
+        assert!(
+            expanded.contains("Compacted from 1234 tokens") && expanded.contains("THE SUMMARY")
+        );
+        let branch = text(super::summary_message_lines(
+            "[branch]", None, "B", false, 80, &theme,
+        ));
+        assert!(
+            branch.contains("[branch]") && branch.contains("Branch summary (ctrl+o to expand)")
+        );
     }
 
     #[test]
