@@ -11,6 +11,7 @@ pub mod compaction;
 pub mod config_value;
 mod context_files;
 mod mcp;
+pub mod oauth;
 pub mod path_utils;
 pub mod prompt_templates;
 pub mod settings;
