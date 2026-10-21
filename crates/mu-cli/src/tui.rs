@@ -2050,6 +2050,44 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "fork" => {
+            let status = match agent.try_lock() {
+                Err(_) => "Mu is busy.".to_owned(),
+                Ok(mut agent) => {
+                    let messages = agent.user_messages();
+                    match argument.parse::<usize>() {
+                        _ if argument.is_empty() => {
+                            let rows = messages
+                                .iter()
+                                .enumerate()
+                                .map(|(i, (_, text))| {
+                                    let line = text.lines().next().unwrap_or_default();
+                                    format!("{}. {}", i + 1, line.chars().take(60).collect::<String>())
+                                })
+                                .collect::<Vec<_>>();
+                            if rows.is_empty() {
+                                "No messages to fork from.".to_owned()
+                            } else {
+                                format!("Fork from which message? /fork <number>\n{}", rows.join("\n"))
+                            }
+                        }
+                        Ok(number) if (1..=messages.len()).contains(&number) => {
+                            match agent.fork_before_user_message(&messages[number - 1].0) {
+                                Ok(text) => {
+                                    app.queued_prompts.clear();
+                                    app.apply_agent_metadata(&agent);
+                                    app.composer.insert_text(&text);
+                                    format!("Forked before message {number}")
+                                }
+                                Err(error) => format!("Could not fork: {error}"),
+                            }
+                        }
+                        _ => format!("No message {argument}"),
+                    }
+                }
+            };
+            app.show_status(status);
+        }
         "resume" => {
             let sessions = mu_core::list_sessions_for_current_cwd(None).unwrap_or_default();
             let text = if argument.is_empty() {

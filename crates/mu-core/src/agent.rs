@@ -3344,6 +3344,58 @@ impl MuAgent {
         Ok(())
     }
 
+    /// User messages on the active branch, oldest first, as `(entry id, text)`.
+    pub fn user_messages(&self) -> Vec<(String, String)> {
+        branch_entry_values(&self.session)
+            .into_iter()
+            .filter_map(|entry| {
+                let id = entry.get("id")?.as_str()?.to_owned();
+                let message = entry.get("message")?.as_object()?;
+                if message.get("role")?.as_str()? != "user" {
+                    return None;
+                }
+                let text = message_blocks(message)
+                    .iter()
+                    .filter_map(|b| b.get("text")?.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!text.is_empty()).then_some((id, text))
+            })
+            .collect()
+    }
+
+    /// Fork into a new session holding everything before the user message `entry_id`.
+    /// Returns that message's text so it can be edited and resubmitted (Pi's `/fork`).
+    pub fn fork_before_user_message(&mut self, entry_id: &str) -> Result<String, AgentError> {
+        let text = self
+            .user_messages()
+            .into_iter()
+            .find(|(id, _)| id == entry_id)
+            .map(|(_, text)| text)
+            .ok_or_else(|| AgentError::Session("No such user message".into()))?;
+        let truncated = self
+            .session
+            .truncated_before(entry_id)
+            .ok_or_else(|| AgentError::Session("No such user message".into()))?;
+        let fork = truncated
+            .fork_with_id(
+                self.cwd.to_string_lossy().into_owned(),
+                uuid::Uuid::new_v4().to_string(),
+                self.session_path.to_string_lossy().into_owned(),
+            )
+            .ok_or_else(|| AgentError::Session("Current session has no header".into()))?;
+        let path = new_session_path(&self.agent_dir, &self.cwd, None);
+        if self.persist_session {
+            write_session(&fork, &path)?;
+        }
+        self.session = fork;
+        self.transcript = runtime::session_messages(&self.session);
+        self.session_path = path;
+        self.active_mcp_tools = session_active_mcp_tools(&self.session);
+        self.prompt_queue.clear();
+        Ok(text)
+    }
+
     pub fn start_new_session(&mut self) -> Result<(), AgentError> {
         let parent = self.session_path.parent().ok_or_else(|| {
             AgentError::Session("current session path has no parent directory".into())
@@ -5280,6 +5332,26 @@ mod tests {
         crate::auth::set_api_key(&auth, "acme", "k").unwrap();
         assert!(agent.logout("acme").unwrap());
         assert!(!agent.logout("acme").unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fork_before_a_user_message_truncates_history_and_returns_its_text() {
+        let root = std::env::temp_dir().join(format!("mu-fork-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![]);
+        agent.session.append_user_text("first");
+        agent.session.append_user_text("second");
+        agent.session.append_user_text("third");
+        let messages = agent.user_messages();
+        assert_eq!(messages.len(), 3);
+        let old_path = agent.session_path().to_owned();
+        let text = agent.fork_before_user_message(&messages[1].0).unwrap();
+        assert_eq!(text, "second");
+        assert_eq!(agent.user_messages().len(), 1);
+        assert_ne!(agent.session_path(), old_path);
+        let saved = std::fs::read_to_string(agent.session_path()).unwrap();
+        assert!(saved.contains("parentSession") && !saved.contains("second"));
+        assert!(agent.fork_before_user_message("nope").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

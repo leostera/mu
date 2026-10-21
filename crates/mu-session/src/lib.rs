@@ -31,7 +31,7 @@ impl SessionId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EntryId(String);
 
 impl EntryId {
@@ -303,6 +303,25 @@ impl SessionDocument {
         header.cwd = cwd.into();
         header.parent_session = Some(parent_session.into());
         Some(fork)
+    }
+
+    /// A copy holding only the header and the active-branch entries up to and excluding
+    /// `entry_id` (Pi's fork-before-message), preserving each entry unchanged.
+    pub fn truncated_before(&self, entry_id: &str) -> Option<Self> {
+        let branch = self.active_branch_entries();
+        let cut = branch
+            .iter()
+            .position(|entry| entry.id.as_ref().is_some_and(|id| id.as_str() == entry_id))?;
+        let keep = branch[..cut]
+            .iter()
+            .filter_map(|entry| entry.id.clone())
+            .collect::<HashSet<_>>();
+        let mut copy = self.clone();
+        copy.records.retain(|record| match record {
+            SessionRecord::Header(_) => true,
+            SessionRecord::Entry(entry) => entry.id.as_ref().is_some_and(|id| keep.contains(id)),
+        });
+        Some(copy)
     }
 
     pub fn append_user_text(&mut self, text: impl Into<String>) {
@@ -983,6 +1002,26 @@ mod tests {
         assert_eq!(value["firstKeptEntryId"], kept.as_str());
         assert_eq!(value["tokensBefore"], 1234);
         assert_eq!(value["parentId"], kept.as_str());
+    }
+
+    #[test]
+    fn truncating_before_an_entry_keeps_only_earlier_branch_entries() {
+        let mut session = SessionDocument::new("/tmp/p");
+        session.append_user_text("one");
+        session.append_user_text("two");
+        session.append_user_text("three");
+        let ids = session
+            .entries()
+            .map(|e| e.id.clone().unwrap().as_str().to_owned())
+            .collect::<Vec<_>>();
+        let cut = session.truncated_before(&ids[1]).unwrap();
+        assert_eq!(cut.entries().count(), 1);
+        assert!(cut.header().is_some());
+        assert!(session.truncated_before("missing").is_none());
+        assert_eq!(
+            session.truncated_before(&ids[0]).unwrap().entries().count(),
+            0
+        );
     }
 
     #[test]
