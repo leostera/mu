@@ -2875,13 +2875,29 @@ fn render(frame: &mut Frame, app: &mut App) {
 /// Rows of the slash-command list shown under the editor.
 fn command_menu_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     if let Some(picker) = &app.picker {
-        return chrome::select_list_lines(
+        let mut lines = Vec::new();
+        if picker.command == "resume" {
+            let named = if picker.named_only {
+                " [named only]"
+            } else {
+                ""
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  Filter: {}{named}  (type to search, Ctrl+N named)",
+                    picker.query
+                ),
+                app.theme.fg("muted"),
+            )));
+        }
+        lines.extend(chrome::select_list_lines(
             &picker.items,
             picker.selection,
             width,
             app.autocomplete_max_visible,
             &app.theme,
-        );
+        ));
+        return lines;
     }
     if app.model_selector_open {
         let items = app
