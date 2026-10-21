@@ -1068,6 +1068,8 @@ struct App {
     model_selector_open: bool,
     /// Generic selector overlay (thinking level, fork point); Enter runs `command <value>`.
     picker: Option<Picker>,
+    /// When Esc was last pressed on an empty editor (double-Esc opens `/tree` or `/fork`).
+    last_escape: Option<std::time::Instant>,
     /// Prompt-template and skill commands offered after the built-ins in the slash menu.
     extra_commands: Vec<chrome::SlashCommand>,
     model_selection: usize,
@@ -1198,6 +1200,7 @@ impl App {
             command_selection: 0,
             model_selector_open: false,
             picker: None,
+            last_escape: None,
             extra_commands: Vec::new(),
             model_selection: 0,
             loading: false,
@@ -1651,6 +1654,33 @@ fn handle_key(
     }
     if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.tools_expanded = !app.tools_expanded;
+        return;
+    }
+    if key.code == KeyCode::Esc
+        && !app.loading
+        && app.input.is_empty()
+        && app.picker.is_none()
+        && !app.model_selector_open
+        && !app.command_menu_open
+    {
+        let action = agent
+            .try_lock()
+            .ok()
+            .and_then(|agent| agent.settings().get("doubleEscapeAction"))
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "tree".to_owned());
+        if action != "none" {
+            let now = std::time::Instant::now();
+            let double = app
+                .last_escape
+                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
+            app.last_escape = if double { None } else { Some(now) };
+            if double {
+                let command = if action == "tree" { "/tree" } else { "/fork" };
+                app.composer.insert_text(command);
+                execute_command(app, &agent);
+            }
+        }
         return;
     }
     if app.loading {
@@ -3351,6 +3381,25 @@ mod tests {
         execute_command(&mut app, &agent);
         let picker = app.picker.as_ref().expect("picker opens");
         assert_eq!(picker.values, ["yes", "no"]);
+    }
+
+    #[tokio::test]
+    async fn double_escape_on_an_empty_editor_opens_the_tree_picker_only_when_quick() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        handle_key(esc, &mut app, agent.clone(), tx.clone());
+        assert!(app.picker.is_none() && app.last_escape.is_some());
+        app.last_escape = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        handle_key(esc, &mut app, agent.clone(), tx.clone());
+        assert!(app.picker.is_none(), "slow second Esc only re-arms");
+        handle_key(esc, &mut app, agent.clone(), tx.clone());
+        // An empty session has no tree rows, so the command reports instead of opening a picker.
+        assert!(
+            app.last_escape.is_none(),
+            "double Esc fired and reset the timer"
+        );
     }
 
     #[test]
