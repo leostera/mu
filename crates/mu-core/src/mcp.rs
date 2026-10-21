@@ -949,6 +949,20 @@ fn blob_resource_text(resource: &Value) -> String {
     }
 }
 
+/// An embedded `resource` whose blob is an `image/*` becomes an image attachment (not a file).
+fn embedded_image(block: &Value) -> Option<crate::tools::ToolImage> {
+    if block.get("type").and_then(Value::as_str) != Some("resource") {
+        return None;
+    }
+    let resource = block.get("resource")?;
+    let mime_type = resource.get("mimeType")?.as_str()?;
+    mime_type.starts_with("image/").then_some(())?;
+    Some(crate::tools::ToolImage {
+        data: resource.get("blob")?.as_str()?.to_owned(),
+        mime_type: mime_type.to_owned(),
+    })
+}
+
 /// Pi's `formatSize`.
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
@@ -999,6 +1013,8 @@ fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
                 && block.get("mimeType").and_then(Value::as_str).is_some()
             {
                 None
+            } else if embedded_image(block).is_some() {
+                None
             } else if block.get("type").and_then(Value::as_str) == Some("resource") {
                 let resource = block.get("resource").unwrap_or(&Value::Null);
                 Some(match resource.get("text").and_then(Value::as_str) {
@@ -1039,6 +1055,7 @@ fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
                 mime_type: block.get("mimeType")?.as_str()?.to_owned(),
             })
         })
+        .chain(blocks.iter().filter_map(embedded_image))
         .collect();
     Ok(McpToolResult {
         images,
@@ -1757,6 +1774,15 @@ mod tests {
         );
         assert_eq!(format_size(10), "10B");
         assert_eq!(format_size(3 * 1024 * 1024), "3.0MB");
+    }
+
+    #[test]
+    fn embedded_image_blobs_become_attachments() {
+        let result = parse_tool_result(json!({"content":[
+            {"type":"resource","resource":{"uri":"file:///c.png","mimeType":"image/png","blob":"Yw=="}}]})).unwrap();
+        assert_eq!(result.content, "");
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].data, "Yw==");
     }
 
     #[test]
