@@ -956,6 +956,11 @@ impl MuAgent {
                 });
                 return Box::pin(self.submit_with_cancel(prompt, on_event, cancel)).await;
             }
+            if self.needs_auto_compaction() {
+                on_event(AgentEvent::AutoCompactionStarted);
+                // A failed summary leaves the session untouched; the turn itself succeeded.
+                let _ = self.compact().await;
+            }
         }
         Ok(())
     }

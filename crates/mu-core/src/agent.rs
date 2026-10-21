@@ -467,6 +467,8 @@ pub enum AgentEvent {
         attempt: u32,
     },
     SkillCommandWarning(String),
+    /// The context passed the compaction threshold; a summary is being generated.
+    AutoCompactionStarted,
 }
 enum TerminalResponse {
     Completed,
@@ -2746,11 +2748,44 @@ impl MuAgent {
         self.session.session_name()
     }
 
+    /// `compaction.{enabled,reserveTokens,keepRecentTokens}` from settings (project overrides agent).
+    pub fn compaction_settings(&self) -> crate::compaction::CompactionSettings {
+        let mut settings = crate::compaction::CompactionSettings::default();
+        let read = |key: &str| {
+            configured_setting(&self.agent_dir, &self.cwd, "compaction", |value| {
+                value.get(key).cloned()
+            })
+        };
+        if let Some(enabled) = read("enabled").and_then(|v| v.as_bool()) {
+            settings.enabled = enabled;
+        }
+        if let Some(tokens) = read("reserveTokens").and_then(|v| v.as_u64()) {
+            settings.reserve_tokens = tokens;
+        }
+        if let Some(tokens) = read("keepRecentTokens").and_then(|v| v.as_u64()) {
+            settings.keep_recent_tokens = tokens;
+        }
+        settings
+    }
+
+    /// Whether the last response left the context past the auto-compaction threshold.
+    pub fn needs_auto_compaction(&self) -> bool {
+        let stats = self.footer_stats();
+        match stats.context_tokens {
+            Some(tokens) if stats.context_window > 0 => crate::compaction::should_compact(
+                tokens,
+                stats.context_window,
+                &self.compaction_settings(),
+            ),
+            _ => false,
+        }
+    }
+
     /// Summarize older history, append a `compaction` entry, and rebuild the transcript.
     ///
     /// Returns `Ok(None)` when there is nothing before the cut point to compact.
     pub async fn compact(&mut self) -> Result<Option<CompactionOutcome>, AgentError> {
-        let settings = crate::compaction::CompactionSettings::default();
+        let settings = self.compaction_settings();
         let path = branch_entry_values(&self.session);
         let cut =
             crate::compaction::find_cut_point(&path, 0, path.len(), settings.keep_recent_tokens);
@@ -4783,6 +4818,48 @@ mod tests {
         );
         let saved = std::fs::read_to_string(agent.session_path()).unwrap();
         assert!(saved.contains("\"type\":\"compaction\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_runs_after_a_turn_that_fills_the_context_window() {
+        let root = std::env::temp_dir().join(format!("mu-auto-compact-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![Ok(scripted_reply("summary text", vec![]))]);
+        std::fs::create_dir_all(root.join("agent")).unwrap();
+        std::fs::write(
+            root.join("agent/models.json"),
+            r#"{"providers":{"test-provider":{"models":[{"id":"test-model","contextWindow":30000}]}}}"#,
+        )
+        .unwrap();
+        for index in 0..4 {
+            agent
+                .session
+                .append_user_text(format!("q{index} {}", "x".repeat(20_000)));
+            agent.session.append_assistant_response(
+                "openai-responses",
+                "p",
+                "m",
+                mu_session::AssistantTurnResponse {
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    text: format!("a{index} {}", "y".repeat(20_000)),
+                    usage: mu_session::MessageUsage {
+                        total_tokens: 29_000,
+                        ..mu_session::MessageUsage::default()
+                    },
+                },
+            );
+        }
+        assert!(agent.needs_auto_compaction());
+        agent.compact().await.unwrap();
+        // The compaction entry carries no usage, but the last assistant usage is still full;
+        // a disabled setting must suppress the trigger.
+        std::fs::write(
+            root.join("agent/settings.json"),
+            r#"{"compaction":{"enabled":false}}"#,
+        )
+        .unwrap();
+        assert!(!agent.needs_auto_compaction());
         std::fs::remove_dir_all(root).unwrap();
     }
 

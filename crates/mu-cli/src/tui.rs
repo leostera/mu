@@ -1359,6 +1359,9 @@ impl App {
                     AgentEvent::RetryAttemptStarted { attempt } => {
                         self.retry_status = Some(format!("Retry attempt {attempt} started…"));
                     }
+                    AgentEvent::AutoCompactionStarted => {
+                        self.retry_status = Some("Context is full; compacting…".into());
+                    }
                     AgentEvent::SkillCommandWarning(warning) => {
                         self.retry_status = Some(warning);
                     }
