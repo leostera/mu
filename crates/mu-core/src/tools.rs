@@ -3249,15 +3249,23 @@ mod tests {
     async fn bash_collects_output_from_recently_exited_shell_descendants() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let result = execute(
-            &dir,
-            "bash",
-            &json!({"command":"(for i in {1..30}; do sleep 0.01; printf x; done) &"}),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.structured_content.unwrap()["output"], "x".repeat(30));
+        // Output is collected while a descendant keeps writing, and ends after 100ms of silence, so
+        // a machine stall longer than that can cut it short: allow a few attempts.
+        let mut last = Value::Null;
+        for _ in 0..3 {
+            let result = execute(
+                &dir,
+                "bash",
+                &json!({"command":"(for i in {1..30}; do sleep 0.01; printf x; done) &"}),
+            )
+            .await
+            .unwrap();
+            last = result.structured_content.unwrap()["output"].clone();
+            if last == "x".repeat(30).as_str() {
+                break;
+            }
+        }
+        assert_eq!(last, "x".repeat(30));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3592,6 +3600,61 @@ mod tests {
                 && body[7..].chars().all(char::is_whitespace)
                 && body.len() > 7
         );
+    }
+
+    /// Ported from Pi's "tool cwd resolution" suite: every built-in resolves relative paths
+    /// against the cwd it is executed with, not the process's.
+    #[tokio::test]
+    async fn every_builtin_resolves_relative_paths_against_the_execution_cwd() {
+        let dir = std::env::temp_dir().join(format!("mu-ctx-cwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ctx-read.txt"), "hello from ctx.cwd").unwrap();
+        let read = execute(&dir, "read", &json!({"path":"ctx-read.txt"}))
+            .await
+            .unwrap();
+        assert!(read.content.contains("hello from ctx.cwd"));
+        execute(
+            &dir,
+            "write",
+            &json!({"path":"ctx-write.txt","content":"written via ctx.cwd"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ctx-write.txt")).unwrap(),
+            "written via ctx.cwd"
+        );
+        std::fs::write(dir.join("ctx-edit.txt"), "old text").unwrap();
+        execute(
+            &dir,
+            "edit",
+            &json!({"path":"ctx-edit.txt","edits":[{"oldText":"old text","newText":"new text"}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ctx-edit.txt")).unwrap(),
+            "new text"
+        );
+        let grep = execute(&dir, "grep", &json!({"pattern":"hello"}))
+            .await
+            .unwrap();
+        assert!(grep.content.contains("ctx-read.txt"));
+        let find = execute(&dir, "find", &json!({"pattern":"ctx-edit.txt"}))
+            .await
+            .unwrap();
+        assert!(find.content.contains("ctx-edit.txt"));
+        let ls = execute(&dir, "ls", &json!({})).await.unwrap();
+        assert!(ls.content.contains("ctx-write.txt"));
+        let pwd = execute(&dir, "bash", &json!({"command":"pwd"}))
+            .await
+            .unwrap();
+        let real = std::fs::canonicalize(&dir).unwrap();
+        assert!(
+            pwd.content.contains(real.to_str().unwrap())
+                || pwd.content.contains(dir.to_str().unwrap())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
