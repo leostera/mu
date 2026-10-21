@@ -265,6 +265,8 @@ pub enum SessionRecord {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionDocument {
     records: Vec<SessionRecord>,
+    /// In-memory branch tip chosen by [`SessionDocument::set_leaf`]; `None` means the last entry.
+    leaf: Option<EntryId>,
 }
 
 impl SessionDocument {
@@ -284,6 +286,7 @@ impl SessionDocument {
         };
         Self {
             records: vec![SessionRecord::Header(header)],
+            leaf: None,
         }
     }
 
@@ -497,7 +500,7 @@ impl SessionDocument {
 
     /// Append a Pi-compatible custom entry on the active session branch.
     pub fn append_session_name(&mut self, name: &str) {
-        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let parent_id = self.take_leaf();
         let id = next_entry_id(
             &mut self
                 .entries()
@@ -529,7 +532,7 @@ impl SessionDocument {
     }
 
     pub fn append_custom_entry(&mut self, custom_type: &str, data: Value) {
-        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let parent_id = self.take_leaf();
         let id = next_entry_id(
             &mut self
                 .entries()
@@ -557,7 +560,7 @@ impl SessionDocument {
         first_kept_entry_id: &str,
         tokens_before: u64,
     ) {
-        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let parent_id = self.take_leaf();
         let id = next_entry_id(
             &mut self
                 .entries()
@@ -583,7 +586,7 @@ impl SessionDocument {
     }
 
     pub fn append_model_change(&mut self, provider: &str, model_id: &str) {
-        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let parent_id = self.take_leaf();
         let id = next_entry_id(
             &mut self
                 .entries()
@@ -605,7 +608,7 @@ impl SessionDocument {
     }
 
     fn append_message(&mut self, message: Value) {
-        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let parent_id = self.take_leaf();
         let id = next_entry_id(
             &mut self
                 .entries()
@@ -658,7 +661,10 @@ impl SessionDocument {
             records.push(record);
         }
 
-        Ok(Self { records })
+        Ok(Self {
+            records,
+            leaf: None,
+        })
     }
 
     pub fn records(&self) -> &[SessionRecord] {
@@ -744,6 +750,35 @@ impl SessionDocument {
         }
     }
 
+    /// The tip new entries attach to: the chosen branch tip, else the last entry.
+    pub fn leaf_id(&self) -> Option<EntryId> {
+        self.leaf
+            .clone()
+            .or_else(|| self.entries().last().and_then(|entry| entry.id.clone()))
+    }
+
+    /// Point the session at another entry (Pi's branch navigation); the next append forks there.
+    /// Returns false when `id` is not an entry of this session.
+    pub fn set_leaf(&mut self, id: &str) -> bool {
+        let found = self
+            .entries()
+            .find_map(|entry| entry.id.clone().filter(|entry_id| entry_id.as_str() == id));
+        match found {
+            Some(entry_id) => {
+                self.leaf = Some(entry_id);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Consume the tip for an append: the new entry becomes the last record, hence the tip.
+    fn take_leaf(&mut self) -> Option<EntryId> {
+        let leaf = self.leaf_id();
+        self.leaf = None;
+        leaf
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = &SessionEntry> {
         self.records.iter().filter_map(|record| match record {
             SessionRecord::Header(_) => None,
@@ -758,7 +793,12 @@ impl SessionDocument {
             .iter()
             .filter_map(|entry| entry.id.as_ref().map(|id| (id.as_str(), *entry)))
             .collect::<std::collections::HashMap<_, _>>();
-        let Some(mut entry) = entries.last().copied() else {
+        let tip = self.leaf_id();
+        let Some(mut entry) = tip
+            .as_ref()
+            .and_then(|id| by_id.get(id.as_str()).copied())
+            .or_else(|| entries.last().copied())
+        else {
             return Vec::new();
         };
         let mut branch = Vec::new();
@@ -1022,6 +1062,22 @@ mod tests {
             session.truncated_before(&ids[0]).unwrap().entries().count(),
             0
         );
+    }
+
+    #[test]
+    fn set_leaf_forks_new_entries_from_an_earlier_entry() {
+        let mut session = SessionDocument::new("/tmp/p");
+        session.append_user_text("one");
+        session.append_user_text("two");
+        let first = session.entries().next().unwrap().id.clone().unwrap();
+        assert!(session.set_leaf(first.as_str()));
+        assert!(!session.set_leaf("missing"));
+        assert_eq!(session.active_branch_entries().len(), 1);
+        session.append_user_text("alt");
+        let branch = session.active_branch_entries();
+        assert_eq!(branch.len(), 2, "alt branches off the first entry");
+        assert_eq!(session.entries().count(), 3, "the old branch is kept");
+        assert_eq!(session.leaf_id(), branch.last().and_then(|e| e.id.clone()));
     }
 
     #[test]

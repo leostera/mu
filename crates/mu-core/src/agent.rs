@@ -2882,6 +2882,17 @@ fn write_session(session: &SessionDocument, path: &Path) -> Result<(), AgentErro
         .map_err(|error| AgentError::Session(error.to_string()))
 }
 
+/// One row of `/tree`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeRow {
+    pub id: String,
+    pub depth: usize,
+    pub label: String,
+    /// On the path from the root to the current tip.
+    pub on_branch: bool,
+    pub is_leaf: bool,
+}
+
 /// Result of [`MuAgent::compact`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompactionOutcome {
@@ -3536,6 +3547,63 @@ impl MuAgent {
         self.transcript = runtime::session_messages(&self.session);
         self.session_path = new_path;
         self.active_mcp_tools = session_active_mcp_tools(&self.session);
+        self.prompt_queue.clear();
+        Ok(())
+    }
+
+    /// Every message entry as a tree row (`depth` = distance from the root), oldest first.
+    pub fn tree_rows(&self) -> Vec<TreeRow> {
+        let active: HashSet<String> = self
+            .session
+            .active_branch_entries()
+            .iter()
+            .filter_map(|entry| entry.id.as_ref().map(|id| id.as_str().to_owned()))
+            .collect();
+        let leaf = self.session.leaf_id().map(|id| id.as_str().to_owned());
+        let mut depths: HashMap<String, usize> = HashMap::new();
+        let mut rows = Vec::new();
+        for entry in self.session.entries() {
+            let Some(id) = entry.id.as_ref().map(|id| id.as_str().to_owned()) else {
+                continue;
+            };
+            let depth = match &entry.parent_id {
+                mu_session::ParentReference::Entry(parent) => {
+                    depths.get(parent.as_str()).map_or(0, |d| d + 1)
+                }
+                _ => 0,
+            };
+            depths.insert(id.clone(), depth);
+            let Some(message) = entry
+                .extra_fields()
+                .get("message")
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            let role = message.get("role").and_then(Value::as_str).unwrap_or("?");
+            let text = message_blocks(message)
+                .iter()
+                .filter_map(|block| block.get("text")?.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let summary = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            rows.push(TreeRow {
+                on_branch: active.contains(&id),
+                is_leaf: leaf.as_deref() == Some(id.as_str()),
+                label: format!("{role}: {}", summary.chars().take(60).collect::<String>()),
+                id,
+                depth,
+            });
+        }
+        rows
+    }
+
+    /// Move the session tip to `entry_id`; the next message branches from there (Pi's `/tree`).
+    pub fn navigate_to(&mut self, entry_id: &str) -> Result<(), AgentError> {
+        if !self.session.set_leaf(entry_id) {
+            return Err(AgentError::Session("No such entry".into()));
+        }
+        self.transcript = runtime::session_messages(&self.session);
         self.prompt_queue.clear();
         Ok(())
     }
@@ -5600,6 +5668,29 @@ mod tests {
                 .get("strict")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn tree_navigation_branches_new_messages_from_the_chosen_entry() {
+        let root = std::env::temp_dir().join(format!("mu-tree-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![]);
+        agent.session.append_user_text("one");
+        agent.session.append_user_text("two");
+        let rows = agent.tree_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].is_leaf && rows[1].on_branch && rows[1].depth == 1);
+        agent.navigate_to(&rows[0].id).unwrap();
+        assert_eq!(agent.user_messages().len(), 1);
+        agent.session.append_user_text("alt");
+        let rows = agent.tree_rows();
+        assert_eq!(rows.len(), 3);
+        assert!(
+            !rows[1].on_branch,
+            "the abandoned branch is shown but off-branch"
+        );
+        assert_eq!(rows[2].depth, 1);
+        assert!(agent.navigate_to("nope").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

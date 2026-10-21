@@ -2050,6 +2050,48 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "tree" => {
+            let status = match agent.try_lock() {
+                Err(_) => "Mu is busy.".to_owned(),
+                Ok(mut agent) => {
+                    let rows = agent.tree_rows();
+                    match argument.parse::<usize>() {
+                        _ if argument.is_empty() => {
+                            let lines = rows
+                                .iter()
+                                .enumerate()
+                                .map(|(i, row)| {
+                                    format!(
+                                        "{}{}. {}{}{}",
+                                        "  ".repeat(row.depth.min(8)),
+                                        i + 1,
+                                        row.label,
+                                        if row.is_leaf { "  ← current" } else { "" },
+                                        if row.on_branch { "" } else { "  (other branch)" },
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            if lines.is_empty() {
+                                "Session is empty.".to_owned()
+                            } else {
+                                format!("Session tree (use /tree <number> to switch):\n{}", lines.join("\n"))
+                            }
+                        }
+                        Ok(number) if (1..=rows.len()).contains(&number) => {
+                            match agent.navigate_to(&rows[number - 1].id) {
+                                Ok(()) => {
+                                    app.apply_agent_metadata(&agent);
+                                    format!("Switched to entry {number}")
+                                }
+                                Err(error) => format!("Could not switch: {error}"),
+                            }
+                        }
+                        _ => format!("No entry {argument}"),
+                    }
+                }
+            };
+            app.show_status(status);
+        }
         "fork" => {
             let status = match agent.try_lock() {
                 Err(_) => "Mu is busy.".to_owned(),
