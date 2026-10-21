@@ -202,6 +202,33 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
                 })
                 .map_err(|error| error.to_string()),
         },
+        "get_tree" => Ok(Some(json!({
+            "entries": agent
+                .tree_rows()
+                .into_iter()
+                .map(|row| json!({
+                    "id": row.id,
+                    "depth": row.depth,
+                    "label": row.label,
+                    "onBranch": row.on_branch,
+                    "isLeaf": row.is_leaf,
+                }))
+                .collect::<Vec<_>>(),
+        }))),
+        "get_messages" => Ok(Some(json!({
+            "messages": agent
+                .session_transcript()
+                .into_iter()
+                .map(|message| json!({
+                    "role": match message.role {
+                        mu_core::SessionTranscriptRole::User => "user",
+                        mu_core::SessionTranscriptRole::Assistant => "assistant",
+                    },
+                    "text": message.text,
+                    "thinking": message.thinking,
+                }))
+                .collect::<Vec<_>>(),
+        }))),
         "get_session_stats" => Ok(Some(json!({"summary": agent.session_summary()}))),
         "get_last_assistant_text" => Ok(Some(json!({"text": agent.last_assistant_text()}))),
         other => Err(format!("Unknown command: {other}")),
@@ -355,6 +382,10 @@ mod tests {
         )
         .await;
         assert!(ran["data"]["output"].as_str().unwrap().contains("rpc-bash"));
+        let messages = handle(&mut agent, &json!({"type":"get_messages"})).await;
+        assert!(messages["success"] == true && messages["data"]["messages"].is_array());
+        let tree = handle(&mut agent, &json!({"type":"get_tree"})).await;
+        assert!(tree["data"]["entries"].is_array());
         let nothing = handle(&mut agent, &json!({"type":"compact"})).await;
         assert_eq!(nothing["error"], "Nothing to compact");
         let missing = handle(&mut agent, &json!({"type":"prompt"})).await;
