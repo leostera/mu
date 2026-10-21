@@ -190,6 +190,23 @@ pub(super) fn session_messages(session: &SessionDocument) -> Vec<AgentMessage> {
             ));
             continue;
         }
+        if entry.get("type").and_then(Value::as_str) == Some("branch_summary") {
+            if let Some(summary) = entry
+                .get("summary")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                messages.push(AgentMessage::user_text(
+                    format!(
+                        "{}{summary}{}",
+                        crate::compaction::BRANCH_SUMMARY_PREFIX,
+                        crate::compaction::BRANCH_SUMMARY_SUFFIX
+                    ),
+                    0,
+                ));
+            }
+            continue;
+        }
         let Some(message) = entry.get("message").and_then(Value::as_object) else {
             continue;
         };

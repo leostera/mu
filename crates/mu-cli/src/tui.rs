@@ -2574,7 +2574,10 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 Err(_) => "Mu is busy.".to_owned(),
                 Ok(mut agent) => {
                     let rows = agent.tree_rows();
-                    match argument.parse::<usize>() {
+                    // `/tree <n> summarize [focus]` leaves a summary of the branch being left.
+                    let (first, rest) = argument.split_once(' ').unwrap_or((argument, ""));
+                    let summarize = rest.strip_prefix("summarize").map(str::trim);
+                    match first.parse::<usize>() {
                         _ if argument.is_empty() => {
                             if rows.is_empty() {
                                 "Session is empty.".to_owned()
@@ -2602,10 +2605,24 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                             }
                         }
                         Ok(number) if (1..=rows.len()).contains(&number) => {
-                            match agent.navigate_to(&rows[number - 1].id) {
-                                Ok(()) => {
+                            let target = rows[number - 1].id.clone();
+                            let outcome = match summarize {
+                                Some(focus) => tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current().block_on(
+                                        agent.navigate_with_summary(&target, Some(focus)),
+                                    )
+                                })
+                                .map(|summary| summary.is_some()),
+                                None => agent.navigate_to(&target).map(|()| false),
+                            };
+                            match outcome {
+                                Ok(summarized) => {
                                     app.apply_agent_metadata(&agent);
-                                    format!("Switched to entry {number}")
+                                    if summarized {
+                                        format!("Switched to entry {number} (left a branch summary)")
+                                    } else {
+                                        format!("Switched to entry {number}")
+                                    }
                                 }
                                 Err(error) => format!("Could not switch: {error}"),
                             }

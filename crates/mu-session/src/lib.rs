@@ -585,6 +585,30 @@ impl SessionDocument {
         }));
     }
 
+    /// Append a Pi `branch_summary` entry under the current tip: `summary` describes the branch
+    /// abandoned when navigating from `from_id`.
+    pub fn append_branch_summary(&mut self, summary: &str, from_id: &str) {
+        let parent_id = self.take_leaf();
+        let id = next_entry_id(
+            &mut self
+                .entries()
+                .filter_map(|entry| entry.id.as_ref().map(|id| id.as_str().to_owned()))
+                .collect(),
+        );
+        let mut extra = BTreeMap::new();
+        extra.insert("fromId".into(), Value::String(from_id.to_owned()));
+        extra.insert("summary".into(), Value::String(summary.to_owned()));
+        self.records.push(SessionRecord::Entry(SessionEntry {
+            entry_type: EntryType("branch_summary".into()),
+            id: Some(id),
+            parent_id: parent_id
+                .map(ParentReference::Entry)
+                .unwrap_or(ParentReference::Root),
+            timestamp: now_timestamp(),
+            extra,
+        }));
+    }
+
     pub fn append_model_change(&mut self, provider: &str, model_id: &str) {
         let parent_id = self.take_leaf();
         let id = next_entry_id(

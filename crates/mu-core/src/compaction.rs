@@ -44,6 +44,42 @@ pub fn summarization_prompt_for(
     }
 }
 
+/// Pi's branch-summary prompt and the framing around a stored branch summary.
+pub const BRANCH_SUMMARY_PROMPT: &str =
+    "Create a structured summary of this conversation branch for context when returning later.
+
+Use this EXACT format:
+
+## Goal
+[What was the user trying to accomplish in this branch?]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned]
+- [Or \"(none)\" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Work that was started but not finished]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [What should happen next to continue this work]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages.";
+
+pub const BRANCH_SUMMARY_PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
+pub const BRANCH_SUMMARY_PREFIX: &str =
+    "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
+pub const BRANCH_SUMMARY_SUFFIX: &str = "</summary>";
+
 /// Pi's prompt for the part of a turn that precedes a mid-turn cut.
 pub const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = "The messages above are earlier context from an ongoing conversation. Later messages are stored separately and do not need to be reconstructed.
 
@@ -570,6 +606,17 @@ mod tests {
             5,
             "the truncation note is its own paragraph: {parts:?}"
         );
+    }
+
+    #[test]
+    fn branch_summary_framing_matches_pi() {
+        assert!(
+            BRANCH_SUMMARY_PROMPT
+                .starts_with("Create a structured summary of this conversation branch")
+        );
+        assert!(BRANCH_SUMMARY_PROMPT.contains("## Next Steps\n1. [What should happen next"));
+        assert!(BRANCH_SUMMARY_PREAMBLE.ends_with("exploration:\n\n"));
+        assert_eq!(BRANCH_SUMMARY_SUFFIX, "</summary>");
     }
 
     #[test]

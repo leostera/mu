@@ -4209,6 +4209,61 @@ impl MuAgent {
         Ok(())
     }
 
+    /// Switch to `entry_id` and leave a summary of the branch being abandoned (Pi's
+    /// `navigateTree` with `summarize`). With nothing to summarize it just navigates.
+    pub async fn navigate_with_summary(
+        &mut self,
+        entry_id: &str,
+        custom_instructions: Option<&str>,
+    ) -> Result<Option<String>, AgentError> {
+        let old_leaf = self.session.leaf_id().map(|id| id.as_str().to_owned());
+        let old_branch = branch_entry_values(&self.session);
+        self.navigate_to(entry_id)?;
+        let kept = branch_entry_values(&self.session)
+            .iter()
+            .filter_map(|e| e.get("id")?.as_str().map(str::to_owned))
+            .collect::<std::collections::HashSet<_>>();
+        let abandoned = old_branch
+            .into_iter()
+            .filter(|e| {
+                e.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !kept.contains(id))
+            })
+            .collect::<Vec<_>>();
+        let Some(from_id) =
+            old_leaf.filter(|_| abandoned.iter().any(|e| e.get("message").is_some()))
+        else {
+            return Ok(None);
+        };
+        let instructions = match custom_instructions.map(str::trim).filter(|c| !c.is_empty()) {
+            Some(custom) => format!(
+                "{}\n\nAdditional focus: {custom}",
+                crate::compaction::BRANCH_SUMMARY_PROMPT
+            ),
+            None => crate::compaction::BRANCH_SUMMARY_PROMPT.to_owned(),
+        };
+        let prompt = format!(
+            "<conversation>\n{}\n</conversation>\n\n{instructions}",
+            crate::compaction::serialize_conversation(&abandoned)
+        );
+        let text = match self.summarize_text(prompt).await {
+            Ok(text) => text,
+            Err(error) => return Err(error),
+        };
+        let mut file_ops = crate::compaction::FileOperations::default();
+        file_ops.add_entries(&abandoned);
+        let summary = format!(
+            "{}{text}{}",
+            crate::compaction::BRANCH_SUMMARY_PREAMBLE,
+            file_ops.format()
+        );
+        self.session.append_branch_summary(&summary, &from_id);
+        self.save_session()?;
+        self.transcript = runtime::session_messages(&self.session);
+        Ok(Some(summary))
+    }
+
     /// User messages on the active branch, oldest first, as `(entry id, text)`.
     pub fn user_messages(&self) -> Vec<(String, String)> {
         branch_entry_values(&self.session)
@@ -6327,6 +6382,24 @@ mod tests {
             super::expand_tilde("/abs"),
             std::path::PathBuf::from("/abs")
         );
+    }
+
+    #[test]
+    fn branch_summaries_project_into_context_as_a_framed_user_message() {
+        let mut session = SessionDocument::new("/w".to_owned());
+        session.append_user_text("first");
+        session.append_branch_summary("explored X", "abandoned-leaf");
+        let messages = super::runtime::session_messages(&session);
+        let inputs = super::runtime::responses_input(&messages);
+        let text = inputs.last().unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            text,
+            "The following is a summary of a branch that this conversation came back from:\n\n<summary>\nexplored X</summary>"
+        );
+        assert_eq!(inputs.len(), 2);
     }
 
     #[test]
