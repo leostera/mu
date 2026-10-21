@@ -1681,6 +1681,15 @@ fn handle_key(
         }
         return;
     }
+    if key.code == KeyCode::Char('l')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !app.loading
+    {
+        // Ctrl+L opens the model selector (Pi's `app.model.select`).
+        app.model_selection = app.models.iter().position(|m| m == &app.model).unwrap_or(0);
+        app.model_selector_open = true;
+        return;
+    }
     if key.code == KeyCode::Char('x') && key.modifiers.contains(KeyModifiers::CONTROL) {
         copy_last_message(app);
         return;
@@ -2090,6 +2099,7 @@ const HOTKEYS: &str = "**Keyboard Shortcuts**
 | `PageUp` / `PageDown` | Scroll by page |
 | `Ctrl+Home` / `Ctrl+End` | Scroll to start / end |
 | `Ctrl+P` | Cycle models |
+| `Ctrl+L` | Open model selector |
 | `Shift+Tab` | Cycle thinking level |
 | `Ctrl+T` | Toggle thinking block visibility |
 | `Ctrl+O` | Toggle tool output expansion |
@@ -3465,6 +3475,22 @@ mod tests {
             "now\n\nlater\n\ndraft",
             "nothing queued leaves the editor alone"
         );
+    }
+
+    #[tokio::test]
+    async fn ctrl_l_opens_the_model_selector_on_the_current_model() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::from_metadata("b".into(), "demo".into(), "session".into());
+        app.models = vec!["a".into(), "b".into()];
+        handle_key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
+            &mut app,
+            agent,
+            tx,
+        );
+        assert!(app.model_selector_open);
+        assert_eq!(app.model_selection, 1);
     }
 
     #[test]
