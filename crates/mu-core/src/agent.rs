@@ -3748,6 +3748,10 @@ impl MuAgent {
         Ok(next)
     }
 
+    pub fn agent_dir(&self) -> &Path {
+        &self.agent_dir
+    }
+
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }

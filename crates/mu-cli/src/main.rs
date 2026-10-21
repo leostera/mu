@@ -303,6 +303,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             None => (None, None),
         }
     };
+    if let Some(name) = &cli.theme {
+        let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
+            .unwrap_or_default();
+        tui::Theme::resolve(name, &agent_dir)?;
+    }
     let (model, suffix_thinking) = split_thinking_suffix(cli.model.as_deref());
     // An explicit --thinking wins; the `:level` suffix is only a fallback (as in Pi).
     let thinking = match cli.thinking.as_deref() {

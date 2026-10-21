@@ -47,6 +47,26 @@ impl Theme {
         }
     }
 
+    /// A bundled theme, a JSON file path, or `<agent_dir>/themes/<name>.json`.
+    pub fn resolve(name: &str, agent_dir: &std::path::Path) -> Result<Self, String> {
+        if let Some(theme) = Self::named(name) {
+            return Ok(theme);
+        }
+        let direct = std::path::Path::new(name);
+        let candidates = [
+            direct.to_path_buf(),
+            agent_dir.join("themes").join(format!("{name}.json")),
+        ];
+        let Some(path) = candidates.iter().find(|path| path.is_file()) else {
+            return Err(format!(
+                "Unknown theme \"{name}\" (bundled: dark, light; or a path / {}/themes/<name>.json)",
+                agent_dir.display()
+            ));
+        };
+        let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::parse(&json).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
     pub fn parse(json: &str) -> Result<Self, ThemeError> {
         let document: Value =
             serde_json::from_str(json).map_err(|error| ThemeError::Json(error.to_string()))?;
@@ -139,6 +159,30 @@ fn parse_okhsl(text: &str) -> Result<Color, ThemeError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolve_finds_bundled_files_and_themes_dir_and_rejects_unknown() {
+        use super::Theme;
+        let dir = std::env::temp_dir().join(format!("mu-theme-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("themes")).unwrap();
+        let json = include_str!("../../assets/themes/dark.json");
+        std::fs::write(dir.join("themes/custom.json"), json).unwrap();
+        assert!(Theme::resolve("light", &dir).is_ok());
+        assert!(Theme::resolve("custom", &dir).is_ok());
+        assert!(Theme::resolve(dir.join("themes/custom.json").to_str().unwrap(), &dir).is_ok());
+        std::fs::write(dir.join("themes/bad.json"), "{").unwrap();
+        assert!(
+            Theme::resolve("bad", &dir)
+                .unwrap_err()
+                .contains("invalid theme JSON")
+        );
+        assert!(
+            Theme::resolve("nope", &dir)
+                .unwrap_err()
+                .starts_with("Unknown theme")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     use super::*;
 
     #[test]

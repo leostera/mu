@@ -3,6 +3,7 @@ pub(crate) mod fuzzy;
 mod markdown;
 mod terminal;
 mod theme;
+pub use theme::Theme;
 mod tool_view;
 
 use std::{
@@ -37,7 +38,6 @@ use unicode_width::UnicodeWidthStr;
 
 use self::{
     markdown::{MarkdownOptions, MarkdownStyle, render_markdown},
-    theme::Theme,
     tool_view::{ToolView, tool_lines},
 };
 
@@ -1120,7 +1120,10 @@ impl App {
         self.session_path = agent.session_path().display().to_string();
         self.prompt_queue = agent.prompt_queue();
         self.hide_thinking = agent.hide_thinking_block();
-        if let Some(theme) = agent.theme_name().and_then(|name| Theme::named(&name)) {
+        if let Some(theme) = agent
+            .theme_name()
+            .and_then(|name| Theme::resolve(&name, agent.agent_dir()).ok())
+        {
             self.theme = theme;
         }
         self.models = agent.model_choices().to_vec();
