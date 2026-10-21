@@ -80,6 +80,10 @@ struct Cli {
     #[arg(long, value_name = "SEARCH", num_args = 0..=1, default_missing_value = "")]
     list_models: Option<String>,
 
+    /// Do not connect MCP servers.
+    #[arg(long)]
+    no_mcp: bool,
+
     /// Provider id (overrides defaultProvider).
     #[arg(long, value_name = "ID")]
     provider: Option<String>,
@@ -250,6 +254,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         no_context_files: cli.no_context_files,
         exclude_tools: cli.exclude_tools,
         provider: cli.provider,
+        no_mcp: cli.no_mcp,
         model: cli.model,
         thinking: cli
             .thinking

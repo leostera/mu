@@ -165,6 +165,8 @@ pub struct SessionOptions {
     pub provider: Option<String>,
     /// `--model`: model id or `provider/id`, overrides `defaultModel`.
     pub model: Option<String>,
+    /// `--no-mcp`: do not connect MCP servers.
+    pub no_mcp: bool,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -2129,6 +2131,7 @@ fn resolve_session_options(
         thinking: _,
         provider: _,
         model: _,
+        no_mcp: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2521,6 +2524,7 @@ impl Prepared {
             tool_selection: self.tool_selection,
             excluded_tools: self.excluded_tools,
             thinking: self.prompt.thinking,
+            no_mcp: false,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup,
             active_mcp_tools,
@@ -2548,6 +2552,7 @@ pub struct MuAgent {
     tool_selection: Option<ToolSelection>,
     excluded_tools: Vec<String>,
     thinking: ThinkingSetting,
+    no_mcp: bool,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -2581,6 +2586,7 @@ impl MuAgent {
             options.provider.as_deref(),
             options.model.as_deref(),
         )?;
+        let no_mcp = options.no_mcp;
         let prepared = Prepared::new(config, options)?;
         let mcp_startup = Arc::new(OnceCell::new());
         let background_mcp = Arc::clone(&mcp_startup);
@@ -2589,7 +2595,11 @@ impl MuAgent {
         let mcp_startup_task = tokio::spawn(async move {
             background_mcp
                 .get_or_init(|| async move {
-                    crate::mcp::McpRegistry::connect(&mcp_agent_dir, &mcp_cwd).await
+                    if no_mcp {
+                        crate::mcp::McpRegistry::default()
+                    } else {
+                        crate::mcp::McpRegistry::connect(&mcp_agent_dir, &mcp_cwd).await
+                    }
                 })
                 .await;
         });
@@ -2607,7 +2617,9 @@ impl MuAgent {
             }
         };
         drop(mcp_startup_task);
-        Ok(prepared.into_agent(provider, Some(mcp_startup)))
+        let mut agent = prepared.into_agent(provider, Some(mcp_startup));
+        agent.no_mcp = no_mcp;
+        Ok(agent)
     }
 
     /// Create a deterministic no-network agent for terminal previews and tests.
@@ -2666,6 +2678,7 @@ impl MuAgent {
             tool_selection: None,
             excluded_tools: Vec::new(),
             thinking: ThinkingSetting::default(),
+            no_mcp: false,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup: None,
             active_mcp_tools,
@@ -2717,10 +2730,15 @@ impl MuAgent {
         };
         let agent_dir = self.agent_dir.clone();
         let cwd = self.cwd.clone();
+        let no_mcp = self.no_mcp;
         let connected = tokio::time::timeout(
             MCP_STARTUP_WAIT,
             startup.get_or_init(|| async move {
-                crate::mcp::McpRegistry::connect(&agent_dir, &cwd).await
+                if no_mcp {
+                    crate::mcp::McpRegistry::default()
+                } else {
+                    crate::mcp::McpRegistry::connect(&agent_dir, &cwd).await
+                }
             }),
         )
         .await;
