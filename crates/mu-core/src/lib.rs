@@ -5,6 +5,7 @@
 
 mod agent;
 pub mod agent_loop;
+pub mod auth;
 mod codemode;
 pub mod compaction;
 mod context_files;

@@ -1231,7 +1231,10 @@ async fn connect(
     }
     let token = match &prompt.api_key {
         Some(key) => key.clone(),
-        None => token(&config.provider).await?,
+        None => match crate::auth::api_key(&config.agent_dir.join("auth.json"), &config.provider) {
+            Some(key) => key,
+            None => token(&config.provider).await?,
+        },
     };
     let http = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -1801,6 +1804,7 @@ fn connect_custom_provider(
     let token = prompt
         .api_key
         .clone()
+        .or_else(|| crate::auth::api_key(&config.agent_dir.join("auth.json"), &config.provider))
         .or_else(|| std::env::var(key).ok())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| key.to_owned());
