@@ -1,4 +1,5 @@
 mod chrome;
+mod complete;
 pub(crate) mod fuzzy;
 mod markdown;
 mod terminal;
@@ -1635,6 +1636,10 @@ fn handle_key(
         app.hide_thinking = !app.hide_thinking;
         return;
     }
+    if key.code == KeyCode::Tab && !app.loading && !app.command_menu_open {
+        complete_word_before_cursor(app);
+        return;
+    }
     if key.code == KeyCode::BackTab && !app.loading {
         // Shift+Tab cycles the thinking level (Pi's `app.thinking.cycle`).
         if let Ok(mut agent) = agent.try_lock() {
@@ -1806,6 +1811,28 @@ fn handle_picker(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             execute_command(app, agent);
         }
         _ => {}
+    }
+}
+
+/// Tab: complete the file path before the cursor (unique match, common prefix, or list choices).
+fn complete_word_before_cursor(app: &mut App) {
+    let cursor = app.composer.cursor;
+    let start = app.composer.input[..cursor]
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .map_or(0, |at| at + 1);
+    let word = app.composer.input[start..cursor].iter().collect::<String>();
+    if word.is_empty() {
+        return;
+    }
+    match complete::complete_path(&word, std::path::Path::new(&app.cwd)) {
+        complete::Completion::None => {}
+        complete::Completion::Replace(text) => {
+            app.composer.push_undo_snapshot();
+            app.composer.input.splice(start..cursor, text.chars());
+            app.composer.cursor = start + text.chars().count();
+        }
+        complete::Completion::Choices(names) => app.show_status(names.join("  ")),
     }
 }
 
