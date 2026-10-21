@@ -175,6 +175,8 @@ pub struct SessionOptions {
     pub no_prompt_templates: bool,
     /// `--api-key`: runtime API key for the selected provider (never persisted).
     pub api_key: Option<String>,
+    /// `--approve` (`Some(true)`) / `--no-approve` (`Some(false)`): project trust for this run.
+    pub project_trust: Option<bool>,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -2471,6 +2473,7 @@ fn resolve_session_options(
         prompt_templates: _,
         no_prompt_templates: _,
         api_key: _,
+        project_trust: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2936,6 +2939,7 @@ impl MuAgent {
             options.model.as_deref(),
         )?;
         let no_mcp = options.no_mcp;
+        crate::mcp::set_project_trust_override(options.project_trust);
         let prepared = Prepared::new(config, options)?;
         let mcp_startup = Arc::new(OnceCell::new());
         let background_mcp = Arc::clone(&mcp_startup);

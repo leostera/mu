@@ -869,7 +869,25 @@ fn is_project_override(value: &Value) -> bool {
     })
 }
 
+/// `--approve` / `--no-approve` for this process: 1 = trust, 2 = ignore, 0 = use `trust.json`.
+static TRUST_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Set the per-run project trust override (`Some(true)` trusts, `Some(false)` ignores).
+pub(crate) fn set_project_trust_override(decision: Option<bool>) {
+    let value = match decision {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    };
+    TRUST_OVERRIDE.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn project_is_trusted(agent_dir: &Path, cwd: &Path) -> Result<bool, String> {
+    match TRUST_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return Ok(true),
+        2 => return Ok(false),
+        _ => {}
+    }
     let trust_path = agent_dir.join("trust.json");
     if !trust_path.exists() {
         return Ok(false);
@@ -1424,6 +1442,19 @@ mod tests {
             "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n";
         let response = parse_http_response(body, "text/event-stream", 7, "tools/list").unwrap();
         assert_eq!(response["ok"], true);
+    }
+
+    #[test]
+    fn trust_override_beats_trust_json_and_resets() {
+        let dir = std::env::temp_dir().join(format!("mu-trust-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(project_is_trusted(&dir, &dir), Ok(false));
+        set_project_trust_override(Some(true));
+        assert_eq!(project_is_trusted(&dir, &dir), Ok(true));
+        set_project_trust_override(Some(false));
+        assert_eq!(project_is_trusted(&dir, &dir), Ok(false));
+        set_project_trust_override(None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

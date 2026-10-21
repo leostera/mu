@@ -96,6 +96,14 @@ struct Cli {
     #[arg(long, value_name = "KEY")]
     api_key: Option<String>,
 
+    /// Trust project-local files for this run.
+    #[arg(short = 'a', long, conflicts_with = "no_approve")]
+    approve: bool,
+
+    /// Ignore project-local files for this run.
+    #[arg(long, conflicts_with = "approve")]
+    no_approve: bool,
+
     /// Do not connect MCP servers.
     #[arg(long)]
     no_mcp: bool,
@@ -283,6 +291,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         provider: cli.provider,
         no_mcp: cli.no_mcp,
         api_key: cli.api_key,
+        project_trust: match (cli.approve, cli.no_approve) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        },
         prompt_templates: cli.prompt_templates,
         no_prompt_templates: cli.no_prompt_templates,
         model: cli.model,
