@@ -265,10 +265,15 @@ fn brand(expected: &str) -> String {
         .replace(" ▀▀█  v1.3.0", " ▛▜▌  v0.1.0")
         .replace(" █▀ █ escape", " ▙▟ ▐ escape")
         .replace(
-            " Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.",
-            " Ask Mu to inspect, edit, or explain your project.",
+            "Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.",
+            "Mu can explain its own features and look up its docs. Ask it how to use or extend Mu.",
         )
-        .replace("Report a bug to the Pi developers", "Report a bug to the Pi developers")
+        .replace(" extend Pi.", " extend Mu.")
+        .replace(" Pi can explain", " Mu can explain")
+        .replace(
+            "Report a bug to the Pi developers",
+            "Report a bug to the Pi developers",
+        )
 }
 
 fn compare(index: usize, label: &str, actual: &str, expected: &str) -> Result<(), String> {

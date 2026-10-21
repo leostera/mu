@@ -8,41 +8,64 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::{fuzzy::fuzzy_filter, theme::Theme};
+use super::{fuzzy::fuzzy_filter, markdown::wrap_spans, theme::Theme};
 
 // ---------------------------------------------------------------------------
 // Startup header
 // ---------------------------------------------------------------------------
 
 /// The startup block above the first message (logo, key hints, tagline).
-pub fn header_lines(version: &str, theme: &Theme) -> Vec<Line<'static>> {
+///
+/// Each paragraph is wrapped inside one column of padding, like Pi's padded `Text` components.
+pub fn header_lines(version: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let accent = theme.fg("accent").add_modifier(Modifier::BOLD);
     let dim = theme.fg("dim");
     let muted = theme.fg("muted");
-    vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" ▛▜▌ ", accent),
-            Span::styled(format!(" v{version}"), dim),
-        ]),
-        Line::from(vec![
-            Span::styled(" ▙▟ ▐", accent),
-            Span::styled(
-                " escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more",
-                dim,
-            ),
-        ]),
-        Line::from(Span::styled(
-            " Press ctrl+o to show full startup help and loaded resources.",
-            dim,
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Ask Mu to inspect, edit, or explain your project.",
-            muted,
-        )),
-        Line::from(""),
+    let inner = width.saturating_sub(2).max(1);
+    let paragraph = |spans: Vec<Span<'static>>| -> Vec<Line<'static>> {
+        wrap_spans(&spans, inner)
+            .into_iter()
+            .map(|row| {
+                let mut line = vec![Span::raw(" ")];
+                line.extend(row);
+                Line::from(line)
+            })
+            .collect()
+    };
+    let mut lines = vec![Line::from("")];
+    lines.extend(paragraph(vec![
+        Span::styled("▛▜▌ ", accent),
+        Span::styled(format!(" v{version}"), dim),
+    ]));
+    let mut hints = vec![Span::styled("▙▟ ▐", accent), Span::raw(" ")];
+    for (index, (key, description)) in [
+        ("escape", "interrupt"),
+        ("ctrl+c/ctrl+d", "clear/exit"),
+        ("/", "commands"),
+        ("!", "bash"),
+        ("ctrl+o", "more"),
     ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            hints.push(Span::styled(" · ", muted));
+        }
+        hints.push(Span::styled(key, dim));
+        hints.push(Span::styled(format!(" {description}"), muted));
+    }
+    lines.extend(paragraph(hints));
+    lines.extend(paragraph(vec![Span::styled(
+        "Press ctrl+o to show full startup help and loaded resources.",
+        dim,
+    )]));
+    lines.push(Line::from(""));
+    lines.extend(paragraph(vec![Span::styled(
+        "Mu can explain its own features and look up its docs. Ask it how to use or extend Mu.",
+        muted,
+    )]));
+    lines.push(Line::from(""));
+    lines
 }
 
 // ---------------------------------------------------------------------------

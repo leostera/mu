@@ -931,9 +931,16 @@ pub fn wrap_spans(line: &[Span<'static>], width: usize) -> Vec<Spans> {
         *row_width += text.width();
     };
 
-    for span in line {
-        for word in split_keeping_whitespace(&span.content) {
-            let is_space = word.chars().all(char::is_whitespace);
+    for (span_index, span) in line.iter().enumerate() {
+        for (token_index, word) in split_keeping_whitespace(&span.content)
+            .into_iter()
+            .enumerate()
+        {
+            // Pi's wrapper tokenizes ANSI-escaped text: a space right after a style change carries
+            // the escape code, so it is not whitespace there and is never dropped at a wrap.
+            let sticky_space =
+                token_index == 0 && (span_index > 0 || span.style != Style::default());
+            let is_space = word.chars().all(char::is_whitespace) && !sticky_space;
             let word_width = word.width();
             if is_space {
                 if row_width == 0
@@ -978,7 +985,23 @@ pub fn wrap_spans(line: &[Span<'static>], width: usize) -> Vec<Spans> {
             }
         }
     }
+    for row in &mut rows {
+        trim_row_end(row);
+    }
     rows
+}
+
+/// Remove trailing whitespace from the last spans of a row.
+fn trim_row_end(row: &mut Spans) {
+    while let Some(last) = row.last_mut() {
+        let trimmed = last.content.trim_end().to_owned();
+        if trimmed.is_empty() {
+            row.pop();
+        } else {
+            last.content = trimmed.into();
+            break;
+        }
+    }
 }
 
 fn split_keeping_whitespace(text: &str) -> Vec<&str> {

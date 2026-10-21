@@ -84,8 +84,11 @@ struct TranscriptScroll {
     max_offset: u16,
     /// Last time the offset moved; Pi's `auto` scrollbar fades one second later.
     last_activity: Option<Instant>,
+    viewport_height: u16,
 }
 
+/// Rows a page scroll keeps from the previous page (`PAGE_SCROLL_OVERLAP`).
+const PAGE_SCROLL_OVERLAP: u16 = 4;
 const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(1000);
 
 impl Default for TranscriptScroll {
@@ -94,6 +97,7 @@ impl Default for TranscriptScroll {
             position: TranscriptPosition::FollowEnd,
             max_offset: 0,
             last_activity: None,
+            viewport_height: 0,
         }
     }
 }
@@ -117,6 +121,14 @@ impl TranscriptScroll {
         } else if let TranscriptPosition::Offset(offset) = self.position {
             self.position = TranscriptPosition::Offset(offset.min(max_offset));
         }
+    }
+
+    fn page_rows(&self) -> i32 {
+        i32::from(
+            self.viewport_height
+                .saturating_sub(PAGE_SCROLL_OVERLAP)
+                .max(1),
+        )
     }
 
     fn scrollbar_visible(&self) -> bool {
@@ -1627,11 +1639,15 @@ fn handle_key(
             return;
         }
         KeyCode::PageUp => {
-            app.messages.scroll.scroll_by(-12);
+            app.messages
+                .scroll
+                .scroll_by(-app.messages.scroll.page_rows());
             return;
         }
         KeyCode::PageDown => {
-            app.messages.scroll.scroll_by(12);
+            app.messages
+                .scroll
+                .scroll_by(app.messages.scroll.page_rows());
             return;
         }
         _ => {}
@@ -2091,7 +2107,11 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let mut lines = chrome::header_lines(env!("CARGO_PKG_VERSION"), &app.theme);
+    let mut lines = chrome::header_lines(
+        env!("CARGO_PKG_VERSION"),
+        usize::from(area.width),
+        &app.theme,
+    );
     push_statuses(&mut lines, &app.statuses, 0, &app.theme);
     for (index, message) in app.messages.iter().enumerate() {
         if matches!(message.role, Role::User) {
@@ -2189,6 +2209,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     let max_scroll =
         u16::try_from(content_lines.saturating_sub(usize::from(area.height))).unwrap_or(u16::MAX);
     app.messages.scroll.set_max_offset(max_scroll);
+    app.messages.scroll.viewport_height = area.height;
     let scroll = app.messages.scroll.offset();
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
     if !app.messages.scroll.is_following_end() && area.height > 0 {
@@ -2199,7 +2220,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             height: 1,
         };
         frame.render_widget(
-            Paragraph::new("↓ Jump to latest message · Ctrl+End")
+            Paragraph::new(" ↓ Jump to latest message · Ctrl+End ")
                 .alignment(ratatui::layout::Alignment::Center)
                 .style(app.theme.fg("muted")),
             hint_area,
