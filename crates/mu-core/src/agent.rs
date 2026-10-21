@@ -717,22 +717,8 @@ fn configured_setting<T>(
     key: &str,
     parse: impl Fn(&Value) -> Option<T>,
 ) -> Option<T> {
-    let mut setting = None;
-    for path in [
-        agent_dir.join("settings.json"),
-        cwd.join(".pi/settings.json"),
-    ] {
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok(settings) = serde_json::from_str::<Value>(&contents) else {
-            continue;
-        };
-        if let Some(value) = settings.get(key).and_then(&parse) {
-            setting = Some(value);
-        }
-    }
-    setting
+    let settings = crate::settings::Settings::load(agent_dir, cwd, true);
+    settings.merged().get(key).and_then(parse)
 }
 
 fn shell_setting(agent_dir: &Path, cwd: &Path, key: &str) -> Option<String> {

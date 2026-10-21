@@ -12,6 +12,7 @@ mod context_files;
 mod mcp;
 pub mod path_utils;
 pub mod prompt_templates;
+pub mod settings;
 pub mod skills;
 mod tool_search;
 pub mod tools;
