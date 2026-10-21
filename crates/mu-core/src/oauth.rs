@@ -720,6 +720,237 @@ pub mod xai {
     }
 }
 
+/// Kimi Code (subscription) device-code login, as in Pi's `kimi-coding.ts`.
+pub mod kimi {
+    use super::*;
+
+    const CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+    pub const DEFAULT_HOST: &str = "https://auth.kimi.com";
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct DeviceAuthorization {
+        pub device_code: String,
+        pub user_code: String,
+        pub verification_uri_complete: String,
+        pub interval_seconds: u64,
+        pub expires_in_seconds: u64,
+    }
+
+    fn http_url(value: &Value) -> Option<&str> {
+        let text = value.as_str().filter(|v| !v.is_empty())?;
+        matches!(url::Url::parse(text).ok()?.scheme(), "http" | "https").then_some(text)
+    }
+
+    pub fn parse_device_authorization(json: &Value) -> Result<DeviceAuthorization, String> {
+        let text = |k: &str| json.get(k).and_then(Value::as_str).map(str::to_owned);
+        let (Some(device_code), Some(user_code), Some(_), Some(complete)) = (
+            text("device_code"),
+            text("user_code"),
+            http_url(&json["verification_uri"]),
+            http_url(&json["verification_uri_complete"]),
+        ) else {
+            return Err(format!(
+                "Invalid Kimi Code device authorization response: {json}"
+            ));
+        };
+        let positive = |k: &str, default: u64| {
+            json.get(k)
+                .and_then(Value::as_f64)
+                .filter(|v| *v > 0.0)
+                .map_or(default, |v| v as u64)
+        };
+        Ok(DeviceAuthorization {
+            device_code,
+            user_code,
+            verification_uri_complete: complete.to_owned(),
+            interval_seconds: positive("interval", 5),
+            expires_in_seconds: positive("expires_in", 15 * 60),
+        })
+    }
+
+    /// Unlike the other providers, Kimi's expiry has no early-refresh margin.
+    pub fn credential_from_token(
+        json: &Value,
+        operation: &str,
+        now_ms: f64,
+    ) -> Result<Credential, String> {
+        let text = |k: &str| {
+            json.get(k)
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+        };
+        let (Some(access), Some(refresh), Some(expires_in)) = (
+            text("access_token"),
+            text("refresh_token"),
+            json.get("expires_in")
+                .and_then(Value::as_f64)
+                .filter(|v| *v > 0.0),
+        ) else {
+            return Err(format!(
+                "Kimi Code token {operation} response missing fields: {json}"
+            ));
+        };
+        Ok(Credential::Oauth {
+            access: access.to_owned(),
+            refresh: refresh.to_owned(),
+            expires: now_ms + expires_in * 1000.0,
+            extra: Default::default(),
+        })
+    }
+
+    /// One poll of `/api/oauth/token`, as Pi maps it.
+    pub fn poll_result(status: u16, json: &Value) -> DevicePoll<Credential> {
+        if status >= 500 {
+            return DevicePoll::Failed(format!(
+                "Kimi Code device token request failed with status {status}: {json}"
+            ));
+        }
+        if (200..300).contains(&status)
+            && json.get("access_token").and_then(Value::as_str).is_some()
+        {
+            return match credential_from_token(json, "poll", now_ms()) {
+                Ok(credential) => DevicePoll::Complete(credential),
+                Err(message) => DevicePoll::Failed(message),
+            };
+        }
+        let error = json.get("error").and_then(Value::as_str);
+        match error {
+            Some("authorization_pending") => DevicePoll::Pending,
+            Some("slow_down") => DevicePoll::SlowDown(
+                json.get("interval")
+                    .and_then(Value::as_u64)
+                    .filter(|v| *v > 0),
+            ),
+            Some("expired_token") => DevicePoll::Failed(
+                "Kimi Code device authorization expired. Please restart login.".into(),
+            ),
+            Some("access_denied") => DevicePoll::Failed("Kimi Code login was denied.".into()),
+            _ => {
+                let description = json
+                    .get("error_description")
+                    .and_then(Value::as_str)
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default();
+                let tail = error
+                    .map(|e| format!(": {e}{description}"))
+                    .unwrap_or_default();
+                DevicePoll::Failed(format!(
+                    "Kimi Code device token request failed (status {status}){tail}"
+                ))
+            }
+        }
+    }
+
+    async fn post_form(url: &str, fields: &[(&str, &str)]) -> Result<(u16, Value), String> {
+        let response = reqwest::Client::new()
+            .post(url)
+            .timeout(Duration::from_secs(30))
+            .header("accept", "application/json")
+            .form(fields)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = response.status().as_u16();
+        Ok((
+            status,
+            response.json::<Value>().await.unwrap_or(Value::Null),
+        ))
+    }
+
+    pub async fn start(host: &str) -> Result<DeviceAuthorization, String> {
+        let (status, json) = post_form(
+            &format!("{host}/api/oauth/device_authorization"),
+            &[("client_id", CLIENT_ID)],
+        )
+        .await?;
+        if !(200..300).contains(&status) {
+            return Err(format!(
+                "Kimi Code device authorization failed with status {status}: {json}"
+            ));
+        }
+        parse_device_authorization(&json)
+    }
+
+    pub async fn poll_for_token(
+        host: &str,
+        device: &DeviceAuthorization,
+    ) -> Result<Credential, String> {
+        let timing = DevicePollTiming::pi(
+            Some(device.interval_seconds),
+            Some(device.expires_in_seconds),
+            true,
+        );
+        poll_device_code(timing, || async {
+            match post_form(
+                &format!("{host}/api/oauth/token"),
+                &[
+                    ("client_id", CLIENT_ID),
+                    ("device_code", &device.device_code),
+                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ],
+            )
+            .await
+            {
+                Ok((status, json)) => poll_result(status, &json),
+                Err(message) => DevicePoll::Failed(message),
+            }
+        })
+        .await
+    }
+
+    /// Refresh with Pi's retry policy: 429/5xx and network errors retry (1s, 2s, 4s); 401/403 or
+    /// `invalid_grant` mean the stored credential is dead.
+    pub async fn refresh_token(host: &str, refresh: &str) -> Result<Credential, String> {
+        let mut last = None;
+        for attempt in 0..=3u32 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
+            }
+            let result = post_form(
+                &format!("{host}/api/oauth/token"),
+                &[
+                    ("client_id", CLIENT_ID),
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh),
+                ],
+            )
+            .await;
+            let (status, json) = match result {
+                Ok(answer) => answer,
+                Err(error) => {
+                    last = Some(error);
+                    continue;
+                }
+            };
+            if (200..300).contains(&status) {
+                return credential_from_token(&json, "refresh", now_ms());
+            }
+            if matches!(status, 401 | 403)
+                || json.get("error").and_then(Value::as_str) == Some("invalid_grant")
+            {
+                let description = json
+                    .get("error_description")
+                    .and_then(Value::as_str)
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Kimi Code token refresh unauthorized (status {status}){description}"
+                ));
+            }
+            if (status == 429 || status >= 500) && attempt < 3 {
+                last = Some(format!(
+                    "Kimi Code token refresh failed with status {status}"
+                ));
+                continue;
+            }
+            return Err(format!(
+                "Kimi Code token refresh failed with status {status}: {json}"
+            ));
+        }
+        Err(last.unwrap_or_else(|| "Kimi Code token refresh failed".into()))
+    }
+}
+
 /// Whether a stored OAuth credential needs refreshing.
 pub fn is_expired(expires_ms: f64) -> bool {
     now_ms() >= expires_ms
@@ -890,6 +1121,57 @@ mod tests {
         assert_eq!(expires, 3_600_000.0 - 300_000.0);
         assert!(
             xai::credential_from_token_response(&json!({"access_token":"a"}), None, 0.0).is_err()
+        );
+    }
+
+    #[test]
+    fn kimi_device_authorization_tokens_and_polls_follow_pi() {
+        let device = kimi::parse_device_authorization(&json!({
+            "device_code":"d","user_code":"u","verification_uri":"https://k.test/a",
+            "verification_uri_complete":"https://k.test/a?c=u"}))
+        .unwrap();
+        assert_eq!(
+            (device.interval_seconds, device.expires_in_seconds),
+            (5, 900),
+            "Pi defaults"
+        );
+        assert!(kimi::parse_device_authorization(&json!({"device_code":"d"})).is_err());
+        assert!(kimi::parse_device_authorization(&json!({
+            "device_code":"d","user_code":"u","verification_uri":"ftp://x","verification_uri_complete":"https://x"})).is_err());
+        let Credential::Oauth { expires, .. } = kimi::credential_from_token(
+            &json!({"access_token":"a","refresh_token":"r","expires_in":60}),
+            "poll",
+            1000.0,
+        )
+        .unwrap() else {
+            panic!("oauth")
+        };
+        assert_eq!(expires, 61_000.0, "no early-refresh margin");
+        assert!(
+            kimi::credential_from_token(&json!({"access_token":"a"}), "refresh", 0.0)
+                .unwrap_err()
+                .contains("refresh response missing fields")
+        );
+        assert_eq!(
+            kimi::poll_result(400, &json!({"error":"authorization_pending"})),
+            DevicePoll::Pending
+        );
+        assert_eq!(
+            kimi::poll_result(400, &json!({"error":"slow_down","interval":12})),
+            DevicePoll::SlowDown(Some(12))
+        );
+        assert_eq!(
+            kimi::poll_result(400, &json!({"error":"access_denied"})),
+            DevicePoll::Failed("Kimi Code login was denied.".into())
+        );
+        assert_eq!(
+            kimi::poll_result(400, &json!({"error":"weird","error_description":"why"})),
+            DevicePoll::Failed(
+                "Kimi Code device token request failed (status 400): weird: why".into()
+            )
+        );
+        assert!(
+            matches!(kimi::poll_result(503, &json!({})), DevicePoll::Failed(m) if m.contains("status 503"))
         );
     }
 

@@ -1460,6 +1460,12 @@ async fn refresh_expired_oauth(config: &Config) -> Result<(), AgentError> {
     let refreshed = match config.provider.as_str() {
         "anthropic" => crate::oauth::anthropic::refresh_token(&refresh).await,
         "xai" => crate::oauth::xai::refresh_token(&refresh).await,
+        "kimi-coding" => {
+            let host = std::env::var("KIMI_CODE_OAUTH_HOST")
+                .or_else(|_| std::env::var("KIMI_OAUTH_HOST"))
+                .unwrap_or_else(|_| crate::oauth::kimi::DEFAULT_HOST.to_owned());
+            crate::oauth::kimi::refresh_token(host.trim_end_matches('/'), &refresh).await
+        }
         _ => return Ok(()),
     };
     let credential = refreshed.map_err(|error| {

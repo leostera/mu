@@ -94,6 +94,26 @@ pub fn run(command: &AuthCommand, agent_dir: &Path) -> Result<String, AuthComman
     }
 }
 
+async fn login_kimi(agent_dir: &Path) -> Result<String, AuthCommandError> {
+    use mu_core::oauth::kimi;
+    let fail = AuthCommandError::Login;
+    let host = std::env::var("KIMI_CODE_OAUTH_HOST")
+        .or_else(|_| std::env::var("KIMI_OAUTH_HOST"))
+        .unwrap_or_else(|_| kimi::DEFAULT_HOST.to_owned());
+    let host = host.trim_end_matches('/').to_owned();
+    let device = kimi::start(&host).await.map_err(fail)?;
+    eprintln!(
+        "Open {} and confirm the code {} (expires in {}s).",
+        device.verification_uri_complete, device.user_code, device.expires_in_seconds
+    );
+    let credential = kimi::poll_for_token(&host, &device)
+        .await
+        .map_err(AuthCommandError::Login)?;
+    mu_core::auth::set_credential(&agent_dir.join("auth.json"), "kimi-coding", credential)
+        .map_err(|e| AuthCommandError::Login(e.to_string()))?;
+    Ok("Logged in to kimi-coding; credential saved to auth.json".to_owned())
+}
+
 async fn login_xai(agent_dir: &Path) -> Result<String, AuthCommandError> {
     use mu_core::oauth::xai;
     let fail = AuthCommandError::Login;
@@ -150,9 +170,12 @@ pub async fn login(
     if provider == "xai" {
         return login_xai(agent_dir).await;
     }
+    if provider == "kimi-coding" {
+        return login_kimi(agent_dir).await;
+    }
     if provider != "anthropic" {
         return Err(AuthCommandError::Login(format!(
-            "OAuth login is only implemented for \"anthropic\", \"openrouter\" and \"xai\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
+            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\" and \"kimi-coding\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
         )));
     }
     let fail = AuthCommandError::Login;
