@@ -62,6 +62,33 @@ fn encode(image: &DynamicImage, format: ImageFormat, quality: u8) -> Option<Vec<
     Some(out)
 }
 
+/// Decode and apply EXIF orientation (Pi's `applyExifOrientation`).
+fn decode_oriented(bytes: &[u8]) -> Option<DynamicImage> {
+    use image::ImageDecoder;
+    let mut decoder = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let orientation = decoder.orientation().ok();
+    let mut decoded = DynamicImage::from_decoder(decoder).ok()?;
+    if let Some(orientation) = orientation {
+        decoded.apply_orientation(orientation);
+    }
+    Some(decoded)
+}
+
+/// Whether the file carries a non-identity EXIF orientation (it must be re-encoded to apply it).
+fn needs_reorientation(bytes: &[u8]) -> bool {
+    use image::ImageDecoder;
+    image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_decoder().ok())
+        .and_then(|mut d| d.orientation().ok())
+        .is_some_and(|o| o != image::metadata::Orientation::NoTransforms)
+}
+
 fn base64_len(bytes: usize) -> usize {
     bytes.div_ceil(3) * 4
 }
@@ -77,11 +104,12 @@ struct Resized {
 /// Pi's `resizeImageInProcess`: fit within the limits, trying PNG and JPEG qualities and
 /// shrinking by 25% until under the byte limit. `None` when nothing fits.
 fn resize(bytes: &[u8], mime: &'static str, options: ResizeOptions) -> Option<Resized> {
-    let decoded = image::load_from_memory(bytes).ok()?;
+    let decoded = decode_oriented(bytes)?;
     let (width, height) = (decoded.width(), decoded.height());
     if width <= options.max_width
         && height <= options.max_height
         && base64_len(bytes.len()) < options.max_bytes
+        && !needs_reorientation(bytes)
     {
         return Some(Resized {
             bytes: bytes.to_vec(),
@@ -138,7 +166,7 @@ fn resize(bytes: &[u8], mime: &'static str, options: ResizeOptions) -> Option<Re
 }
 
 fn dimension_note(resized: &Resized) -> Option<String> {
-    resized.was_resized.then(|| {
+    (resized.was_resized && resized.original != resized.size).then(|| {
         let scale = f64::from(resized.original.0) / f64::from(resized.size.0);
         format!(
             "[Image: original {}x{}, displayed at {}x{}. Multiply coordinates by {scale:.2} to map to original image.]",
@@ -257,6 +285,33 @@ mod tests {
         assert_eq!((w, h), (1000, 2000));
         assert!(processed.hints[0].contains("original 2400x4800, displayed at 1000x2000"));
         assert!(processed.hints[0].contains("Multiply coordinates by 2.40"));
+    }
+
+    #[test]
+    fn exif_orientation_is_applied_when_the_image_is_reencoded() {
+        // A 4x2 JPEG tagged "rotate 90 CW" (EXIF orientation 6) must come out 2x4.
+        let image =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 2, image::Rgb([200, 10, 10])));
+        let mut jpeg = encode(&image, ImageFormat::Jpeg, 90).unwrap();
+        // Insert an APP1/Exif segment with orientation=6 right after the SOI marker.
+        let exif: Vec<u8> = [
+            b"Exif\0\0".as_slice(),
+            &[0x4d, 0x4d, 0x00, 0x2a, 0, 0, 0, 8], // big-endian TIFF header, IFD0 at 8
+            &[0, 1],                               // one entry
+            &[0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0], // Orientation: SHORT, count 1, value 6
+            &[0, 0, 0, 0],                         // no next IFD
+        ]
+        .concat();
+        let mut segment = vec![0xff, 0xe1];
+        segment.extend(((exif.len() + 2) as u16).to_be_bytes());
+        segment.extend(&exif);
+        jpeg.splice(2..2, segment);
+        let processed = process_image(&jpeg, "image/jpeg", true, ResizeOptions::default()).unwrap();
+        assert_eq!(dimensions(&processed), (2, 4));
+        assert!(
+            processed.hints.is_empty(),
+            "orientation alone is not a resize"
+        );
     }
 
     #[test]
