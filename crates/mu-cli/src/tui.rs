@@ -1374,10 +1374,6 @@ impl App {
 
 type StartupFuture = Pin<Box<dyn Future<Output = Result<MuAgent, AgentError>> + Send>>;
 
-pub async fn run(agent: MuAgent) -> Result<(), Box<dyn std::error::Error>> {
-    run_loop(Some(agent), None, None).await
-}
-
 pub async fn run_starting<F>(
     startup: F,
     initial_prompt: Option<String>,

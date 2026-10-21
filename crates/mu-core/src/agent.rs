@@ -149,6 +149,8 @@ pub struct SessionOptions {
     pub no_builtin_tools: bool,
     pub skill_paths: Vec<PathBuf>,
     pub no_skills: bool,
+    /// Use the deterministic offline backend instead of the configured provider.
+    pub demo: bool,
 }
 
 struct Config {
@@ -572,6 +574,11 @@ fn configured_bash_shell_path(agent_dir: &Path, cwd: &Path) -> Option<String> {
 }
 
 fn config() -> Result<Config, AgentError> {
+    config_for(false)
+}
+
+/// Read Pi settings; with `demo`, a missing provider or model falls back to the demo backend.
+fn config_for(demo: bool) -> Result<Config, AgentError> {
     let cwd = std::env::current_dir()?;
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -608,11 +615,28 @@ fn config() -> Result<Config, AgentError> {
         update_retry_policy(&mut retry, &value);
         merge_default_tools(&mut default_tool_entries, &value)?;
     }
-    let provider = provider
-        .ok_or_else(|| AgentError::Configuration("Pi settings have no defaultProvider".into()))?;
-    let model = model
-        .ok_or_else(|| AgentError::Configuration("Pi settings have no defaultModel".into()))?;
-    let model_choices = configured_models(&agent_dir, &provider, &model)?;
+    let provider = match provider {
+        Some(provider) => provider,
+        None if demo => "mu-demo".to_owned(),
+        None => {
+            return Err(AgentError::Configuration(
+                "Pi settings have no defaultProvider".into(),
+            ));
+        }
+    };
+    let model = match model {
+        Some(model) => model,
+        None if demo => "mu-demo".to_owned(),
+        None => {
+            return Err(AgentError::Configuration(
+                "Pi settings have no defaultModel".into(),
+            ));
+        }
+    };
+    let mut model_choices = configured_models(&agent_dir, &provider, &model)?;
+    if demo && provider == "mu-demo" && model_choices.len() == 1 {
+        model_choices.push("mu-demo-alt".into());
+    }
     Ok(Config {
         agent_dir,
         cwd,
@@ -1894,6 +1918,7 @@ fn resolve_session_options(
         no_builtin_tools: _,
         skill_paths: _,
         no_skills: _,
+        demo: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2109,6 +2134,82 @@ fn write_session(session: &SessionDocument, path: &Path) -> Result<(), AgentErro
         .map_err(|error| AgentError::Session(error.to_string()))
 }
 
+/// Everything both startup paths derive from the configuration and session options.
+struct Prepared {
+    config: Config,
+    tool_selection: Option<ToolSelection>,
+    no_tools: bool,
+    persist_session: bool,
+    skills: crate::skills::SkillCatalog,
+    session_path: PathBuf,
+    session: SessionDocument,
+    transcript: Vec<AgentMessage>,
+}
+
+impl Prepared {
+    fn new(mut config: Config, options: SessionOptions) -> Result<Self, AgentError> {
+        let tool_selection = options
+            .tools
+            .clone()
+            .map(ToolSelection::parse)
+            .transpose()?;
+        if let Some(selection) = &tool_selection {
+            config.enabled_tools = apply_tool_selection(&config.enabled_tools, selection);
+        }
+        if options.no_builtin_tools || options.no_tools {
+            config.enabled_tools.clear();
+        }
+        let no_tools = options.no_tools;
+        let persist_session = !options.no_session;
+        let skills = crate::skills::SkillCatalog::discover_with_paths(
+            &config.cwd,
+            &config.agent_dir,
+            &options.skill_paths,
+            !options.no_skills,
+        );
+        let (session_path, session, transcript) = resolve_session_options(&config, options)?;
+        Ok(Self {
+            config,
+            tool_selection,
+            no_tools,
+            persist_session,
+            skills,
+            session_path,
+            session,
+            transcript,
+        })
+    }
+
+    fn into_agent(
+        self,
+        provider: Provider,
+        mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
+    ) -> MuAgent {
+        let active_mcp_tools = session_active_mcp_tools(&self.session);
+        MuAgent {
+            provider,
+            provider_id: self.config.provider,
+            model_choices: self.config.model_choices,
+            session: self.session,
+            transcript: self.transcript,
+            session_path: self.session_path,
+            persist_session: self.persist_session,
+            agent_dir: self.config.agent_dir,
+            cwd: self.config.cwd,
+            skills: self.skills,
+            hide_thinking_block: self.config.hide_thinking_block,
+            retry: self.config.retry,
+            enabled_tools: self.config.enabled_tools,
+            no_tools: self.no_tools,
+            tool_selection: self.tool_selection,
+            mcp: crate::mcp::McpRegistry::default(),
+            mcp_startup,
+            active_mcp_tools,
+            prompt_queue: AgentPromptQueue::default(),
+        }
+    }
+}
+
 pub struct MuAgent {
     provider: Provider,
     provider_id: String,
@@ -2145,31 +2246,15 @@ impl MuAgent {
     }
 
     pub async fn connect_with_options(options: SessionOptions) -> Result<Self, AgentError> {
-        let mut config = config()?;
-        let tool_selection = options
-            .tools
-            .clone()
-            .map(ToolSelection::parse)
-            .transpose()?;
-        if let Some(selection) = &tool_selection {
-            config.enabled_tools = apply_tool_selection(&config.enabled_tools, selection);
+        if options.demo {
+            return Self::open_demo(options);
         }
-        if options.no_builtin_tools || options.no_tools {
-            config.enabled_tools.clear();
-        }
-        let no_tools = options.no_tools;
-        let persist_session = !options.no_session;
-        let skills = crate::skills::SkillCatalog::discover_with_paths(
-            &config.cwd,
-            &config.agent_dir,
-            &options.skill_paths,
-            !options.no_skills,
-        );
-        let (session_path, session, history) = resolve_session_options(&config, options)?;
+        let config = config_for(false)?;
+        let prepared = Prepared::new(config, options)?;
         let mcp_startup = Arc::new(OnceCell::new());
         let background_mcp = Arc::clone(&mcp_startup);
-        let mcp_agent_dir = config.agent_dir.clone();
-        let mcp_cwd = config.cwd.clone();
+        let mcp_agent_dir = prepared.config.agent_dir.clone();
+        let mcp_cwd = prepared.config.cwd.clone();
         let mcp_startup_task = tokio::spawn(async move {
             background_mcp
                 .get_or_init(|| async move {
@@ -2177,7 +2262,7 @@ impl MuAgent {
                 })
                 .await;
         });
-        let provider = match connect(&config, skills.system_prompt()).await {
+        let provider = match connect(&prepared.config, prepared.skills.system_prompt()).await {
             Ok(provider) => provider,
             Err(error) => {
                 mcp_startup_task.abort();
@@ -2185,52 +2270,31 @@ impl MuAgent {
             }
         };
         drop(mcp_startup_task);
-        let mcp = crate::mcp::McpRegistry::default();
-        let active_mcp_tools = session_active_mcp_tools(&session);
-        Ok(Self {
-            provider,
-            provider_id: config.provider,
-            model_choices: config.model_choices,
-            session,
-            transcript: history,
-            session_path,
-            persist_session,
-            agent_dir: config.agent_dir.clone(),
-            cwd: config.cwd.clone(),
-            skills,
-            hide_thinking_block: config.hide_thinking_block,
-            retry: config.retry,
-            enabled_tools: config.enabled_tools,
-            no_tools,
-            tool_selection,
-            mcp,
-            mcp_startup: Some(mcp_startup),
-            active_mcp_tools,
-            prompt_queue: AgentPromptQueue::default(),
-        })
+        Ok(prepared.into_agent(provider, Some(mcp_startup)))
     }
 
     /// Create a deterministic no-network agent for terminal previews and tests.
     pub fn demo() -> Result<Self, AgentError> {
-        let cwd = std::env::current_dir()?;
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| AgentError::Configuration("HOME is not set".into()))?;
-        let config = Config {
-            agent_dir: std::env::var_os("PI_CODING_AGENT_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".pi/agent")),
-            cwd,
-            provider: "mu-demo".into(),
-            model: "mu-demo".into(),
-            model_choices: vec!["mu-demo".into(), "mu-demo-alt".into()],
-            hide_thinking_block: false,
-            retry: RetryPolicy::default(),
-            enabled_tools: resolve_default_tools(None),
-        };
-        Self::demo_from_config(config)
+        Self::open_demo(SessionOptions {
+            demo: true,
+            ..SessionOptions::default()
+        })
     }
 
+    fn open_demo(options: SessionOptions) -> Result<Self, AgentError> {
+        let config = config_for(true)?;
+        let prepared = Prepared::new(config, options)?;
+        let provider = Provider {
+            transport: ProviderTransport::Demo,
+            model: prepared.config.model.clone(),
+            instructions: "You are Mu, a deterministic demo assistant.".into(),
+            supports_reasoning: false,
+            supports_strict_sampling: true,
+        };
+        Ok(prepared.into_agent(provider, None))
+    }
+
+    #[cfg(test)]
     fn demo_from_config(config: Config) -> Result<Self, AgentError> {
         let path = session_path(&config, None);
         let session = SessionDocument::new(config.cwd.to_string_lossy().into_owned());

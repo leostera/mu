@@ -20,21 +20,8 @@ struct Cli {
     #[arg(short = 'v', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 
-    /// Run the TUI with a deterministic backend; no gateway or credentials required.
-    #[arg(
-        long,
-        conflicts_with_all = [
-            "print",
-            "prompt",
-            "continue_session",
-            "resume",
-            "session",
-            "session_id",
-            "session_dir",
-            "no_session",
-            "fork"
-        ]
-    )]
+    /// Use a deterministic offline backend; no gateway or credentials required.
+    #[arg(long)]
     demo: bool,
 
     /// Process a prompt and exit without opening the interactive TUI.
@@ -104,6 +91,14 @@ struct Cli {
     #[arg(long)]
     no_skills: bool,
 
+    /// Do not make startup network requests (Pi's `--offline`).
+    #[arg(long)]
+    offline: bool,
+
+    /// Do not load extensions (Mu has no extension runtime yet, so this is always the case).
+    #[arg(long)]
+    no_extensions: bool,
+
     /// Output mode; JSON and RPC modes are not implemented yet.
     #[arg(long, value_enum, default_value_t = OutputMode::Text)]
     mode: OutputMode,
@@ -143,13 +138,6 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    if cli.demo {
-        if !is_terminal {
-            return Err("--demo requires an interactive terminal".into());
-        }
-        return tui::run(mu_core::MuAgent::demo()?).await;
-    }
-
     if cli.mode != OutputMode::Text {
         return Err(format!("--mode {:?} is not implemented yet", cli.mode).into());
     }
@@ -203,6 +191,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         no_builtin_tools: cli.no_builtin_tools,
         skill_paths: cli.skill_paths,
         no_skills: cli.no_skills,
+        demo: cli.demo,
     };
 
     if cli.print || !is_terminal {
