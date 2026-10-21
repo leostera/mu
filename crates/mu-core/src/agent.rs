@@ -364,6 +364,8 @@ struct Provider {
     /// `--append-system-prompt` text placed after everything else.
     appendix: String,
     supports_reasoning: bool,
+    /// The model accepts image input (`input` includes `image` in `models.json`; default yes).
+    supports_images: bool,
     /// Requested reasoning effort (`--thinking`); `None` means off.
     reasoning_effort: Option<&'static str>,
     supports_strict_sampling: bool,
@@ -1164,6 +1166,14 @@ fn instructions_for_tools(base: &str, tools: &[Value]) -> String {
     )
 }
 
+/// A `models.json` model accepts images unless it lists `input` without `image`.
+fn model_accepts_images(model: &Value) -> bool {
+    model
+        .get("input")
+        .and_then(Value::as_array)
+        .is_none_or(|input| input.iter().any(|kind| kind == "image"))
+}
+
 fn model_supports_strict_sampling(model: &Value) -> bool {
     model
         .pointer("/compat/supportsStrictMode")
@@ -1600,6 +1610,7 @@ async fn connect(
         describes_tools: prompt.system_prompt.is_none(),
         appendix: prompt.appendix(),
         supports_reasoning,
+        supports_images: true,
         reasoning_effort: prompt.thinking.effort(),
         supports_strict_sampling,
     })
@@ -1922,6 +1933,13 @@ impl Provider {
         tools: &[Value],
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<Reply, AgentError> {
+        let downgraded;
+        let history = if self.supports_images {
+            history
+        } else {
+            downgraded = runtime::downgrade_images(history);
+            &downgraded
+        };
         #[cfg(test)]
         if let ProviderTransport::Scripted(replies) = &self.transport {
             let reply = replies
@@ -2456,6 +2474,7 @@ fn connect_custom_provider(
         describes_tools: prompt.system_prompt.is_none(),
         appendix: prompt.appendix(),
         supports_reasoning: flag("reasoning").unwrap_or(false),
+        supports_images: model.as_ref().is_none_or(model_accepts_images),
         reasoning_effort: prompt.thinking.effort(),
         supports_strict_sampling: model.as_ref().is_some_and(model_supports_strict_sampling),
     })
@@ -3666,6 +3685,7 @@ impl MuAgent {
             describes_tools: true,
             appendix: String::new(),
             supports_reasoning: false,
+            supports_images: true,
             reasoning_effort: None,
             supports_strict_sampling: true,
         };
@@ -3685,6 +3705,7 @@ impl MuAgent {
                 describes_tools: true,
                 appendix: String::new(),
                 supports_reasoning: false,
+                supports_images: true,
                 reasoning_effort: None,
                 supports_strict_sampling: true,
             },
@@ -6566,6 +6587,45 @@ mod tests {
             super::runtime::close_orphaned_calls(complete.clone()),
             complete
         );
+    }
+
+    #[test]
+    fn image_tool_outputs_are_replaced_for_text_only_models() {
+        let item = serde_json::json!({"type":"function_call_output","call_id":"c","output":[
+            {"type":"input_text","text":"Read image file [image/png]"},
+            {"type":"input_image","image_url":"data:a"},
+            {"type":"input_image","image_url":"data:b"},
+            {"type":"input_text","text":"after"}]});
+        let out = super::runtime::downgrade_images(&[
+            item,
+            serde_json::json!({"type":"function_call_output","call_id":"d","output":"plain"}),
+        ]);
+        let texts = out[0]["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            [
+                "Read image file [image/png]",
+                "(tool image omitted: model does not support images)",
+                "after"
+            ]
+        );
+        assert_eq!(out[1]["output"], "plain");
+    }
+
+    #[test]
+    fn models_accept_images_unless_input_excludes_them() {
+        assert!(super::model_accepts_images(&serde_json::json!({})));
+        assert!(super::model_accepts_images(
+            &serde_json::json!({"input":["text","image"]})
+        ));
+        assert!(!super::model_accepts_images(
+            &serde_json::json!({"input":["text"]})
+        ));
     }
 
     #[test]

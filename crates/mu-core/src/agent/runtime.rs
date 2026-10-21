@@ -174,6 +174,40 @@ pub(super) fn close_orphaned_calls(input: Vec<Value>) -> Vec<Value> {
     out
 }
 
+const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str =
+    "(tool image omitted: model does not support images)";
+
+/// Pi's `downgradeUnsupportedImages` for tool results: for a model without image input, each run
+/// of images in a `function_call_output` becomes one placeholder text part.
+pub(super) fn downgrade_images(history: &[Value]) -> Vec<Value> {
+    history
+        .iter()
+        .map(|item| {
+            let Some(parts) = item.get("output").and_then(Value::as_array) else {
+                return item.clone();
+            };
+            let mut out: Vec<Value> = Vec::new();
+            for part in parts {
+                if part.get("type").and_then(Value::as_str) == Some("input_image") {
+                    let already = out
+                        .last()
+                        .is_some_and(|last| last["text"] == NON_VISION_TOOL_IMAGE_PLACEHOLDER);
+                    if !already {
+                        out.push(
+                            json!({"type":"input_text","text":NON_VISION_TOOL_IMAGE_PLACEHOLDER}),
+                        );
+                    }
+                } else {
+                    out.push(part.clone());
+                }
+            }
+            let mut item = item.clone();
+            item["output"] = Value::Array(out);
+            item
+        })
+        .collect()
+}
+
 fn synthesize_assistant_items(assistant: &AssistantMessage, input: &mut Vec<Value>) {
     let text_blocks = assistant
         .content
