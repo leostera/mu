@@ -2040,6 +2040,13 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "reload" => {
+            let status = match agent.try_lock() {
+                Ok(mut agent) => agent.reload_resources(),
+                Err(_) => "Mu is busy.".to_owned(),
+            };
+            app.show_status(status);
+        }
         "share" | "bug" => app.show_status(format!(
             "/{command} is not supported in Mu: it would upload session data to an external service."
         )),

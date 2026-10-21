@@ -3041,6 +3041,16 @@ struct Prepared {
     prompt: PromptOptions,
     excluded_tools: Vec<String>,
     templates: Vec<crate::prompt_templates::PromptTemplate>,
+    resources: ResourceOptions,
+}
+
+/// Flags that decide which skills and prompt templates are discovered (kept for `/reload`).
+#[derive(Clone, Debug, Default)]
+struct ResourceOptions {
+    skill_paths: Vec<PathBuf>,
+    no_skills: bool,
+    template_paths: Vec<PathBuf>,
+    no_templates: bool,
 }
 
 impl Prepared {
@@ -3059,6 +3069,12 @@ impl Prepared {
         let no_tools = options.no_tools;
         let persist_session = !options.no_session;
         let excluded_tools = options.exclude_tools.clone();
+        let resources = ResourceOptions {
+            skill_paths: options.skill_paths.clone(),
+            no_skills: options.no_skills,
+            template_paths: options.prompt_templates.clone(),
+            no_templates: options.no_prompt_templates,
+        };
         let templates = crate::prompt_templates::load_prompt_templates(
             &config.cwd,
             &config.agent_dir,
@@ -3089,6 +3105,7 @@ impl Prepared {
             prompt,
             excluded_tools,
             templates,
+            resources,
         })
     }
 
@@ -3116,6 +3133,7 @@ impl Prepared {
             tool_selection: self.tool_selection,
             excluded_tools: self.excluded_tools,
             templates: self.templates,
+            resources: self.resources,
             thinking: self.prompt.thinking,
             no_mcp: false,
             theme_override: self.prompt.theme,
@@ -3141,6 +3159,7 @@ pub struct MuAgent {
     cwd: PathBuf,
     skills: crate::skills::SkillCatalog,
     templates: Vec<crate::prompt_templates::PromptTemplate>,
+    resources: ResourceOptions,
     hide_thinking_block: bool,
     retry: RetryPolicy,
     enabled_tools: Vec<String>,
@@ -3277,6 +3296,7 @@ impl MuAgent {
             tool_selection: None,
             excluded_tools: Vec::new(),
             templates: Vec::new(),
+            resources: ResourceOptions::default(),
             thinking: ThinkingSetting::default(),
             no_mcp: false,
             theme_override: None,
@@ -3774,6 +3794,30 @@ impl MuAgent {
         self.active_mcp_tools.clear();
         self.prompt_queue.clear();
         Ok(())
+    }
+
+    /// Re-discover skills and prompt templates from disk (`/reload`); returns a one-line summary.
+    ///
+    /// Skill descriptions already in the system prompt stay until the next session start.
+    pub fn reload_resources(&mut self) -> String {
+        let resources = self.resources.clone();
+        self.skills = crate::skills::SkillCatalog::discover_with_paths(
+            &self.cwd,
+            &self.agent_dir,
+            &resources.skill_paths,
+            !resources.no_skills,
+        );
+        self.templates = crate::prompt_templates::load_prompt_templates(
+            &self.cwd,
+            &self.agent_dir,
+            &resources.template_paths,
+            !resources.no_templates,
+        );
+        format!(
+            "Reloaded: {} skills, {} prompt templates",
+            self.skills.skills.len(),
+            self.templates.len()
+        )
     }
 
     /// Skills discovered from Pi's global and project skill directories.
@@ -5834,6 +5878,22 @@ mod tests {
             super::scope_models(&pats(&["nomatch"]), &choices, "p"),
             choices
         );
+    }
+
+    #[test]
+    fn reload_picks_up_new_prompt_templates() {
+        let root = std::env::temp_dir().join(format!("mu-reload-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![]);
+        assert!(agent.reload_resources().contains("0 prompt templates"));
+        let prompts = root.join(".pi/prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        std::fs::write(prompts.join("hi.md"), "Hello $1").unwrap();
+        assert!(agent.reload_resources().contains("1 prompt templates"));
+        assert_eq!(
+            crate::prompt_templates::expand_prompt_template("/hi bob", &agent.templates),
+            "Hello bob"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
