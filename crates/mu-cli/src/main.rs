@@ -80,6 +80,14 @@ struct Cli {
     #[arg(long, value_name = "SEARCH", num_args = 0..=1, default_missing_value = "")]
     list_models: Option<String>,
 
+    /// Provider id (overrides defaultProvider).
+    #[arg(long, value_name = "ID")]
+    provider: Option<String>,
+
+    /// Model id or provider/id (overrides defaultModel).
+    #[arg(long, value_name = "MODEL")]
+    model: Option<String>,
+
     /// Thinking level: off, minimal, low, medium, high, xhigh, max.
     #[arg(long, value_name = "LEVEL")]
     thinking: Option<String>,
@@ -241,6 +249,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         append_system_prompt: cli.append_system_prompt,
         no_context_files: cli.no_context_files,
         exclude_tools: cli.exclude_tools,
+        provider: cli.provider,
+        model: cli.model,
         thinking: cli
             .thinking
             .as_deref()

@@ -161,6 +161,10 @@ pub struct SessionOptions {
     pub exclude_tools: Vec<String>,
     /// `--thinking`: requested reasoning level.
     pub thinking: ThinkingSetting,
+    /// `--provider`: overrides `defaultProvider`.
+    pub provider: Option<String>,
+    /// `--model`: model id or `provider/id`, overrides `defaultModel`.
+    pub model: Option<String>,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -767,6 +771,40 @@ fn config_for(demo: bool) -> Result<Config, AgentError> {
         retry,
         enabled_tools: resolve_default_tools(default_tool_entries),
     })
+}
+
+/// Apply `--provider` / `--model` (`provider/id` allowed) over the settings defaults.
+fn apply_model_override(
+    config: &mut Config,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), AgentError> {
+    if let Some(provider) = provider {
+        config.provider = provider.to_owned();
+    }
+    if let Some(model) = model {
+        match model.split_once('/') {
+            Some((provider, id)) if provider_is_known(config, provider) => {
+                config.provider = provider.to_owned();
+                config.model = id.to_owned();
+            }
+            _ => config.model = model.to_owned(),
+        }
+    }
+    if provider.is_some() || model.is_some() {
+        config.model_choices =
+            configured_models(&config.agent_dir, &config.provider, &config.model)?;
+    }
+    Ok(())
+}
+
+/// A prefix before `/` names a provider only if it is `opencode-cf*` or listed in `models.json`.
+fn provider_is_known(config: &Config, name: &str) -> bool {
+    name.starts_with("opencode-cf")
+        || std::fs::read_to_string(config.agent_dir.join("models.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .is_some_and(|json| json["providers"].get(name).is_some())
 }
 
 const DEFAULT_TOOL_NAMES: &[&str] = &["read", "bash", "edit", "write"];
@@ -2089,6 +2127,8 @@ fn resolve_session_options(
         no_context_files: _,
         exclude_tools: _,
         thinking: _,
+        provider: _,
+        model: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2535,7 +2575,12 @@ impl MuAgent {
         if options.demo {
             return Self::open_demo(options);
         }
-        let config = config_for(false)?;
+        let mut config = config_for(false)?;
+        apply_model_override(
+            &mut config,
+            options.provider.as_deref(),
+            options.model.as_deref(),
+        )?;
         let prepared = Prepared::new(config, options)?;
         let mcp_startup = Arc::new(OnceCell::new());
         let background_mcp = Arc::clone(&mcp_startup);
@@ -4742,6 +4787,35 @@ mod tests {
             "loud".parse::<ThinkingSetting>().unwrap_err(),
             "Invalid thinking level \"loud\". Valid values: off, minimal, low, medium, high, xhigh, max"
         );
+    }
+
+    #[test]
+    fn model_flags_override_settings_and_split_provider_prefixes() {
+        let mk = || super::Config {
+            agent_dir: std::path::PathBuf::from("/nonexistent"),
+            cwd: std::path::PathBuf::from("/"),
+            provider: "p".into(),
+            model: "m".into(),
+            model_choices: vec!["m".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+            enabled_tools: vec![],
+        };
+        let mut config = mk();
+        super::apply_model_override(&mut config, None, Some("opencode-cf/gpt-x")).unwrap();
+        assert_eq!(
+            (config.provider.as_str(), config.model.as_str()),
+            ("opencode-cf", "gpt-x")
+        );
+        let mut config = mk();
+        super::apply_model_override(&mut config, Some("q"), Some("org/model")).unwrap();
+        assert_eq!(
+            (config.provider.as_str(), config.model.as_str()),
+            ("q", "org/model")
+        );
+        let mut config = mk();
+        super::apply_model_override(&mut config, None, None).unwrap();
+        assert_eq!(config.model, "m");
     }
 
     #[test]
