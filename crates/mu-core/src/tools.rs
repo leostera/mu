@@ -241,6 +241,8 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
         Some("image/gif")
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         Some("image/webp")
+    } else if bytes.starts_with(b"BM") && bytes.len() > 26 {
+        Some("image/bmp")
     } else {
         None
     }
@@ -251,14 +253,30 @@ fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let path = resolve_read_path(cwd, args)?;
     let bytes = std::fs::read(&path).map_err(|error| read_file_io_error(&path, error))?;
     if let Some(mime_type) = detect_image_mime(&bytes) {
-        use base64::Engine;
-        return Ok(ToolResult {
-            images: vec![ToolImage {
-                mime_type: mime_type.to_owned(),
-                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-            }],
-            ..ToolResult::text(format!("Read image file [{mime_type}]"))
-        });
+        let options = crate::image_process::ResizeOptions::default();
+        return Ok(
+            match crate::image_process::process_image(&bytes, mime_type, true, options) {
+                Ok(processed) => {
+                    let mut note = format!("Read image file [{}]", processed.mime_type);
+                    if !processed.hints.is_empty() {
+                        note = format!(
+                            "Read image file [{mime_type}]\n{}",
+                            processed.hints.join("\n")
+                        );
+                    }
+                    ToolResult {
+                        images: vec![ToolImage {
+                            mime_type: processed.mime_type,
+                            data: processed.data,
+                        }],
+                        ..ToolResult::text(note)
+                    }
+                }
+                Err(message) => {
+                    ToolResult::text(format!("Read image file [{mime_type}]\n{message}"))
+                }
+            },
+        );
     }
     // Node's Buffer.toString("utf-8") replaces malformed sequences instead of
     // rejecting the entire text file; mirror that decoding boundary here.
@@ -2381,15 +2399,33 @@ mod tests {
     fn read_returns_image_files_as_attachments_by_magic_not_extension() {
         let dir = std::env::temp_dir().join(format!("mu-read-img-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("shot.txt"),
-            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1],
-        )
-        .unwrap();
+        let mut real_png = Vec::new();
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(
+                &mut std::io::Cursor::new(&mut real_png),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        std::fs::write(dir.join("shot.txt"), &real_png).unwrap();
         let result = read_file(&dir, &json!({"path":"shot.txt"})).unwrap();
         assert_eq!(result.content, "Read image file [image/png]");
         assert_eq!(result.images.len(), 1);
         assert_eq!(result.images[0].mime_type, "image/png");
+        // A PNG signature with no valid image behind it is reported, not attached.
+        std::fs::write(
+            dir.join("corrupt.png"),
+            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1],
+        )
+        .unwrap();
+        let corrupt = read_file(&dir, &json!({"path":"corrupt.png"})).unwrap();
+        assert!(corrupt.images.is_empty());
+        assert!(
+            corrupt
+                .content
+                .starts_with("Read image file [image/png]\n[Image omitted:"),
+            "{}",
+            corrupt.content
+        );
         std::fs::write(dir.join("plain.png"), "just text").unwrap();
         let plain = read_file(&dir, &json!({"path":"plain.png"})).unwrap();
         assert!(plain.images.is_empty() && plain.content.contains("just text"));

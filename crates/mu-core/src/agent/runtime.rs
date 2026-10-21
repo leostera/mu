@@ -426,10 +426,31 @@ fn flatten_result_with_images(
     details: Option<Value>,
 ) -> AgentToolResult {
     let mut content = vec![ContentBlock::text(output)];
-    content.extend(images.into_iter().map(|image| ContentBlock::Image {
-        data: image.data,
-        mime_type: image.mime_type,
-    }));
+    // Pi's `normalizeToolResultImages`: shrink or convert images as they enter history.
+    for image in images {
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &image.data);
+        let processed = decoded.ok().and_then(|bytes| {
+            crate::image_process::process_image(&bytes, &image.mime_type, true, Default::default())
+                .ok()
+        });
+        match processed {
+            Some(processed) => {
+                content.push(ContentBlock::Image {
+                    data: processed.data,
+                    mime_type: processed.mime_type,
+                });
+                if !processed.hints.is_empty() {
+                    content.push(ContentBlock::text(processed.hints.join("\n")));
+                }
+            }
+            // Keep undecodable images rather than dropping a tool's output.
+            None => content.push(ContentBlock::Image {
+                data: image.data,
+                mime_type: image.mime_type,
+            }),
+        }
+    }
     AgentToolResult {
         content,
         details: details.unwrap_or(Value::Null),
