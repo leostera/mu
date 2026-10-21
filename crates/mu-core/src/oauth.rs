@@ -1159,6 +1159,204 @@ pub mod openai_chatgpt {
     }
 }
 
+/// Meta Model API login (Pi's `meta.ts`): a device-code login yields an identity token, which is
+/// exchanged for a roughly one-day API key. The identity token is stored as `refresh` and the key
+/// as `access`, so refreshing means minting a new key; the identity token itself cannot be renewed.
+pub mod meta {
+    use super::*;
+
+    const CLIENT_ID: &str = "1031625952748946";
+    pub const DEVICE_AUTHORIZATION_URL: &str = "https://auth.meta.com/oidc/device/authorization/";
+    pub const DEVICE_TOKEN_URL: &str = "https://auth.meta.com/oidc/device/token/";
+    pub const API_KEY_MINT_URL: &str = "https://api.meta.ai/muse-code/key";
+    const API_KEY_LIFETIME_MS: f64 = 24.0 * 60.0 * 60.0 * 1000.0;
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct DeviceAuthorization {
+        pub device_code: String,
+        pub user_code: String,
+        pub verification_uri: String,
+        pub interval_seconds: Option<u64>,
+        pub expires_in_seconds: Option<u64>,
+    }
+
+    fn trusted_http_url(value: &Value) -> Option<&str> {
+        let text = value.as_str().filter(|v| !v.is_empty())?;
+        matches!(url::Url::parse(text).ok()?.scheme(), "http" | "https").then_some(text)
+    }
+
+    /// `: <detail>` from the first of Pi's error fields that holds text, else empty.
+    fn error_detail(json: &Value) -> String {
+        ["error_description", "detail", "message", "error"]
+            .iter()
+            .find_map(|key| {
+                json.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            })
+            .map(|detail| format!(": {detail}"))
+            .unwrap_or_default()
+    }
+
+    fn positive(json: &Value, key: &str) -> Option<u64> {
+        json.get(key)
+            .and_then(Value::as_f64)
+            .filter(|v| *v > 0.0)
+            .map(|v| v as u64)
+    }
+
+    pub fn parse_device_authorization(json: &Value) -> Result<DeviceAuthorization, String> {
+        let text = |k: &str| {
+            json.get(k)
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+        };
+        let uri = trusted_http_url(&json["verification_uri_complete"])
+            .or_else(|| trusted_http_url(&json["verification_uri"]));
+        let (Some(device_code), Some(user_code), Some(uri)) =
+            (text("device_code"), text("user_code"), uri)
+        else {
+            return Err(format!(
+                "Invalid Meta device authorization response: {json}"
+            ));
+        };
+        Ok(DeviceAuthorization {
+            device_code,
+            user_code,
+            verification_uri: uri.to_owned(),
+            interval_seconds: positive(json, "interval"),
+            expires_in_seconds: positive(json, "expires_in"),
+        })
+    }
+
+    /// One poll of the device-token endpoint; the identity token is the `access_token`.
+    pub fn poll_result(status: u16, json: &Value) -> DevicePoll<String> {
+        if (200..300).contains(&status)
+            && let Some(token) = json
+                .get("access_token")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+        {
+            return DevicePoll::Complete(token.to_owned());
+        }
+        match json.get("error").and_then(Value::as_str) {
+            Some("authorization_pending") => DevicePoll::Pending,
+            Some("slow_down") => DevicePoll::SlowDown(positive(json, "interval")),
+            Some("access_denied") => DevicePoll::Failed("Meta login was denied.".into()),
+            Some("expired_token") => DevicePoll::Failed(
+                "Meta device authorization expired. Please restart login.".into(),
+            ),
+            _ => DevicePoll::Failed(format!(
+                "Meta device token request failed with status {status}{}",
+                error_detail(json)
+            )),
+        }
+    }
+
+    /// Turn the mint endpoint's answer into a credential holding the identity token.
+    pub fn credential_from_mint(
+        identity_token: &str,
+        status: u16,
+        json: &Value,
+        now_ms: f64,
+    ) -> Result<Credential, String> {
+        if matches!(status, 401 | 403) {
+            return Err(format!(
+                "Meta session expired (status {status}). Run `mu auth login --provider meta` to sign in again.{}",
+                error_detail(json)
+            ));
+        }
+        if !(200..300).contains(&status) {
+            return Err(format!(
+                "Meta API key mint failed with status {status}{}",
+                error_detail(json)
+            ));
+        }
+        let Some(key) = json
+            .get("api_key")
+            .and_then(Value::as_str)
+            .filter(|k| !k.is_empty())
+        else {
+            let action = trusted_http_url(&json["action_url"])
+                .map(|url| format!(" Complete setup at {url}"))
+                .unwrap_or_default();
+            return Err(format!("Meta did not issue an API key.{action}"));
+        };
+        Ok(Credential::Oauth {
+            access: key.to_owned(),
+            refresh: identity_token.to_owned(),
+            expires: now_ms + API_KEY_LIFETIME_MS,
+            extra: Default::default(),
+        })
+    }
+
+    async fn request_json(request: reqwest::RequestBuilder) -> Result<(u16, Value), String> {
+        let response = request
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = response.status().as_u16();
+        Ok((
+            status,
+            response.json::<Value>().await.unwrap_or(Value::Null),
+        ))
+    }
+
+    pub async fn start(url: &str) -> Result<DeviceAuthorization, String> {
+        let (status, json) = request_json(
+            reqwest::Client::new()
+                .post(url)
+                .header("accept", "application/json")
+                .form(&[("client_id", CLIENT_ID)]),
+        )
+        .await?;
+        if !(200..300).contains(&status) {
+            return Err(format!(
+                "Meta device authorization failed with status {status}{}",
+                error_detail(&json)
+            ));
+        }
+        parse_device_authorization(&json)
+    }
+
+    pub async fn poll_for_identity_token(
+        url: &str,
+        device: &DeviceAuthorization,
+    ) -> Result<String, String> {
+        let timing = DevicePollTiming::pi(device.interval_seconds, device.expires_in_seconds, true);
+        poll_device_code(timing, || async {
+            let request = reqwest::Client::new()
+                .post(url)
+                .header("accept", "application/json")
+                .form(&[
+                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                    ("device_code", device.device_code.as_str()),
+                    ("client_id", CLIENT_ID),
+                ]);
+            match request_json(request).await {
+                Ok((status, json)) => poll_result(status, &json),
+                Err(message) => DevicePoll::Failed(message),
+            }
+        })
+        .await
+    }
+
+    /// Mint a fresh API key from an identity token (login, and every refresh).
+    pub async fn mint_api_key(identity_token: &str, url: &str) -> Result<Credential, String> {
+        let request = reqwest::Client::new()
+            .post(url)
+            .header("accept", "application/json")
+            .header("x-api-version", "1.0.0")
+            .bearer_auth(identity_token)
+            .json(&json!({}));
+        let (status, json) = request_json(request).await?;
+        credential_from_mint(identity_token, status, &json, now_ms())
+    }
+}
+
 /// Whether a stored OAuth credential needs refreshing.
 pub fn is_expired(expires_ms: f64) -> bool {
     now_ms() >= expires_ms
@@ -1421,6 +1619,69 @@ mod tests {
             openai_chatgpt::credential_from_token_response(&missing_scope, "c", 0.0)
                 .unwrap_err()
                 .contains("did not include")
+        );
+    }
+
+    #[test]
+    fn meta_device_flow_and_key_minting_follow_pi() {
+        let device = meta::parse_device_authorization(&json!({
+            "device_code":"d","user_code":"u","verification_uri":"https://m.test/a",
+            "verification_uri_complete":"https://m.test/a?c=u","interval":3}))
+        .unwrap();
+        assert_eq!(device.verification_uri, "https://m.test/a?c=u");
+        assert_eq!(
+            (device.interval_seconds, device.expires_in_seconds),
+            (Some(3), None)
+        );
+        assert!(meta::parse_device_authorization(&json!({"device_code":"d"})).is_err());
+        assert_eq!(
+            meta::poll_result(200, &json!({"access_token":"idt"})),
+            DevicePoll::Complete("idt".into())
+        );
+        assert_eq!(
+            meta::poll_result(400, &json!({"error":"authorization_pending"})),
+            DevicePoll::Pending
+        );
+        assert_eq!(
+            meta::poll_result(400, &json!({"error":"access_denied"})),
+            DevicePoll::Failed("Meta login was denied.".into())
+        );
+        assert_eq!(
+            meta::poll_result(500, &json!({"detail":" boom "})),
+            DevicePoll::Failed("Meta device token request failed with status 500: boom".into())
+        );
+        let Credential::Oauth {
+            access,
+            refresh,
+            expires,
+            ..
+        } = meta::credential_from_mint("idt", 200, &json!({"api_key":"k"}), 1000.0).unwrap()
+        else {
+            panic!("oauth")
+        };
+        assert_eq!(
+            (access.as_str(), refresh.as_str(), expires),
+            ("k", "idt", 1000.0 + 86_400_000.0)
+        );
+        assert!(
+            meta::credential_from_mint("idt", 401, &json!({}), 0.0)
+                .unwrap_err()
+                .starts_with("Meta session expired (status 401)")
+        );
+        assert_eq!(
+            meta::credential_from_mint(
+                "idt",
+                200,
+                &json!({"action_url":"https://m.test/setup"}),
+                0.0
+            )
+            .unwrap_err(),
+            "Meta did not issue an API key. Complete setup at https://m.test/setup"
+        );
+        assert!(
+            meta::credential_from_mint("idt", 500, &json!({"message":"down"}), 0.0)
+                .unwrap_err()
+                .ends_with("status 500: down")
         );
     }
 

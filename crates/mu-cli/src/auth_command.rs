@@ -103,6 +103,28 @@ pub fn check(provider: &str, json: bool, agent_dir: &Path) -> (String, i32) {
     (output, i32::from(status != "ready"))
 }
 
+async fn login_meta(agent_dir: &Path) -> Result<String, AuthCommandError> {
+    use mu_core::oauth::meta;
+    let fail = AuthCommandError::Login;
+    let device = meta::start(meta::DEVICE_AUTHORIZATION_URL)
+        .await
+        .map_err(fail)?;
+    eprintln!(
+        "Open {} and enter the code {}.",
+        device.verification_uri, device.user_code
+    );
+    let identity = meta::poll_for_identity_token(meta::DEVICE_TOKEN_URL, &device)
+        .await
+        .map_err(AuthCommandError::Login)?;
+    eprintln!("Enabling Meta Model API access...");
+    let credential = meta::mint_api_key(&identity, meta::API_KEY_MINT_URL)
+        .await
+        .map_err(AuthCommandError::Login)?;
+    mu_core::auth::set_credential(&agent_dir.join("auth.json"), "meta", credential)
+        .map_err(|e| AuthCommandError::Login(e.to_string()))?;
+    Ok("Logged in to meta; credential saved to auth.json".to_owned())
+}
+
 async fn login_openai_chatgpt(agent_dir: &Path) -> Result<String, AuthCommandError> {
     use mu_core::oauth::{CallbackServer, openai_chatgpt as chatgpt};
     let fail = AuthCommandError::Login;
@@ -230,9 +252,12 @@ pub async fn login(
     if provider == "openai-chatgpt" {
         return login_openai_chatgpt(agent_dir).await;
     }
+    if provider == "meta" {
+        return login_meta(agent_dir).await;
+    }
     if provider != "anthropic" {
         return Err(AuthCommandError::Login(format!(
-            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\", \"kimi-coding\" and \"openai-chatgpt\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
+            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\", \"kimi-coding\", \"openai-chatgpt\" and \"meta\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
         )));
     }
     let fail = AuthCommandError::Login;
