@@ -92,6 +92,56 @@ pub fn proxy_env_updates(
     .collect()
 }
 
+/// Settings editable as text, with their allowed values (a subset of Pi's settings schema).
+const ENUM_SETTINGS: &[(&str, &[&str])] = &[
+    ("doubleEscapeAction", &["tree", "fork", "none"]),
+    ("steeringMode", &["all", "one-at-a-time"]),
+    ("followUpMode", &["all", "one-at-a-time"]),
+    ("defaultProjectTrust", &["ask", "always", "never"]),
+    ("transport", &["auto", "sse", "websocket"]),
+    (
+        "treeFilterMode",
+        &["default", "no-tools", "user-only", "labeled-only", "all"],
+    ),
+    ("codemode.mode", &["on", "only"]),
+];
+const NUMBER_SETTINGS: &[(&str, u64, u64)] = &[
+    ("autocompleteMaxVisible", 1, 20),
+    ("editorPaddingX", 0, 8),
+    ("outputPad", 0, 8),
+    ("codemode.inlineBudget", 0, 1_000_000),
+    ("compaction.reserveTokens", 0, 10_000_000),
+    ("compaction.keepRecentTokens", 0, 10_000_000),
+    ("retry.maxRetries", 0, 100),
+];
+
+/// Parse and validate `text` for an enum or number setting.
+pub fn parse_setting_value(key: &str, text: &str) -> Result<Value, String> {
+    let text = text.trim();
+    if let Some((_, allowed)) = ENUM_SETTINGS.iter().find(|(k, _)| *k == key) {
+        return allowed
+            .contains(&text)
+            .then(|| json!(text))
+            .ok_or_else(|| format!("{key} must be one of: {}", allowed.join(", ")));
+    }
+    if let Some((_, min, max)) = NUMBER_SETTINGS.iter().find(|(k, _, _)| *k == key) {
+        return match text.parse::<u64>() {
+            Ok(n) if (*min..=*max).contains(&n) => Ok(json!(n)),
+            _ => Err(format!("{key} must be a whole number from {min} to {max}")),
+        };
+    }
+    Err(format!("Unknown setting \"{key}\""))
+}
+
+/// Keys accepted by [`parse_setting_value`].
+pub fn text_setting_keys() -> Vec<&'static str> {
+    ENUM_SETTINGS
+        .iter()
+        .map(|(k, _)| *k)
+        .chain(NUMBER_SETTINGS.iter().map(|(k, _, _)| *k))
+        .collect()
+}
+
 fn is_tool_modifier(entry: &Value) -> bool {
     entry
         .as_str()
@@ -358,6 +408,29 @@ mod tests {
             Settings::load(&agent, &cwd, true).get("defaultTools"),
             Some(json!(["bash"]))
         );
+    }
+
+    #[test]
+    fn enum_and_number_settings_are_validated() {
+        assert_eq!(
+            parse_setting_value("doubleEscapeAction", " fork ").unwrap(),
+            json!("fork")
+        );
+        assert_eq!(
+            parse_setting_value("doubleEscapeAction", "x").unwrap_err(),
+            "doubleEscapeAction must be one of: tree, fork, none"
+        );
+        assert_eq!(
+            parse_setting_value("autocompleteMaxVisible", "7").unwrap(),
+            json!(7)
+        );
+        assert!(parse_setting_value("autocompleteMaxVisible", "0").is_err());
+        assert!(parse_setting_value("outputPad", "-1").is_err());
+        assert_eq!(
+            parse_setting_value("nope", "1").unwrap_err(),
+            "Unknown setting \"nope\""
+        );
+        assert!(text_setting_keys().contains(&"codemode.mode"));
     }
 
     #[test]

@@ -3904,6 +3904,17 @@ impl MuAgent {
         Ok(next)
     }
 
+    /// Set an enum or number setting from text (`/settings <key> <value>`), validated like Pi's
+    /// schema for the keys Mu exposes. Returns the stored value.
+    pub fn set_setting_text(&self, key: &str, text: &str) -> Result<Value, AgentError> {
+        let value =
+            crate::settings::parse_setting_value(key, text).map_err(AgentError::Configuration)?;
+        self.settings()
+            .set(crate::settings::Scope::Global, key, value.clone())
+            .map_err(|error| AgentError::Configuration(error.to_string()))?;
+        Ok(value)
+    }
+
     pub fn agent_dir(&self) -> &Path {
         &self.agent_dir
     }

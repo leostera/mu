@@ -2539,6 +2539,13 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         "settings" => {
             let status = match agent.try_lock() {
                 Err(_) => "Mu is busy.".to_owned(),
+                Ok(agent) if argument.contains(' ') => {
+                    let (key, value) = argument.split_once(' ').unwrap_or_default();
+                    match agent.set_setting_text(key, value) {
+                        Ok(stored) => format!("{key} = {stored} (saved to settings.json; most settings apply to new sessions)"),
+                        Err(error) => error.to_string(),
+                    }
+                }
                 Ok(agent) if !argument.is_empty() => {
                     match TOGGLE_SETTINGS.iter().find(|(key, _)| *key == argument) {
                         None => format!("Unknown setting \"{argument}\""),
