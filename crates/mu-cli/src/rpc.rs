@@ -229,6 +229,24 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
                 }))
                 .collect::<Vec<_>>(),
         }))),
+        "get_commands" => Ok(Some(json!({
+            "commands": agent
+                .dynamic_slash_commands()
+                .into_iter()
+                .map(|(name, description, hint)| json!({
+                    "name": name,
+                    "description": description,
+                    "argumentHint": hint,
+                }))
+                .collect::<Vec<_>>(),
+        }))),
+        "switch_session" => match command["sessionPath"].as_str() {
+            None => Err("switch_session requires `sessionPath`".into()),
+            Some(path) => agent
+                .import_session(std::path::Path::new(path))
+                .map(|()| Some(json!({"cancelled": false})))
+                .map_err(|error| error.to_string()),
+        },
         "get_session_stats" => Ok(Some(json!({"summary": agent.session_summary()}))),
         "get_last_assistant_text" => Ok(Some(json!({"text": agent.last_assistant_text()}))),
         other => Err(format!("Unknown command: {other}")),
@@ -386,6 +404,14 @@ mod tests {
         assert!(messages["success"] == true && messages["data"]["messages"].is_array());
         let tree = handle(&mut agent, &json!({"type":"get_tree"})).await;
         assert!(tree["data"]["entries"].is_array());
+        let commands = handle(&mut agent, &json!({"type":"get_commands"})).await;
+        assert!(commands["data"]["commands"].is_array());
+        let missing_session = handle(
+            &mut agent,
+            &json!({"type":"switch_session","sessionPath":"/nonexistent/x.jsonl"}),
+        )
+        .await;
+        assert_eq!(missing_session["success"], false);
         let nothing = handle(&mut agent, &json!({"type":"compact"})).await;
         assert_eq!(nothing["error"], "Nothing to compact");
         let missing = handle(&mut agent, &json!({"type":"prompt"})).await;
