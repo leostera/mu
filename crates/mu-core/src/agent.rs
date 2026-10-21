@@ -14,6 +14,7 @@ use thiserror::Error;
 use tokio::sync::OnceCell;
 
 mod anthropic;
+mod completions;
 mod runtime;
 
 use crate::agent_loop::AgentMessage;
@@ -315,6 +316,12 @@ enum ProviderTransport {
     },
     /// Anthropic Messages API (`api: "anthropic-messages"` in `models.json`).
     Anthropic {
+        http: Client,
+        endpoint: Url,
+        key: String,
+    },
+    /// OpenAI Chat Completions (`api: "openai-completions"`).
+    Completions {
         http: Client,
         endpoint: Url,
         key: String,
@@ -1340,6 +1347,69 @@ async fn connect(
 }
 
 impl Provider {
+    async fn complete_completions(
+        &self,
+        http: &Client,
+        endpoint: &Url,
+        key: &str,
+        history: &[Value],
+        tools: &[Value],
+        on_event: &mut impl FnMut(AgentEvent),
+    ) -> Result<Reply, AgentError> {
+        let mut system = if self.describes_tools {
+            instructions_for_tools(&self.instructions, tools)
+        } else {
+            self.instructions.clone()
+        };
+        if !self.appendix.is_empty() {
+            system = format!("{system}\n\n{}", self.appendix);
+        }
+        let effort = self.reasoning_effort.filter(|_| self.supports_reasoning);
+        let body = completions::request_body(&self.model, &system, history, tools, effort);
+        let response = http
+            .post(endpoint.clone())
+            .bearer_auth(key)
+            .header(header::ACCEPT, "text/event-stream")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
+        if !response.status().is_success() {
+            return Err(AgentError::Provider(format!(
+                "model request returned HTTP {}",
+                response.status()
+            )));
+        }
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        let mut decoder = completions::Decoder::default();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(
+                &chunk.map_err(|e| AgentError::Provider(format!("model stream failed: {e}")))?,
+            );
+            while let Some(pos) = bytes.windows(2).position(|w| w == b"\n\n") {
+                let frame: Vec<_> = bytes.drain(..pos + 2).collect();
+                let frame = String::from_utf8_lossy(&frame);
+                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data:")) else {
+                    continue;
+                };
+                if data.trim() == "[DONE]" {
+                    decoder.feed_done();
+                } else if let Ok(event) = serde_json::from_str::<Value>(data.trim()) {
+                    decoder
+                        .feed(&event, on_event)
+                        .map_err(AgentError::Provider)?;
+                }
+            }
+        }
+        if !decoder.finished() {
+            return Err(AgentError::Provider(
+                "Completions stream ended before a finish reason".into(),
+            ));
+        }
+        Ok(decoder.into_reply())
+    }
+
     async fn complete_anthropic(
         &self,
         http: &Client,
@@ -1460,6 +1530,16 @@ impl Provider {
                 total_tokens: 0,
                 incomplete_reason: None,
             });
+        }
+        if let ProviderTransport::Completions {
+            http,
+            endpoint,
+            key,
+        } = &self.transport
+        {
+            return self
+                .complete_completions(http, endpoint, key, history, tools, on_event)
+                .await;
         }
         if let ProviderTransport::Anthropic {
             http,
@@ -1776,10 +1856,10 @@ fn connect_custom_provider(
         .get(&config.provider)
         .ok_or_else(unsupported)?;
     match entry.get("api").and_then(Value::as_str) {
-        Some("openai-responses" | "anthropic-messages") => {}
+        Some("openai-responses" | "anthropic-messages" | "openai-completions") => {}
         other => {
             return Err(AgentError::Configuration(format!(
-                "Provider `{}` uses unsupported api `{}` (supported: openai-responses, anthropic-messages)",
+                "Provider `{}` uses unsupported api `{}` (supported: openai-responses, openai-completions, anthropic-messages)",
                 config.provider,
                 other.unwrap_or("none")
             )));
@@ -1792,7 +1872,14 @@ fn connect_custom_provider(
     let mut endpoint = Url::parse(base)
         .map_err(|error| AgentError::Configuration(format!("invalid baseUrl: {error}")))?;
     let anthropic = entry.get("api").and_then(Value::as_str) == Some("anthropic-messages");
-    let suffix = if anthropic { "messages" } else { "responses" };
+    let completions = entry.get("api").and_then(Value::as_str) == Some("openai-completions");
+    let suffix = if anthropic {
+        "messages"
+    } else if completions {
+        "chat/completions"
+    } else {
+        "responses"
+    };
     endpoint.set_path(&format!(
         "{}/{suffix}",
         endpoint.path().trim_end_matches('/')
@@ -1818,6 +1905,12 @@ fn connect_custom_provider(
     Ok(Provider {
         transport: if anthropic {
             ProviderTransport::Anthropic {
+                http: Client::new(),
+                endpoint,
+                key: token,
+            }
+        } else if completions {
+            ProviderTransport::Completions {
                 http: Client::new(),
                 endpoint,
                 key: token,
@@ -1848,6 +1941,8 @@ fn connect_custom_provider(
 fn api_name(transport: &ProviderTransport) -> &'static str {
     if matches!(transport, ProviderTransport::Demo) {
         "mu-demo"
+    } else if matches!(transport, ProviderTransport::Completions { .. }) {
+        "openai-completions"
     } else if matches!(transport, ProviderTransport::Anthropic { .. }) {
         "anthropic-messages"
     } else {
