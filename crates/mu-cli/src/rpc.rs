@@ -247,6 +247,39 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
                 .map(|()| Some(json!({"cancelled": false})))
                 .map_err(|error| error.to_string()),
         },
+        "get_available_thinking_levels" => Ok(Some(json!({
+            "levels": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+        }))),
+        "set_auto_compaction" | "set_auto_retry" => {
+            let key = if kind == "set_auto_compaction" {
+                "compaction.enabled"
+            } else {
+                "retry.enabled"
+            };
+            match command["enabled"].as_bool() {
+                None => Err(format!("{kind} requires boolean `enabled`")),
+                Some(enabled) => agent
+                    .settings()
+                    .set(mu_core::settings::Scope::Global, key, json!(enabled))
+                    .map(|()| None)
+                    .map_err(|error| error.to_string()),
+            }
+        }
+        "set_steering_mode" | "set_follow_up_mode" => {
+            let key = if kind == "set_steering_mode" {
+                "steeringMode"
+            } else {
+                "followUpMode"
+            };
+            match command["mode"].as_str() {
+                Some(mode @ ("all" | "one-at-a-time")) => agent
+                    .settings()
+                    .set(mu_core::settings::Scope::Global, key, json!(mode))
+                    .map(|()| None)
+                    .map_err(|error| error.to_string()),
+                _ => Err(format!("{kind} requires mode \"all\" or \"one-at-a-time\"")),
+            }
+        }
         "get_session_stats" => Ok(Some(json!({"summary": agent.session_summary()}))),
         "get_last_assistant_text" => Ok(Some(json!({"text": agent.last_assistant_text()}))),
         other => Err(format!("Unknown command: {other}")),
@@ -412,6 +445,19 @@ mod tests {
         )
         .await;
         assert_eq!(missing_session["success"], false);
+        let levels = handle(&mut agent, &json!({"type":"get_available_thinking_levels"})).await;
+        assert_eq!(levels["data"]["levels"][0], "off");
+        let bad_mode = handle(
+            &mut agent,
+            &json!({"type":"set_steering_mode","mode":"sometimes"}),
+        )
+        .await;
+        assert_eq!(bad_mode["success"], false);
+        let bad_flag = handle(&mut agent, &json!({"type":"set_auto_retry"})).await;
+        assert_eq!(
+            bad_flag["error"],
+            "set_auto_retry requires boolean `enabled`"
+        );
         let nothing = handle(&mut agent, &json!({"type":"compact"})).await;
         assert_eq!(nothing["error"], "Nothing to compact");
         let missing = handle(&mut agent, &json!({"type":"prompt"})).await;
