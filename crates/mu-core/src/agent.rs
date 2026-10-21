@@ -796,7 +796,7 @@ fn model_supports_strict_sampling(model: &Value) -> bool {
     model
         .pointer("/compat/supportsStrictMode")
         .and_then(Value::as_bool)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn mark_strict_builtin_tool(mut definition: Value) -> Value {
@@ -1045,7 +1045,7 @@ async fn connect(config: &Config, skill_prompt: String) -> Result<Provider, Agen
         .ok_or_else(|| AgentError::Provider("config has no provider catalog".into()))?;
     let mut endpoint = None;
     let mut supports_reasoning = false;
-    let mut supports_strict_sampling = true;
+    let mut supports_strict_sampling = false;
     for (id, p) in providers {
         let Some(m) = p.pointer(&format!("/models/{}", config.model)) else {
             continue;
@@ -4005,10 +4005,10 @@ mod tests {
     }
 
     #[test]
-    fn model_strict_sampling_capability_defaults_to_openai_support_and_honors_opt_out() {
-        assert!(super::model_supports_strict_sampling(
-            &serde_json::json!({})
-        ));
+    fn model_strict_sampling_capability_defaults_to_unsupported_and_honors_opt_in() {
+        assert!(!super::model_supports_strict_sampling(&serde_json::json!(
+            {}
+        )));
         assert!(super::model_supports_strict_sampling(&serde_json::json!({
             "compat":{"supportsStrictMode":true}
         })));
