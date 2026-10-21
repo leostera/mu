@@ -303,6 +303,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             None => (None, None),
         }
     };
+    let (model, suffix_thinking) = split_thinking_suffix(cli.model.as_deref());
+    // An explicit --thinking wins; the `:level` suffix is only a fallback (as in Pi).
+    let thinking = match cli.thinking.as_deref() {
+        Some(level) => level.parse()?,
+        None => suffix_thinking.unwrap_or_default(),
+    };
     let session_options = mu_core::SessionOptions {
         path: session_file,
         directory: cli.session_dir,
@@ -335,13 +341,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
         prompt_templates: cli.prompt_templates,
         no_prompt_templates: cli.no_prompt_templates,
-        model: cli.model,
-        thinking: cli
-            .thinking
-            .as_deref()
-            .map(str::parse)
-            .transpose()?
-            .unwrap_or_default(),
+        model,
+        thinking,
     };
 
     if cli.mode == OutputMode::Rpc {
@@ -477,6 +478,23 @@ fn initial_prompt_from(
     Ok(initial_message::build(stdin, &files, &parsed.messages))
 }
 
+/// `--model <pattern>:<level>` → (`<pattern>`, level) when the suffix is a valid thinking level;
+/// any other `:` text stays part of the model id.
+fn split_thinking_suffix(
+    model: Option<&str>,
+) -> (Option<String>, Option<mu_core::ThinkingSetting>) {
+    let Some(model) = model else {
+        return (None, None);
+    };
+    match model.rsplit_once(':') {
+        Some((base, level)) if !base.is_empty() => match level.parse() {
+            Ok(level) => (Some(base.to_owned()), Some(level)),
+            Err(_) => (Some(model.to_owned()), None),
+        },
+        _ => (Some(model.to_owned()), None),
+    }
+}
+
 fn read_stdin_prompt(is_terminal: bool) -> Result<String, std::io::Error> {
     if is_terminal {
         return Ok(String::new());
@@ -491,6 +509,29 @@ mod tests {
     use super::{Cli, select_session};
     use clap::{CommandFactory, Parser};
     use std::path::PathBuf;
+
+    #[test]
+    fn model_thinking_suffix_is_split_only_for_valid_levels() {
+        use super::split_thinking_suffix;
+        use mu_core::ThinkingSetting::{High, Off};
+        assert_eq!(split_thinking_suffix(None), (None, None));
+        assert_eq!(
+            split_thinking_suffix(Some("sonnet:high")),
+            (Some("sonnet".into()), Some(High))
+        );
+        assert_eq!(
+            split_thinking_suffix(Some("acme/m:off")),
+            (Some("acme/m".into()), Some(Off))
+        );
+        assert_eq!(
+            split_thinking_suffix(Some("llama:8b")),
+            (Some("llama:8b".into()), None)
+        );
+        assert_eq!(
+            split_thinking_suffix(Some(":high")),
+            (Some(":high".into()), None)
+        );
+    }
 
     #[test]
     fn parses_demo_and_one_shot_prompt_modes() {
