@@ -180,8 +180,8 @@ struct Cli {
     #[arg(long)]
     no_context_files: bool,
 
-    /// Do not make startup network requests (Pi's `--offline`).
-    #[arg(long)]
+    /// Do not make startup network requests (Pi's `--offline`; also `PI_OFFLINE=1`).
+    #[arg(long, env = "PI_OFFLINE")]
     offline: bool,
 
     /// Do not load extensions (Mu has no extension runtime yet, so this is always the case).
@@ -546,6 +546,11 @@ mod tests {
     use super::{Cli, select_session};
     use clap::{CommandFactory, Parser};
     use std::path::PathBuf;
+
+    #[test]
+    fn offline_flag_is_a_plain_switch() {
+        assert!(Cli::try_parse_from(["mu", "--offline"]).unwrap().offline);
+    }
 
     #[test]
     fn pi_multi_letter_short_flags_expand_to_long_flags() {
