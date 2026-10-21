@@ -1721,6 +1721,47 @@ fn load_session(path: &Path) -> Result<(SessionDocument, Vec<AgentMessage>), Age
     Ok((session, history))
 }
 
+fn render_session_html(session: &SessionDocument) -> String {
+    let header = session.header();
+    let id = header.map(|h| h.id.as_str().to_owned()).unwrap_or_default();
+    let timestamp = header
+        .map(|h| h.timestamp.as_str().to_owned())
+        .unwrap_or_default();
+    let title = session.session_name().unwrap_or("Mu session");
+    let mut html = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>{SESSION_HTML_STYLE}</style></head><body><main><header><h1>{}</h1><p class=\"meta\">Session {} · {}</p></header>",
+        escape_html(title),
+        escape_html(title),
+        escape_html(&id),
+        escape_html(&timestamp),
+    );
+    for message in session_transcript(session) {
+        append_transcript_message_html(&mut html, message);
+    }
+    html.push_str("</main></body></html>");
+    html
+}
+
+/// `--export <session.jsonl> [output.html]`: render a session file without connecting a provider.
+///
+/// The default output is `mu-session-<name>.html` in the working directory (Pi's naming scheme).
+pub fn export_session_file(input: &Path, output: Option<&Path>) -> Result<PathBuf, AgentError> {
+    let (session, _) = load_session(input)?;
+    let output = match output {
+        Some(path) => path.to_owned(),
+        None => {
+            let stem = input
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            std::env::current_dir()?.join(format!("mu-session-{stem}.html"))
+        }
+    };
+    std::fs::write(&output, render_session_html(&session))
+        .map_err(|error| AgentError::Session(error.to_string()))?;
+    Ok(output)
+}
+
 const SESSION_HTML_STYLE: &str = "body{margin:0;background:#17191f;color:#e5e7eb;font:16px/1.6 system-ui,sans-serif}main{max-width:900px;margin:3rem auto;padding:0 1.25rem}header{border-bottom:1px solid #454955;margin-bottom:2rem}article{padding:1rem 1.25rem;margin:1rem 0;border-radius:12px;background:#22252d}article.user{background:#292d38}h1,h2{line-height:1.2}h2{font-size:1rem;color:#aeb8ce}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:.5rem 0}details{margin:.75rem 0;padding:.75rem;background:#191b21;border-radius:8px}.error{color:#ff8a8a}.meta{color:#9ca3af;font-size:.9rem}";
 
 fn append_transcript_message_html(html: &mut String, message: SessionTranscriptMessage) {
@@ -2961,20 +3002,7 @@ impl MuAgent {
     }
 
     fn render_session_html(&self) -> String {
-        let info = self.session_info();
-        let title = info.name.as_deref().unwrap_or("Mu session");
-        let mut html = format!(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title><style>{SESSION_HTML_STYLE}</style></head><body><main><header><h1>{}</h1><p class=\"meta\">Session {} · {}</p></header>",
-            escape_html(title),
-            escape_html(title),
-            escape_html(&info.id),
-            escape_html(&info.timestamp),
-        );
-        for message in self.session_transcript() {
-            append_transcript_message_html(&mut html, message);
-        }
-        html.push_str("</main></body></html>");
-        html
+        render_session_html(&self.session)
     }
 
     pub fn import_session(&mut self, path: &Path) -> Result<(), AgentError> {
@@ -4852,6 +4880,21 @@ mod tests {
         let mut config = mk();
         super::apply_model_override(&mut config, None, None).unwrap();
         assert_eq!(config.model, "m");
+    }
+
+    #[test]
+    fn export_session_file_renders_html_without_a_provider() {
+        let dir = std::env::temp_dir().join(format!("mu-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("s.jsonl");
+        let mut session = SessionDocument::new("/tmp/p");
+        session.append_user_text("hello <b>there</b>");
+        session.write_atomic(&input).unwrap();
+        let out = super::export_session_file(&input, Some(&dir.join("o.html"))).unwrap();
+        let html = std::fs::read_to_string(out).unwrap();
+        assert!(html.contains("hello &lt;b&gt;there&lt;/b&gt;"));
+        assert!(super::export_session_file(&dir.join("missing.jsonl"), None).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -88,6 +88,10 @@ struct Cli {
     #[arg(long)]
     no_prompt_templates: bool,
 
+    /// Export a session file to HTML and exit (optional output path as the prompt argument).
+    #[arg(long, value_name = "SESSION")]
+    export: Option<PathBuf>,
+
     /// Do not connect MCP servers.
     #[arg(long)]
     no_mcp: bool,
@@ -188,6 +192,17 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if let Some(input) = &cli.export {
+        let output = cli.prompt.first().map(PathBuf::from);
+        match mu_core::export_session_file(input, output.as_deref()) {
+            Ok(path) => println!("Exported to: {}", path.display()),
+            Err(error) => {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if let Some(search) = &cli.list_models {
         let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
             .map(PathBuf::from)
