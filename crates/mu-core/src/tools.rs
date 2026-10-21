@@ -511,16 +511,28 @@ fn write_file_io_error(path: &Path, operation: &str, error: std::io::Error) -> T
 }
 
 async fn write_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    write_file_with(&LocalFiles, cwd, args).await
+}
+
+/// The write tool over any [`FileOperations`] (Pi's `WriteOperations`).
+pub async fn write_file_with(
+    files: &dyn FileOperations,
+    cwd: &Path,
+    args: &Value,
+) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let path = resolve(cwd, args)?;
     let content = string_arg(args, "content")?;
     let lock = mutation_lock(&path);
     let _guard = lock.lock().await;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        files
+            .create_dir_all(parent)
             .map_err(|error| write_file_io_error(parent, "mkdir", error))?;
     }
-    std::fs::write(&path, content).map_err(|error| write_file_io_error(&path, "open", error))?;
+    files
+        .write(&path, content.as_bytes())
+        .map_err(|error| write_file_io_error(&path, "open", error))?;
     Ok(ToolResult::text(format!(
         "Successfully wrote to {requested_path}"
     )))
@@ -602,6 +614,7 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
 pub trait FileOperations: Send + Sync {
     fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
     fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()>;
+    fn create_dir_all(&self, path: &Path) -> std::io::Result<()>;
 }
 
 /// The real filesystem.
@@ -614,6 +627,10 @@ impl FileOperations for LocalFiles {
 
     fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
         std::fs::write(path, contents)
+    }
+
+    fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)
     }
 }
 
@@ -3747,10 +3764,28 @@ mod tests {
             *self.0.lock().unwrap() = contents.to_vec();
             Ok(())
         }
+
+        fn create_dir_all(&self, _path: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     /// Ported from Pi's `tools.test.ts` ("unknown edit access errors") and its in-memory edit
     /// operations.
+    #[tokio::test]
+    async fn write_tool_runs_over_injected_file_operations() {
+        let memory = MemoryFiles(std::sync::Mutex::new(Vec::new()), false);
+        let result = write_file_with(
+            &memory,
+            &std::env::temp_dir(),
+            &json!({"path":"a/b.txt","content":"data"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.content, "Successfully wrote to a/b.txt");
+        assert_eq!(*memory.0.lock().unwrap(), b"data");
+    }
+
     #[tokio::test]
     async fn edit_tool_runs_over_injected_file_operations() {
         let args = json!({"path":"broken.txt","edits":[{"oldText":"hello","newText":"world"}]});
