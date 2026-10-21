@@ -78,16 +78,6 @@ pub(super) fn rename_for_claude_code(
     (rename(history), rename(definitions))
 }
 
-fn text_of(content: &Value) -> String {
-    content
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Anthropic `messages` array; consecutive same-role blocks merge (the API requires alternation).
 pub(super) fn messages(history: &[Value]) -> Vec<Value> {
     let mut out: Vec<(String, Vec<Value>)> = Vec::new();
@@ -114,9 +104,15 @@ pub(super) fn messages(history: &[Value]) -> Vec<Value> {
             ),
             _ => {
                 let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
-                let text = text_of(&item["content"]);
-                if !text.is_empty() {
-                    push(role, json!({"type":"text","text":text}));
+                for part in item["content"].as_array().into_iter().flatten() {
+                    if let Some((media_type, data)) = super::data_url_parts(part) {
+                        push(
+                            role,
+                            json!({"type":"image","source":{"type":"base64","media_type":media_type,"data":data}}),
+                        );
+                    } else if let Some(text) = part["text"].as_str().filter(|t| !t.is_empty()) {
+                        push(role, json!({"type":"text","text":text}));
+                    }
                 }
             }
         }

@@ -39,6 +39,25 @@ pub(super) fn messages(system: &str, history: &[Value]) -> Vec<Value> {
             ),
             _ => {
                 let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+                let has_image = item["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|p| super::data_url_parts(p).is_some()));
+                if has_image {
+                    let parts = item["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|p| {
+                            if super::data_url_parts(p).is_some() {
+                                Some(json!({"type":"image_url","image_url":{"url":p["image_url"]}}))
+                            } else {
+                                p["text"].as_str().map(|t| json!({"type":"text","text":t}))
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    out.push(json!({"role":role,"content":parts}));
+                    continue;
+                }
                 let text = text_of(&item["content"]);
                 if !text.is_empty() {
                     out.push(json!({"role":role,"content":text}));

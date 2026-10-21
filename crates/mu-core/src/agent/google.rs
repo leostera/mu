@@ -9,16 +9,6 @@ use serde_json::{Value, json};
 
 use super::{AgentEvent, FunctionCall, Reply};
 
-fn text_of(content: &Value) -> String {
-    content
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|block| block.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 pub(super) fn contents(history: &[Value]) -> Vec<Value> {
     let names: HashMap<&str, &str> = history
         .iter()
@@ -54,9 +44,15 @@ pub(super) fn contents(history: &[Value]) -> Vec<Value> {
                 } else {
                     "user"
                 };
-                let text = text_of(&item["content"]);
-                if !text.is_empty() {
-                    push(role, json!({"text": text}));
+                for part in item["content"].as_array().into_iter().flatten() {
+                    if let Some((mime, data)) = super::data_url_parts(part) {
+                        push(
+                            role,
+                            json!({"inlineData": {"mimeType": mime, "data": data}}),
+                        );
+                    } else if let Some(text) = part["text"].as_str().filter(|t| !t.is_empty()) {
+                        push(role, json!({"text": text}));
+                    }
                 }
             }
         }

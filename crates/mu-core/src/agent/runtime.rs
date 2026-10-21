@@ -109,6 +109,10 @@ pub(super) fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
                         ContentBlock::Text { text } => {
                             Some(json!({"type":"input_text","text":text}))
                         }
+                        ContentBlock::Image { data, mime_type } => Some(json!({
+                            "type":"input_image",
+                            "image_url":format!("data:{mime_type};base64,{data}"),
+                        })),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -174,6 +178,7 @@ pub(super) fn close_orphaned_calls(input: Vec<Value>) -> Vec<Value> {
     out
 }
 
+const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str =
     "(tool image omitted: model does not support images)";
 
@@ -183,26 +188,27 @@ pub(super) fn downgrade_images(history: &[Value]) -> Vec<Value> {
     history
         .iter()
         .map(|item| {
-            let Some(parts) = item.get("output").and_then(Value::as_array) else {
+            let (field, placeholder) = if item.get("role").and_then(Value::as_str) == Some("user") {
+                ("content", NON_VISION_USER_IMAGE_PLACEHOLDER)
+            } else {
+                ("output", NON_VISION_TOOL_IMAGE_PLACEHOLDER)
+            };
+            let Some(parts) = item.get(field).and_then(Value::as_array) else {
                 return item.clone();
             };
             let mut out: Vec<Value> = Vec::new();
             for part in parts {
                 if part.get("type").and_then(Value::as_str) == Some("input_image") {
-                    let already = out
-                        .last()
-                        .is_some_and(|last| last["text"] == NON_VISION_TOOL_IMAGE_PLACEHOLDER);
+                    let already = out.last().is_some_and(|last| last["text"] == placeholder);
                     if !already {
-                        out.push(
-                            json!({"type":"input_text","text":NON_VISION_TOOL_IMAGE_PLACEHOLDER}),
-                        );
+                        out.push(json!({"type":"input_text","text":placeholder}));
                     }
                 } else {
                     out.push(part.clone());
                 }
             }
             let mut item = item.clone();
-            item["output"] = Value::Array(out);
+            item[field] = Value::Array(out);
             item
         })
         .collect()

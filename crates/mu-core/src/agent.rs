@@ -15,6 +15,13 @@ use tokio::sync::OnceCell;
 
 mod anthropic;
 
+/// `(mime type, base64 data)` of an `input_image` part whose URL is a `data:` URL.
+fn data_url_parts(part: &Value) -> Option<(String, String)> {
+    let url = part.get("image_url")?.as_str()?;
+    let (header, data) = url.strip_prefix("data:")?.split_once(";base64,")?;
+    Some((header.to_owned(), data.to_owned()))
+}
+
 /// A tool output as plain text: strings pass through; image-bearing outputs keep their text parts
 /// and note each omitted image (providers without tool-result image support).
 fn output_text(item: &Value) -> String {
@@ -6615,6 +6622,29 @@ mod tests {
             ]
         );
         assert_eq!(out[1]["output"], "plain");
+    }
+
+    #[test]
+    fn user_images_reach_every_adapter_in_its_own_format() {
+        let user = serde_json::json!({"role":"user","content":[
+            {"type":"input_text","text":"look"},
+            {"type":"input_image","image_url":"data:image/png;base64,QUJD"}]});
+        let anthropic = super::anthropic::messages(std::slice::from_ref(&user));
+        assert_eq!(anthropic[0]["content"][1]["source"]["data"], "QUJD");
+        let completions = super::completions::messages("sys", std::slice::from_ref(&user));
+        assert_eq!(
+            completions[1]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,QUJD"
+        );
+        let google = super::google::contents(std::slice::from_ref(&user));
+        assert_eq!(google[0]["parts"][1]["inlineData"]["mimeType"], "image/png");
+        let bedrock = super::bedrock::messages(std::slice::from_ref(&user));
+        assert_eq!(bedrock[0]["content"][1]["image"]["format"], "png");
+        let down = super::runtime::downgrade_images(&[user]);
+        assert_eq!(
+            down[0]["content"][1]["text"],
+            "(image omitted: model does not support images)"
+        );
     }
 
     #[test]
