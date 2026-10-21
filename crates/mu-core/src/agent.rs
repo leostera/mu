@@ -217,6 +217,31 @@ pub struct AgentPromptQueue {
     pending: Arc<StdMutex<PendingPrompts>>,
 }
 
+/// How many queued messages the loop injects at a queue drain point (Pi's `QueueMode`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum QueueMode {
+    All,
+    #[default]
+    OneAtATime,
+}
+
+impl QueueMode {
+    fn from_setting(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "one-at-a-time" => Some(Self::OneAtATime),
+            _ => None,
+        }
+    }
+
+    fn drain(self, queue: &mut VecDeque<String>) -> Vec<String> {
+        match self {
+            Self::All => queue.drain(..).collect(),
+            Self::OneAtATime => queue.pop_front().into_iter().collect(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct PendingPrompts {
     steering: VecDeque<String>,
@@ -255,12 +280,22 @@ impl AgentPromptQueue {
             })
     }
 
-    fn take_follow_up(&self) -> Option<String> {
-        self.pending
+    /// Drain queued follow-ups: every one for `All`, only the oldest for `OneAtATime`.
+    fn take_follow_ups(&self, mode: QueueMode) -> Vec<String> {
+        let mut pending = self
+            .pending
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .follow_up
-            .pop_front()
+            .unwrap_or_else(|error| error.into_inner());
+        mode.drain(&mut pending.follow_up)
+    }
+
+    /// Drain queued steering messages according to `mode`.
+    fn take_steering_batch(&self, mode: QueueMode) -> Vec<String> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        mode.drain(&mut pending.steering)
     }
 
     fn take_steering(&self) -> Option<String> {
@@ -477,6 +512,13 @@ fn expand_skill_command(
     } else {
         format!("{block}\n\n{arguments}")
     })
+}
+
+fn configured_queue_mode(agent_dir: &Path, cwd: &Path, key: &str) -> QueueMode {
+    configured_setting(agent_dir, cwd, key, |value| {
+        value.as_str().and_then(QueueMode::from_setting)
+    })
+    .unwrap_or_default()
 }
 
 fn configured_setting<T>(
@@ -4139,6 +4181,35 @@ mod tests {
             std::sync::Mutex::new(replies.into()),
         ));
         agent
+    }
+
+    #[test]
+    fn queue_modes_drain_one_or_all_queued_messages() {
+        let queue = AgentPromptQueue::default();
+        for prompt in ["one", "two", "three"] {
+            queue.enqueue(prompt.into(), PromptBehavior::Steer);
+            queue.enqueue(prompt.into(), PromptBehavior::FollowUp);
+        }
+        assert_eq!(
+            queue.take_steering_batch(super::QueueMode::OneAtATime),
+            ["one"]
+        );
+        assert_eq!(
+            queue.take_steering_batch(super::QueueMode::All),
+            ["two", "three"]
+        );
+        assert!(queue.take_steering_batch(super::QueueMode::All).is_empty());
+        assert_eq!(queue.take_follow_ups(super::QueueMode::OneAtATime), ["one"]);
+        assert_eq!(
+            queue.take_follow_ups(super::QueueMode::All),
+            ["two", "three"]
+        );
+        assert_eq!(
+            super::QueueMode::from_setting("all"),
+            Some(super::QueueMode::All)
+        );
+        assert_eq!(super::QueueMode::from_setting("bogus"), None);
+        assert_eq!(super::QueueMode::default(), super::QueueMode::OneAtATime);
     }
 
     #[tokio::test]

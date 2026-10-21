@@ -16,7 +16,7 @@ use tokio::sync::{OnceCell, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior, Provider, Reply,
+    AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior, Provider, QueueMode, Reply,
     RetryPolicy, ToolSelection, api_name, expand_skill_prompt, filter_tool_definitions,
     retry_delay_ms, retryable_provider_error, usage,
 };
@@ -563,6 +563,8 @@ struct RuntimeHooks {
     plan: ToolPlan,
     runtime: Arc<ToolRuntime>,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
+    steering_mode: QueueMode,
+    follow_up_mode: QueueMode,
 }
 
 impl RuntimeHooks {
@@ -594,17 +596,17 @@ impl RuntimeHooks {
 impl AgentHooks for RuntimeHooks {
     async fn get_steering_messages(&self) -> Vec<AgentMessage> {
         self.queue
-            .take_steering()
-            .map(|prompt| self.queued_message(prompt, PromptBehavior::Steer))
+            .take_steering_batch(self.steering_mode)
             .into_iter()
+            .map(|prompt| self.queued_message(prompt, PromptBehavior::Steer))
             .collect()
     }
 
     async fn get_follow_up_messages(&self) -> Vec<AgentMessage> {
         self.queue
-            .take_follow_up()
-            .map(|prompt| self.queued_message(prompt, PromptBehavior::FollowUp))
+            .take_follow_ups(self.follow_up_mode)
             .into_iter()
+            .map(|prompt| self.queued_message(prompt, PromptBehavior::FollowUp))
             .collect()
     }
 
@@ -844,6 +846,12 @@ impl MuAgent {
             plan: plan(),
             runtime: runtime.clone(),
             mcp_startup: self.mcp_startup.clone(),
+            steering_mode: super::configured_queue_mode(&self.agent_dir, &self.cwd, "steeringMode"),
+            follow_up_mode: super::configured_queue_mode(
+                &self.agent_dir,
+                &self.cwd,
+                "followUpMode",
+            ),
         });
         let stream = RuntimeStream {
             provider: self.provider.clone(),
