@@ -1068,6 +1068,8 @@ struct App {
     model_selector_open: bool,
     /// Generic selector overlay (thinking level, fork point); Enter runs `command <value>`.
     picker: Option<Picker>,
+    /// `quietStartup: true` hides the startup header.
+    quiet_startup: bool,
     /// When Esc was last pressed on an empty editor (double-Esc opens `/tree` or `/fork`).
     last_escape: Option<std::time::Instant>,
     /// Prompt-template and skill commands offered after the built-ins in the slash menu.
@@ -1136,6 +1138,7 @@ impl App {
             .map(|model| (model.clone(), agent.model_display_name(model)))
             .collect();
         self.cwd = agent.cwd().display().to_string();
+        self.quiet_startup = agent.settings().get("quietStartup") == Some(serde_json::json!(true));
         self.extra_commands = agent
             .dynamic_slash_commands()
             .into_iter()
@@ -1200,6 +1203,7 @@ impl App {
             command_selection: 0,
             model_selector_open: false,
             picker: None,
+            quiet_startup: false,
             last_escape: None,
             extra_commands: Vec::new(),
             model_selection: 0,
@@ -2830,11 +2834,15 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let mut lines = chrome::header_lines(
-        env!("CARGO_PKG_VERSION"),
-        usize::from(area.width),
-        &app.theme,
-    );
+    let mut lines = if app.quiet_startup {
+        Vec::new()
+    } else {
+        chrome::header_lines(
+            env!("CARGO_PKG_VERSION"),
+            usize::from(area.width),
+            &app.theme,
+        )
+    };
     push_statuses(&mut lines, &app.statuses, 0, &app.theme);
     for (index, message) in app.messages.iter().enumerate() {
         if matches!(message.role, Role::User) {
@@ -3513,6 +3521,30 @@ mod tests {
         assert_eq!(super::next_model_index(Some(1), 3, true), 0);
         assert_eq!(super::next_model_index(None, 3, false), 0);
         assert_eq!(super::next_model_index(None, 3, true), 2);
+    }
+
+    #[test]
+    fn quiet_startup_hides_the_header_but_keeps_the_transcript() {
+        let render_text = |quiet: bool| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let mut app = App::from_metadata("m".into(), "p".into(), "s".into());
+            app.quiet_startup = quiet;
+            app.messages.push(Message {
+                role: Role::Assistant,
+                text: "hello transcript".into(),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error: false,
+            });
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            screen_text(&terminal)
+        };
+        let loud = render_text(false);
+        let quiet = render_text(true);
+        assert!(loud.contains("hello transcript") && quiet.contains("hello transcript"));
+        assert!(
+            loud.contains(env!("CARGO_PKG_VERSION")) && !quiet.contains(env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]
