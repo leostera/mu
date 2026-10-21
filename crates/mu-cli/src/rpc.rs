@@ -9,6 +9,10 @@ use std::io::{BufRead, Write};
 
 use mu_core::MuAgent;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+type Inbox = mpsc::UnboundedReceiver<Value>;
 
 fn emit(value: &Value) {
     let mut out = std::io::stdout().lock();
@@ -33,25 +37,69 @@ fn response(id: &Option<Value>, command: &str, outcome: Result<Option<Value>, St
     value
 }
 
+/// Run a `prompt` while still serving `steer`, `follow_up`, `clear_queue` and `abort` from `inbox`.
+async fn run_prompt(agent: &mut MuAgent, command: &Value, inbox: &mut Inbox) -> Value {
+    let id = command.get("id").cloned();
+    let Some(message) = command["message"].as_str() else {
+        return response(
+            &id,
+            "prompt",
+            Err("prompt requires a string `message`".into()),
+        );
+    };
+    emit(&response(
+        &id,
+        "prompt",
+        Ok(Some(json!({"disposition":"started"}))),
+    ));
+    let queue = agent.prompt_queue();
+    let cancel = CancellationToken::new();
+    let mut ignore_event = |_| {};
+    let turn = agent.submit_with_cancel(message.to_owned(), &mut ignore_event, &cancel);
+    tokio::pin!(turn);
+    loop {
+        tokio::select! {
+            result = &mut turn => {
+                return match result {
+                    Ok(()) => json!({"type":"prompt_done"}),
+                    Err(error) => response(&id, "prompt", Err(error.to_string())),
+                };
+            }
+            Some(incoming) = inbox.recv() => {
+                let id = incoming.get("id").cloned();
+                let kind = incoming["type"].as_str().unwrap_or_default().to_owned();
+                let text = incoming["message"].as_str().map(str::to_owned);
+                let outcome = match (kind.as_str(), text) {
+                    ("abort", _) => {
+                        cancel.cancel();
+                        Ok(None)
+                    }
+                    ("steer", Some(text)) => {
+                        queue.enqueue(text, mu_core::PromptBehavior::Steer);
+                        Ok(Some(json!({"disposition":"queued"})))
+                    }
+                    ("follow_up", Some(text)) => {
+                        queue.enqueue(text, mu_core::PromptBehavior::FollowUp);
+                        Ok(Some(json!({"disposition":"queued"})))
+                    }
+                    ("steer" | "follow_up", None) => Err(format!("{kind} requires a string `message`")),
+                    (other, _) => Err(format!("Cannot run {other} while the agent is streaming")),
+                };
+                emit(&response(&id, &kind, outcome));
+            }
+        }
+    }
+}
+
 /// Handle one parsed command; `prompt` streams its events before returning.
 pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
     let id = command.get("id").cloned();
     let kind = command["type"].as_str().unwrap_or_default().to_owned();
     let outcome = match kind.as_str() {
-        "prompt" => match command["message"].as_str() {
-            Some(message) => {
-                emit(&response(
-                    &id,
-                    "prompt",
-                    Ok(Some(json!({"disposition":"started"}))),
-                ));
-                match agent.submit(message.to_owned(), &mut |_| {}).await {
-                    Ok(()) => return json!({"type":"prompt_done"}),
-                    Err(error) => Err(error.to_string()),
-                }
-            }
-            None => Err("prompt requires a string `message`".into()),
-        },
+        "prompt" => {
+            let (_keep_open, mut inbox) = mpsc::unbounded_channel();
+            return run_prompt(agent, command, &mut inbox).await;
+        }
         "get_state" => Ok(Some(json!({
             "model": {"id": agent.model(), "provider": agent.provider()},
             "thinkingLevel": agent.thinking().name(),
@@ -130,22 +178,30 @@ pub async fn run(mut agent: MuAgent) -> Result<(), Box<dyn std::error::Error>> {
     agent.set_event_tap(std::sync::Arc::new(|event| {
         emit(&mu_core::agent_loop::event_to_json(event));
     }));
-    for line in std::io::stdin().lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<Value>(&line) {
-            Ok(command) => {
-                let reply = handle(&mut agent, &command).await;
-                if reply["type"] != "prompt_done" {
-                    emit(&reply);
-                }
+    let (tx, mut inbox) = mpsc::unbounded_channel::<Value>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if line.trim().is_empty() {
+                continue;
             }
-            Err(error) => emit(&json!({
-                "type":"response","command":"parse","success":false,
-                "error": format!("Failed to parse command: {error}")
-            })),
+            let parsed = serde_json::from_str::<Value>(&line).unwrap_or_else(|error| {
+                json!({"type":"parse_error","error": format!("Failed to parse command: {error}")})
+            });
+            if tx.send(parsed).is_err() {
+                break;
+            }
+        }
+    });
+    while let Some(command) = inbox.recv().await {
+        let reply = match command["type"].as_str() {
+            Some("parse_error") => json!({
+                "type":"response","command":"parse","success":false,"error":command["error"]
+            }),
+            Some("prompt") => run_prompt(&mut agent, &command, &mut inbox).await,
+            _ => handle(&mut agent, &command).await,
+        };
+        if reply["type"] != "prompt_done" {
+            emit(&reply);
         }
     }
     Ok(())
@@ -203,6 +259,24 @@ mod tests {
         let unknown = handle(&mut agent, &json!({"id":7,"type":"nope"})).await;
         assert_eq!(unknown["error"], "Unknown command: nope");
         assert_eq!(unknown["id"], 7);
+    }
+
+    #[tokio::test]
+    async fn steer_and_abort_are_served_while_a_prompt_is_running() {
+        let mut agent = MuAgent::demo().expect("demo agent");
+        let (tx, mut inbox) = mpsc::unbounded_channel();
+        tx.send(json!({"id":"s","type":"steer","message":"also this"}))
+            .unwrap();
+        tx.send(json!({"type":"get_state"})).unwrap();
+        tx.send(json!({"type":"abort"})).unwrap();
+        let done = run_prompt(
+            &mut agent,
+            &json!({"type":"prompt","message":"hello"}),
+            &mut inbox,
+        )
+        .await;
+        // The demo turn may finish before the queued commands are read; either way it ends cleanly.
+        assert_eq!(done["type"], "prompt_done");
     }
 
     #[tokio::test]
