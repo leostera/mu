@@ -18,6 +18,7 @@ mod bedrock;
 mod completions;
 mod google;
 mod runtime;
+mod sigv4;
 
 use crate::agent_loop::AgentMessage;
 use tokio_util::sync::CancellationToken;
@@ -345,6 +346,24 @@ struct Provider {
     supports_strict_sampling: bool,
 }
 
+/// How Bedrock requests authenticate.
+#[derive(Clone)]
+enum BedrockAuth {
+    /// A Bedrock API key sent as a bearer token.
+    Bearer(String),
+    /// AWS SigV4 signing with environment credentials.
+    Sigv4 {
+        credentials: sigv4::AwsCredentials,
+        region: String,
+    },
+}
+
+/// `bedrock-runtime.<region>.amazonaws.com` → `<region>`.
+fn bedrock_region_from_host(host: &str) -> Option<String> {
+    let rest = host.strip_prefix("bedrock-runtime.")?;
+    rest.strip_suffix(".amazonaws.com").map(str::to_owned)
+}
+
 #[derive(Clone)]
 enum ProviderTransport {
     OpenCode {
@@ -357,7 +376,7 @@ enum ProviderTransport {
     Bedrock {
         http: Client,
         endpoint: Url,
-        key: String,
+        auth: BedrockAuth,
     },
     /// Anthropic Messages API (`api: "anthropic-messages"` in `models.json`).
     Anthropic {
@@ -1636,7 +1655,7 @@ impl Provider {
         &self,
         http: &Client,
         endpoint: &Url,
-        key: &str,
+        auth: &BedrockAuth,
         history: &[Value],
         tools: &[Value],
         on_event: &mut impl FnMut(AgentEvent),
@@ -1649,10 +1668,43 @@ impl Provider {
         if !self.appendix.is_empty() {
             system = format!("{system}\n\n{}", self.appendix);
         }
-        let response = http
+        let body = serde_json::to_vec(&bedrock::request_body(&system, history, tools))
+            .expect("request serializes");
+        let mut request = http
             .post(endpoint.clone())
-            .bearer_auth(key)
-            .json(&bedrock::request_body(&system, history, tools))
+            .header(header::CONTENT_TYPE, "application/json");
+        match auth {
+            BedrockAuth::Bearer(key) => request = request.bearer_auth(key),
+            BedrockAuth::Sigv4 {
+                credentials,
+                region,
+            } => {
+                let host = endpoint.host_str().unwrap_or_default().to_owned();
+                let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+                let signed = sigv4::sign(
+                    "POST",
+                    endpoint.path(),
+                    endpoint.query().unwrap_or_default(),
+                    &[
+                        ("host".into(), host),
+                        ("content-type".into(), "application/json".into()),
+                    ],
+                    &body,
+                    credentials,
+                    region,
+                    "bedrock",
+                    &amz_date,
+                );
+                request = request
+                    .header("x-amz-date", signed.amz_date)
+                    .header(header::AUTHORIZATION, signed.authorization);
+                if let Some(token) = &credentials.session_token {
+                    request = request.header("x-amz-security-token", token);
+                }
+            }
+        }
+        let response = request
+            .body(body)
             .send()
             .await
             .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
@@ -1821,11 +1873,11 @@ impl Provider {
         if let ProviderTransport::Bedrock {
             http,
             endpoint,
-            key,
+            auth,
         } = &self.transport
         {
             return self
-                .complete_bedrock(http, endpoint, key, history, tools, on_event)
+                .complete_bedrock(http, endpoint, auth, history, tools, on_event)
                 .await;
         }
         if let ProviderTransport::Anthropic {
@@ -2186,10 +2238,12 @@ fn connect_custom_provider(
     if google {
         endpoint.set_query(Some("alt=sse"));
     }
-    let key = entry
-        .get("apiKey")
-        .and_then(Value::as_str)
-        .ok_or_else(unsupported)?;
+    // Bedrock may omit `apiKey` and sign with AWS credentials from the environment instead.
+    let key = match entry.get("apiKey").and_then(Value::as_str) {
+        Some(key) => key,
+        None if bedrock => "",
+        None => return Err(unsupported()),
+    };
     let token = prompt
         .api_key
         .clone()
@@ -2197,6 +2251,29 @@ fn connect_custom_provider(
         .or_else(|| crate::config_value::resolve(key, &HashMap::new()))
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| key.to_owned());
+    let bedrock_auth = if !bedrock {
+        None
+    } else if !token.is_empty() {
+        Some(BedrockAuth::Bearer(token.clone()))
+    } else {
+        let credentials = sigv4::AwsCredentials::from_env().ok_or_else(|| {
+            AgentError::Configuration(
+                "Bedrock needs an apiKey (Bedrock API key) or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
+                    .into(),
+            )
+        })?;
+        let region = std::env::var("AWS_REGION")
+            .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+            .ok()
+            .or_else(|| bedrock_region_from_host(endpoint.host_str().unwrap_or_default()))
+            .ok_or_else(|| {
+                AgentError::Configuration("Bedrock region unknown: set AWS_REGION".into())
+            })?;
+        Some(BedrockAuth::Sigv4 {
+            credentials,
+            region,
+        })
+    };
     let http = provider_http_client(entry.get("headers"))?;
     let model = configured_model_entry(&config.agent_dir, &config.provider, &config.model);
     let flag = |name: &str| {
@@ -2210,7 +2287,7 @@ fn connect_custom_provider(
             ProviderTransport::Bedrock {
                 http: http.clone(),
                 endpoint,
-                key: token,
+                auth: bedrock_auth.expect("bedrock auth resolved above"),
             }
         } else if anthropic {
             ProviderTransport::Anthropic {
@@ -5870,6 +5947,15 @@ mod tests {
         assert!(html.contains("hello &lt;b&gt;there&lt;/b&gt;"));
         assert!(super::export_session_file(&dir.join("missing.jsonl"), None).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bedrock_region_comes_from_the_runtime_host() {
+        assert_eq!(
+            super::bedrock_region_from_host("bedrock-runtime.eu-west-1.amazonaws.com").as_deref(),
+            Some("eu-west-1")
+        );
+        assert_eq!(super::bedrock_region_from_host("example.com"), None);
     }
 
     #[tokio::test]

@@ -7,6 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+hmac = "0.12"
+sha2 = "0.10"
 codemode.workspace = true
 futures-util.workspace = true
 globset.workspace = true
