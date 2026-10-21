@@ -1681,6 +1681,10 @@ fn handle_key(
         }
         return;
     }
+    if key.code == KeyCode::Char('x') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        copy_last_message(app);
+        return;
+    }
     if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.tools_expanded = !app.tools_expanded;
         return;
@@ -2049,6 +2053,18 @@ fn session_list_text(sessions: &[mu_core::SessionInfo]) -> String {
 }
 
 /// Text of the newest assistant message that has any (what `/copy` copies).
+/// `/copy` and Ctrl+X: put the newest assistant message on the clipboard.
+fn copy_last_message(app: &mut App) {
+    let status = match last_assistant_text(&app.messages) {
+        None => "No agent messages to copy yet.".to_owned(),
+        Some(text) => match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+            Ok(()) => "Copied last agent message to clipboard".to_owned(),
+            Err(error) => format!("Could not copy to clipboard: {error}"),
+        },
+    };
+    app.show_status(status);
+}
+
 fn last_assistant_text(messages: &[Message]) -> Option<String> {
     messages
         .iter()
@@ -2077,6 +2093,7 @@ const HOTKEYS: &str = "**Keyboard Shortcuts**
 | `Shift+Tab` | Cycle thinking level |
 | `Ctrl+T` | Toggle thinking block visibility |
 | `Ctrl+O` | Toggle tool output expansion |
+| `Ctrl+X` | Copy last agent message |
 | `Esc` | Interrupt / clear editor |
 | `Ctrl+C` | Clear editor (first) / exit (second) |
 | `Ctrl+D` | Exit (when editor is empty) |
@@ -2268,16 +2285,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             };
             app.show_status(status);
         }
-        "copy" => {
-            let status = match last_assistant_text(&app.messages) {
-                None => "No agent messages to copy yet.".to_owned(),
-                Some(text) => match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
-                    Ok(()) => "Copied last agent message to clipboard".to_owned(),
-                    Err(error) => format!("Could not copy to clipboard: {error}"),
-                },
-            };
-            app.show_status(status);
-        }
+        "copy" => copy_last_message(app),
         "compact" => {
             let agent = Arc::clone(agent);
             let status = match agent.try_lock() {
