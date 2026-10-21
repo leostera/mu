@@ -2009,7 +2009,64 @@ fn shell_child_environment(environment: &HashMap<String, String>) -> HashMap<Str
         .collect()
 }
 
+/// What a shell run produced: combined output and how it ended.
+pub struct ShellRun {
+    pub output: Vec<u8>,
+    pub end: ShellEnd,
+}
+
+/// Injectable command execution (Pi's `BashOperations`): tests and remote backends can replace
+/// the local shell without touching the tool's formatting and truncation.
+#[async_trait::async_trait]
+pub trait ShellOperations: Send + Sync {
+    async fn exec(
+        &self,
+        command: &str,
+        cwd: &Path,
+        environment: &HashMap<String, String>,
+        timeout: Option<Duration>,
+    ) -> Result<ShellRun, ToolError>;
+}
+
+/// Runs commands with the local bash.
+pub struct LocalBash;
+
+#[async_trait::async_trait]
+impl ShellOperations for LocalBash {
+    async fn exec(
+        &self,
+        command: &str,
+        cwd: &Path,
+        environment: &HashMap<String, String>,
+        timeout: Option<Duration>,
+    ) -> Result<ShellRun, ToolError> {
+        let child_environment = shell_child_environment(environment);
+        let shell = default_bash_shell(environment.get(BASH_SHELL_PATH_ENV).map(String::as_str))?;
+        let mut process = tokio::process::Command::new(shell);
+        process.args(["-c", command]);
+        let output =
+            run_shell_process(cwd, "bash", "pi-bash", process, timeout, &child_environment).await?;
+        let mut bytes = output.stdout;
+        bytes.extend_from_slice(&output.stderr);
+        Ok(ShellRun {
+            output: bytes,
+            end: ShellEnd::Exited(output.status.code()),
+        })
+    }
+}
+
 async fn run_bash(
+    cwd: &Path,
+    args: &Value,
+    environment: &HashMap<String, String>,
+) -> Result<ToolResult, ToolError> {
+    run_bash_with(&LocalBash, cwd, args, environment).await
+}
+
+/// The bash tool over any [`ShellOperations`]: argument parsing, the command prefix, and result
+/// formatting (truncation, full-output file, exit codes, timeout/abort errors).
+pub async fn run_bash_with(
+    operations: &dyn ShellOperations,
     cwd: &Path,
     args: &Value,
     environment: &HashMap<String, String>,
@@ -2024,13 +2081,8 @@ async fn run_bash(
             || command.to_owned(),
             |prefix| format!("{prefix}\n{command}"),
         );
-    let child_environment = shell_child_environment(environment);
-    let shell = default_bash_shell(environment.get(BASH_SHELL_PATH_ENV).map(String::as_str))?;
-    let mut process = tokio::process::Command::new(shell);
-    process.args(["-c", &command]);
-    let output =
-        run_shell_process(cwd, "bash", "pi-bash", process, timeout, &child_environment).await?;
-    Ok(shell_result(output, started_at, "pi-bash"))
+    let run = operations.exec(&command, cwd, environment, timeout).await?;
+    shell_outcome(&run.output, &run.end, started_at, "pi-bash")
 }
 
 fn default_bash_shell(custom_path: Option<&str>) -> Result<PathBuf, ToolError> {
@@ -2192,7 +2244,14 @@ async fn run_powershell(
             &shell_child_environment(environment),
         )
         .await?;
-        Ok(shell_result(output, started_at, "pi-powershell"))
+        let mut bytes = output.stdout;
+        bytes.extend_from_slice(&output.stderr);
+        shell_outcome(
+            &bytes,
+            &ShellEnd::Exited(output.status.code()),
+            started_at,
+            "pi-powershell",
+        )
     }
 }
 
@@ -2253,12 +2312,6 @@ fn strip_string_sequence(
         }
         escaped = character == '\u{1b}';
     }
-}
-
-fn shell_result(output: Output, started_at: Instant, temp_file_prefix: &str) -> ToolResult {
-    let mut bytes = output.stdout;
-    bytes.extend_from_slice(&output.stderr);
-    shell_result_from(&bytes, output.status.code(), started_at, temp_file_prefix)
 }
 
 fn shell_result_from(
@@ -3544,6 +3597,112 @@ mod tests {
     /// Ported from Pi's `tools.test.ts` ("should include full output path for truncated timeout
     /// and abort errors" and "should reject a null exit code from custom operations"), driven by
     /// fake output instead of Pi's injected `BashOperations`.
+    struct Fake(Vec<u8>, ShellEnd);
+
+    #[async_trait::async_trait]
+    impl ShellOperations for Fake {
+        async fn exec(
+            &self,
+            command: &str,
+            _cwd: &Path,
+            _environment: &HashMap<String, String>,
+            _timeout: Option<Duration>,
+        ) -> Result<ShellRun, ToolError> {
+            assert_eq!(
+                command, "remote",
+                "the command reaches the operations unchanged"
+            );
+            Ok(ShellRun {
+                output: self.0.clone(),
+                end: self.1.clone(),
+            })
+        }
+    }
+
+    /// Pi's tests drive the bash tool through injected `BashOperations`; so can ours now.
+    #[tokio::test]
+    async fn bash_tool_runs_over_injected_operations() {
+        let args = json!({"command":"remote"});
+        let env = HashMap::new();
+        let cwd = std::env::temp_dir();
+        let ok = run_bash_with(
+            &Fake(b"hi\n".to_vec(), ShellEnd::Exited(Some(0))),
+            &cwd,
+            &args,
+            &env,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok.content, "hi\n");
+        assert!(!ok.is_error);
+        let failed = run_bash_with(
+            &Fake(b"oops\n".to_vec(), ShellEnd::Exited(Some(3))),
+            &cwd,
+            &args,
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(failed.is_error && failed.content.ends_with("Command exited with code 3"));
+        let null_exit = run_bash_with(
+            &Fake(b"partial\n".to_vec(), ShellEnd::Exited(None)),
+            &cwd,
+            &args,
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(
+            null_exit.is_error
+                && null_exit
+                    .content
+                    .contains("Command terminated without an exit code")
+        );
+        let timed_out = run_bash_with(
+            &Fake(b"x\n".to_vec(), ShellEnd::TimedOut(Duration::from_secs(5))),
+            &cwd,
+            &args,
+            &env,
+        )
+        .await;
+        assert!(
+            timed_out
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Command timed out after 5 seconds")
+        );
+        let aborted = run_bash_with(&Fake(Vec::new(), ShellEnd::Aborted), &cwd, &args, &env).await;
+        assert!(
+            aborted
+                .err()
+                .unwrap()
+                .to_string()
+                .starts_with("(no output)\n\nCommand aborted")
+        );
+        // The command prefix is applied before the operations see the command.
+        let mut prefixed = HashMap::new();
+        prefixed.insert(SHELL_COMMAND_PREFIX_ENV.to_owned(), "set -e".to_owned());
+        struct Echo;
+        #[async_trait::async_trait]
+        impl ShellOperations for Echo {
+            async fn exec(
+                &self,
+                command: &str,
+                _: &Path,
+                _: &HashMap<String, String>,
+                _: Option<Duration>,
+            ) -> Result<ShellRun, ToolError> {
+                Ok(ShellRun {
+                    output: command.as_bytes().to_vec(),
+                    end: ShellEnd::Exited(Some(0)),
+                })
+            }
+        }
+        let echoed = run_bash_with(&Echo, &cwd, &args, &prefixed).await.unwrap();
+        assert_eq!(echoed.content, "set -e\nremote");
+    }
+
     #[test]
     fn shell_outcome_formats_timeout_abort_and_null_exit_like_pi() {
         let chatty = (1..=3000)
