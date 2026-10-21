@@ -1005,6 +1005,12 @@ fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
                     Some(text) => text.to_owned(),
                     None => blob_resource_text(resource),
                 })
+            } else if block.get("type").and_then(Value::as_str) == Some("audio") {
+                let mime = block
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown type");
+                Some(format!("[audio {mime} omitted]"))
             } else {
                 block
                     .get("type")
@@ -1751,6 +1757,14 @@ mod tests {
         );
         assert_eq!(format_size(10), "10B");
         assert_eq!(format_size(3 * 1024 * 1024), "3.0MB");
+    }
+
+    #[test]
+    fn audio_blocks_are_noted_with_their_mime_type_like_pi() {
+        let result = parse_tool_result(json!({"content":[
+            {"type":"audio","data":"YXVk","mimeType":"audio/wav"}]}))
+        .unwrap();
+        assert_eq!(result.content, "[audio audio/wav omitted]");
     }
 
     #[test]
