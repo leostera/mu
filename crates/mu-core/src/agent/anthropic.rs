@@ -16,6 +16,68 @@ pub(super) fn is_oauth_token(key: &str) -> bool {
 pub(super) const CLAUDE_CODE_IDENTITY: &str =
     "You are Claude Code, Anthropic's official CLI for Claude.";
 
+const CLAUDE_CODE_TOOLS: &[&str] = &[
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob",
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "KillShell",
+    "NotebookEdit",
+    "Skill",
+    "Task",
+    "TaskOutput",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+];
+
+/// Pi's `toClaudeCodeName`: Claude Code's canonical casing when the name matches case-insensitively.
+pub(super) fn to_claude_code_name(name: &str) -> String {
+    CLAUDE_CODE_TOOLS
+        .iter()
+        .find(|tool| tool.eq_ignore_ascii_case(name))
+        .map_or_else(|| name.to_owned(), |tool| (*tool).to_owned())
+}
+
+/// Pi's `fromClaudeCodeName`: the caller's own tool name for a case-insensitive match.
+pub(super) fn from_claude_code_name(name: &str, tools: &[Value]) -> String {
+    tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .find(|own| own.eq_ignore_ascii_case(name))
+        .unwrap_or(name)
+        .to_owned()
+}
+
+/// Rename tool definitions and past tool calls to Claude Code names (for OAuth requests).
+pub(super) fn rename_for_claude_code(
+    history: &[Value],
+    definitions: &[Value],
+) -> (Vec<Value>, Vec<Value>) {
+    let rename = |items: &[Value]| {
+        items
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                if let Some(name) = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(to_claude_code_name)
+                {
+                    item["name"] = Value::String(name);
+                }
+                item
+            })
+            .collect::<Vec<_>>()
+    };
+    (rename(history), rename(definitions))
+}
+
 fn text_of(content: &Value) -> String {
     content
         .as_array()
@@ -242,6 +304,27 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_code_names_map_both_ways_case_insensitively() {
+        assert_eq!(to_claude_code_name("read"), "Read");
+        assert_eq!(to_claude_code_name("ls"), "ls");
+        let tools = [json!({"name":"bash"}), json!({"name":"custom"})];
+        assert_eq!(from_claude_code_name("Bash", &tools), "bash");
+        assert_eq!(from_claude_code_name("Unknown", &tools), "Unknown");
+        let (history, defs) = rename_for_claude_code(
+            &[
+                json!({"type":"function_call","name":"edit","call_id":"c"}),
+                json!({"role":"user"}),
+            ],
+            &[json!({"name":"write"})],
+        );
+        assert_eq!(
+            (history[0]["name"].as_str(), defs[0]["name"].as_str()),
+            (Some("Edit"), Some("Write"))
+        );
+        assert!(history[1].get("name").is_none());
+    }
 
     #[test]
     fn oauth_tokens_are_recognised_by_their_prefix() {

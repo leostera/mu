@@ -1809,7 +1809,12 @@ impl Provider {
         if oauth {
             system = format!("{}\n\n{system}", anthropic::CLAUDE_CODE_IDENTITY);
         }
-        let mut body = anthropic::request_body(&self.model, &system, history, tools, budget);
+        let (history, wire_tools) = if oauth {
+            anthropic::rename_for_claude_code(history, tools)
+        } else {
+            (history.to_vec(), tools.to_vec())
+        };
+        let mut body = anthropic::request_body(&self.model, &system, &history, &wire_tools, budget);
         if let Some(budget) = budget {
             body["max_tokens"] = json!(budget + 16_384);
         }
@@ -1859,7 +1864,13 @@ impl Provider {
                 "Anthropic stream ended before message_stop".into(),
             ));
         }
-        Ok(decoder.into_reply())
+        let mut reply = decoder.into_reply();
+        if oauth {
+            for call in &mut reply.tool_calls {
+                call.name = anthropic::from_claude_code_name(&call.name, tools);
+            }
+        }
+        Ok(reply)
     }
 
     async fn complete(
