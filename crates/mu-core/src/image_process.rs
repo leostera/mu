@@ -223,6 +223,15 @@ pub fn process_image(
     })
 }
 
+/// Encode raw RGBA pixels (a clipboard image) as PNG, resized/converted like any other image.
+pub fn process_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Result<ProcessedImage, String> {
+    let buffer = image::RgbaImage::from_raw(width, height, rgba)
+        .ok_or_else(|| "[Image omitted: clipboard pixel data has the wrong size.]".to_owned())?;
+    let png = encode(&DynamicImage::ImageRgba8(buffer), ImageFormat::Png, 0)
+        .ok_or_else(|| "[Image omitted: could not encode the clipboard image.]".to_owned())?;
+    process_image(&png, "image/png", true, ResizeOptions::default())
+}
+
 /// A tiny valid PNG for tests in other crates.
 #[doc(hidden)]
 pub fn png_for_test() -> Vec<u8> {
@@ -265,6 +274,18 @@ mod tests {
             .unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap();
         (decoded.width(), decoded.height())
+    }
+
+    #[test]
+    fn clipboard_rgba_becomes_a_png_attachment() {
+        let processed = process_rgba(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        assert_eq!(processed.mime_type, "image/png");
+        assert_eq!(dimensions(&processed), (2, 1));
+        assert!(
+            process_rgba(2, 2, vec![0; 3])
+                .unwrap_err()
+                .contains("wrong size")
+        );
     }
 
     #[test]

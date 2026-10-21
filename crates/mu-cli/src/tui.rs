@@ -1717,6 +1717,10 @@ fn handle_key(
         app.model_selector_open = true;
         return;
     }
+    if app.keybindings.matches("app.clipboard.pasteImage", &key) && !app.loading {
+        paste_clipboard_image(app);
+        return;
+    }
     if app.keybindings.matches("app.message.copy", &key) {
         copy_last_message(app);
         return;
@@ -2157,6 +2161,30 @@ fn session_list_text(sessions: &[mu_core::SessionInfo]) -> String {
 }
 
 /// Text of the newest assistant message that has any (what `/copy` copies).
+/// Ctrl+V: attach an image from the clipboard to the next prompt (Pi's `app.clipboard.pasteImage`).
+fn paste_clipboard_image(app: &mut App) {
+    let image = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_image());
+    let status = match image {
+        Err(_) => "No image on the clipboard".to_owned(),
+        Ok(data) => match mu_core::image_process::process_rgba(
+            data.width as u32,
+            data.height as u32,
+            data.bytes.into_owned(),
+        ) {
+            Ok(processed) => {
+                app.pending_images
+                    .push((processed.mime_type, processed.data));
+                format!(
+                    "Attached clipboard image ({} pending)",
+                    app.pending_images.len()
+                )
+            }
+            Err(message) => message,
+        },
+    };
+    app.show_status(status);
+}
+
 /// `/copy` and Ctrl+X: put the newest assistant message on the clipboard.
 fn copy_last_message(app: &mut App) {
     let status = match last_assistant_text(&app.messages) {

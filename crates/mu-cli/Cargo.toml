@@ -10,7 +10,7 @@ name = "mu"
 path = "src/main.rs"
 
 [dependencies]
-arboard = { version = "3.7.0", default-features = false }
+arboard = { version = "3.7.0", default-features = false, features = ["image-data"] }
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.28"
 mu-core = { path = "../mu-core" }

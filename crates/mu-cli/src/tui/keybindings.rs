@@ -109,6 +109,7 @@ const DEFAULTS: &[(&str, &[&str])] = &[
     ("app.thinking.toggle", &["ctrl+t"]),
     ("app.message.copy", &["ctrl+x"]),
     ("app.message.dequeue", &["alt+up"]),
+    ("app.clipboard.pasteImage", &["ctrl+v"]),
 ];
 
 /// Pi's pre-`app.`/`tui.` names, rewritten on load (`migrateKeybindingsConfig`).
