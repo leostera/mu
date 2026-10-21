@@ -1765,6 +1765,38 @@ fn filtered_commands(app: &App) -> Vec<chrome::SlashCommand> {
     chrome::matching_commands(query.split_whitespace().next().unwrap_or_default())
 }
 
+/// The session whose name or id (prefix) matches `query`; names win over id prefixes.
+fn find_session<'a>(
+    sessions: &'a [mu_core::SessionInfo],
+    query: &str,
+) -> Option<&'a mu_core::SessionInfo> {
+    sessions
+        .iter()
+        .find(|s| s.name.as_deref() == Some(query))
+        .or_else(|| sessions.iter().find(|s| s.id.starts_with(query)))
+}
+
+fn session_list_text(sessions: &[mu_core::SessionInfo]) -> String {
+    if sessions.is_empty() {
+        return "No sessions found for this directory.".into();
+    }
+    let rows = sessions
+        .iter()
+        .map(|s| {
+            format!(
+                "{}  {}{}",
+                &s.id[..s.id.len().min(8)],
+                s.name.as_deref().unwrap_or("(unnamed)"),
+                s.preview
+                    .as_deref()
+                    .map(|p| format!(" — {p}"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("Sessions (use /resume <id|name>):\n{}", rows.join("\n"))
+}
+
 /// Text of the newest assistant message that has any (what `/copy` copies).
 fn last_assistant_text(messages: &[Message]) -> Option<String> {
     messages
@@ -2018,6 +2050,28 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "resume" => {
+            let sessions = mu_core::list_sessions_for_current_cwd(None).unwrap_or_default();
+            let text = if argument.is_empty() {
+                session_list_text(&sessions)
+            } else {
+                match find_session(&sessions, argument) {
+                    None => format!("No session matching \"{argument}\""),
+                    Some(info) => match agent.try_lock() {
+                        Err(_) => "Mu is busy.".to_owned(),
+                        Ok(mut agent) => match agent.import_session(&info.path) {
+                            Ok(()) => {
+                                app.queued_prompts.clear();
+                                app.apply_agent_metadata(&agent);
+                                format!("Resumed session {}", info.id)
+                            }
+                            Err(error) => format!("Could not resume: {error}"),
+                        },
+                    },
+                }
+            };
+            app.show_status(text);
+        }
         "import" => match agent.try_lock() {
             Ok(mut agent) if !argument.is_empty() => {
                 let (text, error) = match agent.import_session(std::path::Path::new(argument)) {
@@ -2660,6 +2714,21 @@ mod tests {
         assert_eq!(app.queued_prompts.len(), 1);
         assert_eq!(app.messages[0].text, "add a test");
         assert!(matches!(app.messages[0].role, Role::User));
+    }
+
+    #[test]
+    fn resume_matches_names_before_id_prefixes() {
+        let info = |id: &str, name: Option<&str>| mu_core::SessionInfo {
+            id: id.into(),
+            name: name.map(str::to_owned),
+            ..mu_core::SessionInfo::default()
+        };
+        let sessions = vec![info("abc123", None), info("zzz", Some("abc"))];
+        assert_eq!(super::find_session(&sessions, "abc").unwrap().id, "zzz");
+        assert_eq!(super::find_session(&sessions, "abc1").unwrap().id, "abc123");
+        assert!(super::find_session(&sessions, "nope").is_none());
+        assert!(super::session_list_text(&sessions).contains("abc123  (unnamed)"));
+        assert!(super::session_list_text(&[]).starts_with("No sessions"));
     }
 
     #[test]
