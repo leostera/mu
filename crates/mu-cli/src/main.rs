@@ -263,6 +263,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("mu: details are in {}", crashes.display());
         }
         if let Ok(cwd) = std::env::current_dir() {
+            // Unreadable settings files are reported once instead of being ignored silently.
+            let mut settings = mu_core::settings::Settings::load(&agent_dir, &cwd, true);
+            for error in settings.drain_errors() {
+                eprintln!("mu: settings: {}: {}", error.path.display(), error.message);
+            }
             mu_core::crash_log::install_panic_hook(agent_dir, cwd);
         }
     }
