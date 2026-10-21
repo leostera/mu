@@ -951,6 +951,9 @@ impl MuAgent {
             }
             Signal::Loop(event) => *event,
         };
+        if let Some(tap) = &self.event_tap {
+            tap(&event);
+        }
         let pending_entries = std::mem::take(&mut lock(shared).session_entries);
         for (custom_type, data) in pending_entries {
             self.session.append_custom_entry(&custom_type, data);

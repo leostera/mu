@@ -138,7 +138,7 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    if cli.mode != OutputMode::Text {
+    if cli.mode == OutputMode::Rpc {
         return Err(format!("--mode {:?} is not implemented yet", cli.mode).into());
     }
     if cli.resume && !is_terminal {
@@ -203,7 +203,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if prompt.trim().is_empty() {
             return Ok(());
         }
-        mu_core::run_prompt_with_options(prompt, session_options).await?;
+        if cli.mode == OutputMode::Json {
+            mu_core::run_prompt_json(prompt, session_options).await?;
+        } else {
+            mu_core::run_prompt_with_options(prompt, session_options).await?;
+        }
         return Ok(());
     }
 

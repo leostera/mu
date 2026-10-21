@@ -2276,6 +2276,7 @@ impl Prepared {
             mcp_startup,
             active_mcp_tools,
             prompt_queue: AgentPromptQueue::default(),
+            event_tap: None,
         }
     }
 }
@@ -2300,7 +2301,11 @@ pub struct MuAgent {
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
     prompt_queue: AgentPromptQueue,
+    event_tap: Option<EventTap>,
 }
+
+/// Observer of raw agent-loop events (used by `--mode json`).
+pub type EventTap = Arc<dyn Fn(&crate::agent_loop::AgentEvent) + Send + Sync>;
 
 impl MuAgent {
     pub async fn connect() -> Result<Self, AgentError> {
@@ -2395,7 +2400,13 @@ impl MuAgent {
             mcp_startup: None,
             active_mcp_tools,
             prompt_queue: AgentPromptQueue::default(),
+            event_tap: None,
         })
+    }
+
+    /// Observe every raw agent-loop event as it happens.
+    pub fn set_event_tap(&mut self, tap: EventTap) {
+        self.event_tap = Some(tap);
     }
 
     pub fn model(&self) -> &str {
@@ -2772,6 +2783,18 @@ pub async fn run_prompt_with_session(
         },
     )
     .await
+}
+
+/// Run one prompt and print every agent event as a JSON line (Pi's `--mode json`).
+pub async fn run_prompt_json(
+    prompt: String,
+    session_options: SessionOptions,
+) -> Result<(), AgentError> {
+    let mut agent = MuAgent::connect_with_options(session_options).await?;
+    agent.set_event_tap(Arc::new(|event| {
+        println!("{}", crate::agent_loop::event_to_json(event));
+    }));
+    agent.submit(prompt, &mut |_| {}).await
 }
 
 pub async fn run_prompt_with_options(

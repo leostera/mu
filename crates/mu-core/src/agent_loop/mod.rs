@@ -1,5 +1,6 @@
 //! Pi-compatible agent loop: events, hooks, tool scheduling, and transcript tool state.
 
+mod json;
 mod run;
 mod transcript;
 mod types;
@@ -8,6 +9,7 @@ mod validation;
 #[cfg(test)]
 mod tests;
 
+pub use json::event_to_json;
 pub use run::{
     ContinueError, RunToolCallOptions, run_agent_loop, run_agent_loop_continue, run_tool_call,
 };
