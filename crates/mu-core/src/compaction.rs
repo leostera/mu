@@ -140,6 +140,21 @@ impl FileOperations {
         }
     }
 
+    /// Carry the lists a previous compaction appended to its summary (Pi keeps them in the
+    /// entry's `details`; Mu reads them back from the summary text).
+    pub fn add_previous_summary(&mut self, summary: &str) {
+        let section = |tag: &str| {
+            let (open, close) = (format!("<{tag}>\n"), format!("\n</{tag}>"));
+            summary
+                .split_once(&open)
+                .and_then(|(_, rest)| rest.split_once(&close))
+                .map(|(body, _)| body.lines().map(str::to_owned).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        self.read.extend(section("read-files"));
+        self.edited.extend(section("modified-files"));
+    }
+
     /// Pi's `computeFileLists` + `formatFileOperations`: files only read, then modified files,
     /// as XML-ish sections appended to the summary (empty when nothing was touched).
     pub fn format(&self) -> String {
@@ -417,6 +432,19 @@ mod tests {
             "\n\n<read-files>\nb.rs\n</read-files>\n\n<modified-files>\na.rs\nz.md\n</modified-files>"
         );
         assert_eq!(FileOperations::default().format(), "");
+    }
+
+    #[test]
+    fn previous_summary_file_lists_carry_into_the_next_compaction() {
+        let mut ops = FileOperations::default();
+        ops.add_previous_summary("text\n\n<read-files>\nr.rs\n</read-files>\n\n<modified-files>\nm.rs\nn.rs\n</modified-files>");
+        assert_eq!(
+            ops.format(),
+            "\n\n<read-files>\nr.rs\n</read-files>\n\n<modified-files>\nm.rs\nn.rs\n</modified-files>"
+        );
+        let mut none = FileOperations::default();
+        none.add_previous_summary("no lists here");
+        assert_eq!(none.format(), "");
     }
 
     #[test]

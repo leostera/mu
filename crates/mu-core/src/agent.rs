@@ -4034,6 +4034,9 @@ impl MuAgent {
             .await?
         };
         let mut file_ops = crate::compaction::FileOperations::default();
+        if let Some(previous) = &previous_summary {
+            file_ops.add_previous_summary(previous);
+        }
         file_ops.add_entries(summarized);
         file_ops.add_entries(prefix);
         let summary = format!("{summary}{}", file_ops.format());
