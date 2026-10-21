@@ -1730,8 +1730,16 @@ impl Provider {
         if !self.appendix.is_empty() {
             system = format!("{system}\n\n{}", self.appendix);
         }
-        let body = serde_json::to_vec(&bedrock::request_body(&system, history, tools))
-            .expect("request serializes");
+        let mut request_json = bedrock::request_body(&system, history, tools);
+        if self.supports_reasoning
+            && let Some((fields, budget)) =
+                bedrock::thinking_fields(&self.model, self.reasoning_effort)
+        {
+            request_json["additionalModelRequestFields"] = fields;
+            // Claude requires max tokens above the thinking budget.
+            request_json["inferenceConfig"]["maxTokens"] = json!(budget + 16_384);
+        }
+        let body = serde_json::to_vec(&request_json).expect("request serializes");
         let mut request = http
             .post(endpoint.clone())
             .header(header::CONTENT_TYPE, "application/json");

@@ -71,6 +71,50 @@ pub(super) fn tool_config(definitions: &[Value]) -> Option<Value> {
     (!tools.is_empty()).then(|| json!({"tools": tools}))
 }
 
+fn is_claude(model: &str) -> bool {
+    model.to_lowercase().contains("claude")
+}
+
+/// Claude models that use adaptive thinking instead of a token budget (Pi's
+/// `supportsAdaptiveThinking`); Mu does not configure these yet.
+fn uses_adaptive_thinking(model: &str) -> bool {
+    let id = model.to_lowercase();
+    [
+        "opus-4-6",
+        "opus-4-7",
+        "opus-4-8",
+        "opus-5",
+        "sonnet-4-6",
+        "sonnet-5",
+        "haiku-5",
+        "fable-5",
+    ]
+    .iter()
+    .any(|needle| id.contains(needle))
+}
+
+/// `additionalModelRequestFields` for budget-based Claude extended thinking (Pi's
+/// `buildAdditionalModelRequestFields`, non-adaptive branch) and its token budget.
+pub(super) fn thinking_fields(model: &str, effort: Option<&str>) -> Option<(Value, u64)> {
+    let effort = effort?;
+    if !is_claude(model) || uses_adaptive_thinking(model) {
+        return None;
+    }
+    let budget = match effort {
+        "minimal" => 1024,
+        "low" => 2048,
+        "medium" => 8192,
+        _ => 16384,
+    };
+    Some((
+        json!({
+            "thinking": {"type": "enabled", "budget_tokens": budget, "display": "summarized"},
+            "anthropic_beta": ["interleaved-thinking-2025-05-14"],
+        }),
+        budget,
+    ))
+}
+
 pub(super) fn request_body(system: &str, history: &[Value], definitions: &[Value]) -> Value {
     let mut body = json!({
         "system": [{"text": system}],
@@ -137,6 +181,33 @@ pub(super) fn parse_response(response: &Value) -> Result<Reply, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_thinking_uses_budgets_and_skips_adaptive_or_non_claude_models() {
+        let (fields, budget) =
+            thinking_fields("anthropic.claude-sonnet-4-5-v1:0", Some("medium")).unwrap();
+        assert_eq!(budget, 8192);
+        assert_eq!(
+            fields["thinking"],
+            json!({"type":"enabled","budget_tokens":8192,"display":"summarized"})
+        );
+        assert_eq!(
+            fields["anthropic_beta"],
+            json!(["interleaved-thinking-2025-05-14"])
+        );
+        assert_eq!(
+            thinking_fields("anthropic.claude-3", Some("max"))
+                .unwrap()
+                .1,
+            16384
+        );
+        assert_eq!(
+            thinking_fields("anthropic.claude-opus-4-6", Some("high")),
+            None
+        );
+        assert_eq!(thinking_fields("amazon.nova-pro", Some("high")), None);
+        assert_eq!(thinking_fields("anthropic.claude-3", None), None);
+    }
 
     #[test]
     fn history_becomes_alternating_converse_messages_with_tool_blocks() {
