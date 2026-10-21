@@ -97,8 +97,24 @@ fn uses_adaptive_thinking(model: &str) -> bool {
 /// `buildAdditionalModelRequestFields`, non-adaptive branch) and its token budget.
 pub(super) fn thinking_fields(model: &str, effort: Option<&str>) -> Option<(Value, u64)> {
     let effort = effort?;
-    if !is_claude(model) || uses_adaptive_thinking(model) {
+    if !is_claude(model) {
         return None;
+    }
+    if uses_adaptive_thinking(model) {
+        // Pi's `mapThinkingLevelToEffort` without a model `thinkingLevelMap`. Block binding (a
+        // beta that drops stale signed thinking blocks) is not requested.
+        let effort = match effort {
+            "minimal" | "low" => "low",
+            "medium" => "medium",
+            _ => "high",
+        };
+        return Some((
+            json!({
+                "thinking": {"type": "adaptive", "display": "summarized"},
+                "output_config": {"effort": effort},
+            }),
+            0,
+        ));
     }
     let budget = match effort {
         "minimal" => 1024,
@@ -201,9 +217,22 @@ mod tests {
                 .1,
             16384
         );
+        let (adaptive, extra) =
+            thinking_fields("anthropic.claude-opus-4-6", Some("minimal")).unwrap();
         assert_eq!(
-            thinking_fields("anthropic.claude-opus-4-6", Some("high")),
-            None
+            adaptive["thinking"],
+            json!({"type":"adaptive","display":"summarized"})
+        );
+        assert_eq!(adaptive["output_config"]["effort"], "low");
+        assert_eq!(
+            extra, 0,
+            "adaptive thinking needs no token-limit adjustment"
+        );
+        assert_eq!(
+            thinking_fields("anthropic.claude-sonnet-5", Some("max"))
+                .unwrap()
+                .0["output_config"]["effort"],
+            "high"
         );
         assert_eq!(thinking_fields("amazon.nova-pro", Some("high")), None);
         assert_eq!(thinking_fields("anthropic.claude-3", None), None);

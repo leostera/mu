@@ -1737,7 +1737,9 @@ impl Provider {
         {
             request_json["additionalModelRequestFields"] = fields;
             // Claude requires max tokens above the thinking budget.
-            request_json["inferenceConfig"]["maxTokens"] = json!(budget + 16_384);
+            if budget > 0 {
+                request_json["inferenceConfig"]["maxTokens"] = json!(budget + 16_384);
+            }
         }
         let body = serde_json::to_vec(&request_json).expect("request serializes");
         let mut request = http
