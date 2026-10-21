@@ -1765,8 +1765,11 @@ fn handle_key(
         handle_command_menu(key, app, &agent);
         return;
     }
-    if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        cycle_model(app, &agent);
+    if matches!(key.code, KeyCode::Char('p' | 'P')) && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        let backward =
+            key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::Char('P');
+        cycle_model(app, &agent, backward);
         return;
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1946,7 +1949,17 @@ fn handle_model_selector(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent
     }
 }
 
-fn cycle_model(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
+/// Index after `position` in a scope of `len` models, wrapping; `None` starts at an end.
+fn next_model_index(position: Option<usize>, len: usize, backward: bool) -> usize {
+    match (position, backward) {
+        (None, false) => 0,
+        (None, true) => len - 1,
+        (Some(index), false) => (index + 1) % len,
+        (Some(index), true) => (index + len - 1) % len,
+    }
+}
+
+fn cycle_model(app: &mut App, agent: &Arc<Mutex<MuAgent>>, backward: bool) {
     let Ok(mut agent) = agent.try_lock() else {
         return;
     };
@@ -1955,7 +1968,7 @@ fn cycle_model(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         return;
     }
     let position = scope.iter().position(|model| *model == app.model);
-    let next = position.map_or(0, |index| (index + 1) % scope.len());
+    let next = next_model_index(position, scope.len(), backward);
     let model = scope[next].clone();
     if !agent.select_model(&model).unwrap_or(false) {
         return;
@@ -2098,7 +2111,7 @@ const HOTKEYS: &str = "**Keyboard Shortcuts**
 | `Up` / `Down` | Move cursor / browse history |
 | `PageUp` / `PageDown` | Scroll by page |
 | `Ctrl+Home` / `Ctrl+End` | Scroll to start / end |
-| `Ctrl+P` | Cycle models |
+| `Ctrl+P` / `Shift+Ctrl+P` | Cycle models forward / backward |
 | `Ctrl+L` | Open model selector |
 | `Shift+Tab` | Cycle thinking level |
 | `Ctrl+T` | Toggle thinking block visibility |
@@ -3491,6 +3504,15 @@ mod tests {
         );
         assert!(app.model_selector_open);
         assert_eq!(app.model_selection, 1);
+    }
+
+    #[test]
+    fn model_cycling_wraps_in_both_directions() {
+        assert_eq!(super::next_model_index(Some(2), 3, false), 0);
+        assert_eq!(super::next_model_index(Some(0), 3, true), 2);
+        assert_eq!(super::next_model_index(Some(1), 3, true), 0);
+        assert_eq!(super::next_model_index(None, 3, false), 0);
+        assert_eq!(super::next_model_index(None, 3, true), 2);
     }
 
     #[test]
