@@ -6,6 +6,7 @@
 mod agent;
 pub mod agent_loop;
 mod codemode;
+mod context_files;
 mod mcp;
 pub mod path_utils;
 pub mod skills;

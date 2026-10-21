@@ -99,6 +99,10 @@ struct Cli {
     #[arg(long, value_name = "TEXT")]
     append_system_prompt: Vec<String>,
 
+    /// Do not load AGENTS.md / CLAUDE.md context files.
+    #[arg(long)]
+    no_context_files: bool,
+
     /// Do not make startup network requests (Pi's `--offline`).
     #[arg(long)]
     offline: bool,
@@ -202,6 +206,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         demo: cli.demo,
         system_prompt: cli.system_prompt,
         append_system_prompt: cli.append_system_prompt,
+        no_context_files: cli.no_context_files,
     };
 
     if cli.print || !is_terminal {

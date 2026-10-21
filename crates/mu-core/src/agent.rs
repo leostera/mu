@@ -155,6 +155,8 @@ pub struct SessionOptions {
     pub system_prompt: Option<String>,
     /// `--append-system-prompt`: each entry is literal text or a file path whose contents are used.
     pub append_system_prompt: Vec<String>,
+    /// `--no-context-files`: skip `AGENTS.md`/`CLAUDE.md` discovery.
+    pub no_context_files: bool,
 }
 
 /// Resolved prompt customizations.
@@ -162,6 +164,7 @@ pub struct SessionOptions {
 struct PromptOptions {
     system_prompt: Option<String>,
     appended: Vec<String>,
+    context: String,
 }
 
 impl PromptOptions {
@@ -173,11 +176,27 @@ impl PromptOptions {
                 .iter()
                 .map(|text| read_prompt_input(text))
                 .collect(),
+            context: String::new(),
         }
     }
 
+    /// Load `AGENTS.md`-style files unless disabled.
+    fn with_context_files(mut self, cwd: &Path, agent_dir: &Path, disabled: bool) -> Self {
+        if !disabled {
+            let files = crate::context_files::load_project_context_files(cwd, agent_dir);
+            if !files.is_empty() {
+                self.context = crate::context_files::render_project_context(&files);
+            }
+        }
+        self
+    }
+
     fn appendix(&self) -> String {
-        self.appended.join("\n\n")
+        let mut sections = self.appended.clone();
+        if !self.context.is_empty() {
+            sections.push(self.context.clone());
+        }
+        sections.join("\n\n")
     }
 }
 
@@ -1986,6 +2005,7 @@ fn resolve_session_options(
         demo: _,
         system_prompt: _,
         append_system_prompt: _,
+        no_context_files: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2293,7 +2313,11 @@ impl Prepared {
         }
         let no_tools = options.no_tools;
         let persist_session = !options.no_session;
-        let prompt = PromptOptions::from_session_options(&options);
+        let prompt = PromptOptions::from_session_options(&options).with_context_files(
+            &config.cwd,
+            &config.agent_dir,
+            options.no_context_files,
+        );
         let skills = crate::skills::SkillCatalog::discover_with_paths(
             &config.cwd,
             &config.agent_dir,
