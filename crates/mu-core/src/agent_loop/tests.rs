@@ -60,13 +60,7 @@ impl StreamFn for ScriptedStream {
 }
 
 fn assistant(content: Vec<ContentBlock>, stop_reason: StopReason) -> AssistantMessage {
-    AssistantMessage {
-        content,
-        stop_reason,
-        error_message: None,
-        thinking_level: None,
-        timestamp: 0,
-    }
+    AssistantMessage::new(content, stop_reason)
 }
 
 fn text_reply(text: &str) -> AssistantMessage {

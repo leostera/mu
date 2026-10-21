@@ -43,8 +43,11 @@ pub enum ContentBlock {
         data: String,
         mime_type: String,
     },
+    #[serde(rename_all = "camelCase")]
     Thinking {
         thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_signature: Option<String>,
     },
     ToolCall {
         id: String,
@@ -114,9 +117,27 @@ pub struct AssistantMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<ThinkingLevel>,
     pub timestamp: i64,
+    /// Opaque provider output replayed verbatim on later requests (never serialized here).
+    #[serde(skip)]
+    pub provider_items: Option<Vec<Value>>,
+    /// Token usage reported for this response (persisted by the session layer).
+    #[serde(skip)]
+    pub usage: Option<mu_session::MessageUsage>,
 }
 
 impl AssistantMessage {
+    pub fn new(content: Vec<ContentBlock>, stop_reason: StopReason) -> Self {
+        Self {
+            content,
+            stop_reason,
+            error_message: None,
+            thinking_level: None,
+            timestamp: 0,
+            provider_items: None,
+            usage: None,
+        }
+    }
+
     pub fn tool_calls(&self) -> Vec<ToolCall> {
         self.content
             .iter()

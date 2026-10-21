@@ -6,15 +6,17 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
 };
 
-use futures_util::{StreamExt, future::join_all};
-use mu_session::{
-    AssistantToolResponse, AssistantTurnResponse, MessageCost, MessageUsage, SessionDocument,
-    ToolCallRecord,
-};
+use futures_util::StreamExt;
+use mu_session::{MessageCost, MessageUsage, SessionDocument};
 use reqwest::{Client, Url, header};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::OnceCell;
+
+mod runtime;
+
+use crate::agent_loop::AgentMessage;
+use tokio_util::sync::CancellationToken;
 
 const ORIGIN: &str = "https://opencode.cloudflare.dev";
 const MCP_STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -159,6 +161,7 @@ struct Config {
     retry: RetryPolicy,
     enabled_tools: Vec<String>,
 }
+#[derive(Clone)]
 struct Provider {
     transport: ProviderTransport,
     model: String,
@@ -167,6 +170,7 @@ struct Provider {
     supports_strict_sampling: bool,
 }
 
+#[derive(Clone)]
 enum ProviderTransport {
     OpenCode {
         http: Client,
@@ -181,24 +185,6 @@ struct FunctionCall {
     call_id: String,
     name: String,
     arguments: Value,
-}
-
-struct ToolExecutionResult {
-    output: String,
-    is_error: bool,
-    store_writes: Option<Value>,
-    details: Option<Value>,
-}
-
-impl ToolExecutionResult {
-    fn text(output: impl Into<String>, is_error: bool) -> Self {
-        Self {
-            output: output.into(),
-            is_error,
-            store_writes: None,
-            details: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -267,6 +253,14 @@ impl AgentPromptQueue {
                     .pop_front()
                     .map(|prompt| (prompt, PromptBehavior::FollowUp))
             })
+    }
+
+    fn take_follow_up(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .follow_up
+            .pop_front()
     }
 
     fn take_steering(&self) -> Option<String> {
@@ -1476,12 +1470,12 @@ fn session_codemode_store(session: &SessionDocument) -> Value {
     Value::Object(store)
 }
 
-fn load_session(path: &Path) -> Result<(SessionDocument, Vec<Value>), AgentError> {
+fn load_session(path: &Path) -> Result<(SessionDocument, Vec<AgentMessage>), AgentError> {
     let contents =
         std::fs::read_to_string(path).map_err(|error| AgentError::Session(error.to_string()))?;
     let session = SessionDocument::parse_jsonl(&contents)
         .map_err(|error| AgentError::Session(error.to_string()))?;
-    let history = session_history(&session);
+    let history = runtime::session_messages(&session);
     Ok((session, history))
 }
 
@@ -1682,94 +1676,6 @@ fn session_preview(session: &SessionDocument) -> Option<String> {
     })
 }
 
-fn session_history(session: &SessionDocument) -> Vec<Value> {
-    let mut history = Vec::new();
-    for entry in session.active_branch_entries() {
-        let Some(message) = entry
-            .extra_fields()
-            .get("message")
-            .and_then(Value::as_object)
-        else {
-            continue;
-        };
-        let role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let content = message.get("content").and_then(Value::as_array);
-        match role {
-            "user" => {
-                let blocks = content
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|block| {
-                        let text = block.get("text")?.as_str()?;
-                        Some(json!({"type":"input_text","text":text}))
-                    })
-                    .collect::<Vec<_>>();
-                if !blocks.is_empty() {
-                    history.push(json!({"role":"user","content":blocks}));
-                }
-            }
-            "assistant" => {
-                let mut text_blocks = Vec::new();
-                let mut tool_calls = Vec::new();
-                for block in content.into_iter().flatten() {
-                    match block.get("type").and_then(Value::as_str) {
-                        Some("text") => {
-                            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                text_blocks.push(json!({"type":"output_text","text":text}));
-                            }
-                        }
-                        Some("toolCall") => {
-                            let Some(call_id) = block.get("id").and_then(Value::as_str) else {
-                                continue;
-                            };
-                            let Some(name) = block.get("name").and_then(Value::as_str) else {
-                                continue;
-                            };
-                            let arguments = block.get("arguments").cloned().unwrap_or(Value::Null);
-                            let arguments =
-                                arguments.as_str().map(str::to_owned).unwrap_or_else(|| {
-                                    serde_json::to_string(&arguments)
-                                        .unwrap_or_else(|_| "{}".into())
-                                });
-                            tool_calls.push(json!({
-                                "type":"function_call",
-                                "call_id":call_id,
-                                "name":name,
-                                "arguments":arguments,
-                            }));
-                        }
-                        _ => {}
-                    }
-                }
-                if !text_blocks.is_empty() {
-                    history.push(json!({"role":"assistant","content":text_blocks}));
-                }
-                history.extend(tool_calls);
-            }
-            "toolResult" => {
-                let text = content
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|block| block.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if let Some(call_id) = message.get("toolCallId").and_then(Value::as_str) {
-                    history.push(json!({
-                        "type":"function_call_output",
-                        "call_id":call_id,
-                        "output":text,
-                    }));
-                }
-            }
-            _ => {}
-        }
-    }
-    history
-}
-
 fn session_directory(agent_dir: &Path, cwd: &Path, override_dir: Option<&Path>) -> PathBuf {
     if let Some(directory) = override_dir {
         return directory.to_owned();
@@ -1933,7 +1839,7 @@ fn new_session_path(agent_dir: &Path, cwd: &Path, override_dir: Option<&Path>) -
 fn resolve_session_options(
     config: &Config,
     options: SessionOptions,
-) -> Result<(PathBuf, SessionDocument, Vec<Value>), AgentError> {
+) -> Result<(PathBuf, SessionDocument, Vec<AgentMessage>), AgentError> {
     if let Some(id) = options.id.as_deref() {
         validate_session_id(id)?;
     }
@@ -1985,7 +1891,7 @@ fn resolve_session_options(
         if !no_session {
             write_session(&session, &path)?;
         }
-        let history = session_history(&session);
+        let history = runtime::session_messages(&session);
         return Ok((path, session, history));
     }
     let requested_path = path
@@ -2048,45 +1954,6 @@ fn resolve_session_options(
         }
     }
     Ok((path, session, history))
-}
-
-async fn execute_in_parallel<I, F>(futures: I) -> Vec<F::Output>
-where
-    I: IntoIterator<Item = F>,
-    F: std::future::Future,
-{
-    join_all(futures).await
-}
-
-async fn execute_independent_tool(
-    mcp: &crate::mcp::McpRegistry,
-    cwd: &Path,
-    shell_environment: &HashMap<String, String>,
-    call: &FunctionCall,
-) -> Result<ToolExecutionResult, String> {
-    match mcp.call(&call.name, &call.arguments).await {
-        Some(Ok(result)) => Ok(ToolExecutionResult {
-            output: result.content,
-            is_error: result.is_error,
-            store_writes: None,
-            details: result.structured_content,
-        }),
-        Some(Err(error)) => Err(error),
-        None => crate::tools::execute_with_environment(
-            cwd,
-            &call.name,
-            &call.arguments,
-            shell_environment,
-        )
-        .await
-        .map(|result| ToolExecutionResult {
-            output: result.content,
-            is_error: result.is_error,
-            store_writes: None,
-            details: result.details.or(result.structured_content),
-        })
-        .map_err(|error| error.to_string()),
-    }
 }
 
 fn retryable_provider_error(error: &AgentError) -> bool {
@@ -2210,7 +2077,7 @@ pub struct MuAgent {
     provider_id: String,
     model_choices: Vec<String>,
     session: SessionDocument,
-    history: Vec<Value>,
+    transcript: Vec<AgentMessage>,
     session_path: PathBuf,
     persist_session: bool,
     agent_dir: PathBuf,
@@ -2288,7 +2155,7 @@ impl MuAgent {
             provider_id: config.provider,
             model_choices: config.model_choices,
             session,
-            history,
+            transcript: history,
             session_path,
             persist_session,
             agent_dir: config.agent_dir.clone(),
@@ -2342,7 +2209,7 @@ impl MuAgent {
             provider_id: config.provider,
             model_choices: config.model_choices,
             session,
-            history: Vec::new(),
+            transcript: Vec::new(),
             session_path: path,
             persist_session: true,
             agent_dir: config.agent_dir.clone(),
@@ -2508,7 +2375,7 @@ impl MuAgent {
     pub fn import_session(&mut self, path: &Path) -> Result<(), AgentError> {
         let (session, history) = load_session(path)?;
         self.session = session;
-        self.history = history;
+        self.transcript = history;
         self.session_path = path.to_owned();
         self.persist_session = true;
         self.active_mcp_tools = session_active_mcp_tools(&self.session);
@@ -2535,7 +2402,7 @@ impl MuAgent {
         write_session(&new_session, &new_path)?;
 
         self.session = new_session;
-        self.history = session_history(&self.session);
+        self.transcript = runtime::session_messages(&self.session);
         self.session_path = new_path;
         self.active_mcp_tools = session_active_mcp_tools(&self.session);
         self.prompt_queue.clear();
@@ -2556,7 +2423,7 @@ impl MuAgent {
         }
 
         self.session = next_session;
-        self.history.clear();
+        self.transcript.clear();
         self.session_path = next_path;
         self.active_mcp_tools.clear();
         self.prompt_queue.clear();
@@ -2621,357 +2488,35 @@ impl MuAgent {
         environment
     }
 
-    fn record_queued_prompt(
-        &mut self,
-        prompt: String,
-        behavior: PromptBehavior,
-        on_event: &mut impl FnMut(AgentEvent),
-    ) -> Result<(), AgentError> {
-        let prompt = self.expand_prompt(prompt, on_event);
-        self.session.append_user_text(prompt.clone());
-        self.save_session()?;
-        self.history.push(json!({
-            "role":"user",
-            "content":[{"type":"input_text","text":prompt}],
-        }));
-        on_event(AgentEvent::QueuedPromptStarted { prompt, behavior });
-        Ok(())
-    }
-
     fn codemode_store(&self) -> Value {
         session_codemode_store(&self.session)
     }
 
-    fn refresh_mcp_if_ready(&mut self) {
-        let Some(registry) = self
-            .mcp_startup
-            .as_ref()
-            .and_then(|startup| startup.get())
-            .cloned()
-        else {
-            return;
-        };
-        self.mcp = registry;
-        self.mcp_startup = None;
-    }
-
-    async fn complete_with_retry(
-        &mut self,
-        on_event: &mut impl FnMut(AgentEvent),
-    ) -> Result<Reply, AgentError> {
-        let mut attempt = 0;
-        loop {
-            self.refresh_mcp_if_ready();
-            match self
-                .provider
-                .complete(
-                    &self.history,
-                    &self.tool_definitions(&self.active_mcp_tools),
-                    on_event,
-                )
-                .await
-            {
-                Ok(reply) => return Ok(reply),
-                Err(error)
-                    if self.retry.enabled
-                        && attempt < self.retry.max_retries
-                        && retryable_provider_error(&error) =>
-                {
-                    attempt += 1;
-                    let delay_ms = retry_delay_ms(self.retry, attempt);
-                    on_event(AgentEvent::RetryScheduled {
-                        attempt,
-                        max_attempts: self.retry.max_retries,
-                        delay_ms,
-                        error: error.to_string(),
-                    });
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    on_event(AgentEvent::RetryAttemptStarted { attempt });
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
+    /// Provider-facing tool definitions for the current selection.
+    #[cfg(test)]
     fn tool_definitions(&self, active_mcp_tools: &HashSet<String>) -> Vec<Value> {
-        if self.no_tools {
-            return Vec::new();
-        }
-        let all_definitions = crate::tools::definitions();
-        let mut definitions = self
-            .enabled_tools
+        let plan = runtime::ToolPlan {
+            enabled_tools: self.enabled_tools.clone(),
+            no_tools: self.no_tools,
+            selection: self.tool_selection.clone(),
+        };
+        plan.definitions(&self.mcp, active_mcp_tools)
             .iter()
-            .filter_map(|enabled| {
-                all_definitions
-                    .iter()
-                    .find(|definition| {
-                        definition.get("name").and_then(Value::as_str) == Some(enabled)
-                    })
-                    .cloned()
+            .filter_map(runtime::declaration_from_definition)
+            .map(|declaration| {
+                runtime::request_tool(&declaration, self.provider.supports_strict_sampling)
             })
-            .map(|definition| {
-                if self.provider.supports_strict_sampling {
-                    mark_strict_builtin_tool(definition)
-                } else {
-                    definition
-                }
-            })
-            .collect::<Vec<_>>();
-        definitions.extend(self.mcp.definitions_for_model(active_mcp_tools));
-        if self.mcp.codemode_enabled() {
-            definitions.push(crate::codemode::definition(&self.mcp));
-        }
-        if self.mcp.has_deferred_tools() {
-            definitions.push(crate::tool_search::definition());
-        }
-        if let Some(selection) = &self.tool_selection {
-            definitions = filter_tool_definitions(definitions, selection);
-        }
-        definitions
+            .collect()
     }
 
+    /// Run one user turn; queued steering and follow-up prompts continue it.
     pub async fn submit(
         &mut self,
         prompt: String,
         on_event: &mut impl FnMut(AgentEvent),
     ) -> Result<(), AgentError> {
-        let prompt = self.expand_prompt(prompt, on_event);
-        self.session.append_user_text(prompt.clone());
-        self.save_session()?;
-        self.history
-            .push(json!({"role":"user","content":[{"type":"input_text","text":prompt}]}));
-        self.ensure_mcp_ready().await;
-        if let Some(steering) = self.prompt_queue.take_steering() {
-            self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
-        }
-        let mut reply = self.complete_with_retry(on_event).await?;
-        loop {
-            if reply.tool_calls.is_empty() {
-                break;
-            }
-            let api = api_name(&self.provider.transport);
-            let truncated_tool_arguments =
-                reply.incomplete_reason.as_deref() == Some("max_output_tokens");
-            let calls = std::mem::take(&mut reply.tool_calls);
-            let records = calls
-                .iter()
-                .map(|call| ToolCallRecord {
-                    id: call.call_id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                })
-                .collect::<Vec<_>>();
-            self.session.append_assistant_tool_calls(
-                api,
-                &self.provider_id,
-                &self.provider.model,
-                AssistantToolResponse {
-                    thinking: reply.thinking.clone(),
-                    thinking_signature: reply.thinking_signature.clone(),
-                    text: reply.text.clone(),
-                    calls: records,
-                    usage: usage(&reply),
-                },
-            );
-            self.save_session()?;
-
-            // Preserve the provider's full assistant output (including reasoning
-            // signatures and all sibling calls) for stateless Responses replay.
-            self.history.extend(reply.output_items.iter().cloned());
-            // The Responses API expects all assistant calls before their outputs.
-            for call in &calls {
-                on_event(AgentEvent::ToolStarted {
-                    call_id: call.call_id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                });
-            }
-            let mut parallel_results = if !self.no_tools
-                && !truncated_tool_arguments
-                && calls
-                    .iter()
-                    .all(|call| !matches!(call.name.as_str(), "tool_search" | "codemode"))
-            {
-                let shell_environment = self.shell_environment();
-                Some(
-                    execute_in_parallel(calls.iter().map(|call| {
-                        execute_independent_tool(&self.mcp, &self.cwd, &shell_environment, call)
-                    }))
-                    .await
-                    .into_iter(),
-                )
-            } else {
-                None
-            };
-            for call in calls {
-                let result = if self.no_tools {
-                    Err(format!("Tool {} is not available", call.name))
-                } else if truncated_tool_arguments {
-                    Err(format!(
-                        "Tool call \"{}\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.",
-                        call.name
-                    ))
-                } else if let Some(results) = parallel_results.as_mut() {
-                    results.next().expect("one result per tool call")
-                } else if call.name == "tool_search" {
-                    let query = call
-                        .arguments
-                        .get("query")
-                        .and_then(Value::as_str)
-                        .filter(|query| !query.trim().is_empty());
-                    match query {
-                        Some(query) => {
-                            let limit = call
-                                .arguments
-                                .get("limit")
-                                .and_then(Value::as_u64)
-                                .unwrap_or(8)
-                                .clamp(1, 30) as usize;
-                            let matches =
-                                self.mcp.search_tools(query, limit, &self.active_mcp_tools);
-                            for tool in &matches {
-                                if let Some(name) = tool.get("name").and_then(Value::as_str) {
-                                    self.active_mcp_tools.insert(name.to_owned());
-                                }
-                            }
-                            let output = if matches.is_empty() {
-                                "No matching tools found.".to_owned()
-                            } else {
-                                let loaded = matches
-                                    .iter()
-                                    .map(|tool| {
-                                        format!(
-                                            "- {}: {}",
-                                            tool.get("name")
-                                                .and_then(Value::as_str)
-                                                .unwrap_or_default(),
-                                            tool.get("description")
-                                                .and_then(Value::as_str)
-                                                .unwrap_or_default()
-                                                .lines()
-                                                .next()
-                                                .unwrap_or_default()
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                format!(
-                                    "Loaded {} tool{}. They are available from your next call:\n{loaded}",
-                                    matches.len(),
-                                    if matches.len() == 1 { "" } else { "s" }
-                                )
-                            };
-                            if !matches.is_empty() {
-                                let mut active =
-                                    self.active_mcp_tools.iter().cloned().collect::<Vec<_>>();
-                                active.sort();
-                                self.session.append_custom_entry(
-                                    "mcp-tool-loadout",
-                                    json!({"active":active}),
-                                );
-                                self.save_session()?;
-                            }
-                            Ok(ToolExecutionResult::text(output, false))
-                        }
-                        None => Err("tool_search requires a non-empty query".into()),
-                    }
-                } else if call.name == "codemode" {
-                    let store = self.codemode_store();
-                    crate::codemode::execute(
-                        &self.cwd,
-                        &self.mcp,
-                        &store,
-                        &call.arguments,
-                        &self.shell_environment(),
-                    )
-                    .await
-                    .map(|(output, is_error, store_writes)| ToolExecutionResult {
-                        output,
-                        is_error,
-                        store_writes,
-                        details: None,
-                    })
-                    .map_err(|error| error.to_string())
-                } else {
-                    match self.mcp.call(&call.name, &call.arguments).await {
-                        Some(Ok(result)) => Ok(ToolExecutionResult {
-                            output: result.content,
-                            is_error: result.is_error,
-                            store_writes: None,
-                            details: result.structured_content,
-                        }),
-                        Some(Err(error)) => Err(error),
-                        None => self
-                            .execute_tool(&call.name, &call.arguments)
-                            .await
-                            .map(|result| ToolExecutionResult {
-                                output: result.content,
-                                is_error: result.is_error,
-                                store_writes: None,
-                                details: result.details.or(result.structured_content),
-                            })
-                            .map_err(|error| error.to_string()),
-                    }
-                };
-                let result = match result {
-                    Ok(result) => result,
-                    Err(error) => ToolExecutionResult::text(error, true),
-                };
-                if let Some(store_writes) = result.store_writes {
-                    self.session
-                        .append_custom_entry("codemode-store", store_writes);
-                    self.save_session()?;
-                }
-                on_event(AgentEvent::ToolFinished {
-                    call_id: call.call_id.clone(),
-                    output: result.output.clone(),
-                    is_error: result.is_error,
-                });
-                self.history.push(json!({
-                    "type":"function_call_output", "call_id":call.call_id, "output":result.output,
-                }));
-                self.session.append_tool_result_with_details(
-                    &call.call_id,
-                    &call.name,
-                    result.output,
-                    result.is_error,
-                    result.details,
-                );
-                self.save_session()?;
-            }
-            if let Some(steering) = self.prompt_queue.take_steering() {
-                self.record_queued_prompt(steering, PromptBehavior::Steer, on_event)?;
-            }
-            reply = self.complete_with_retry(on_event).await?;
-        }
-        let api = api_name(&self.provider.transport);
-        self.session.append_assistant_response(
-            api,
-            &self.provider_id,
-            &self.provider.model,
-            AssistantTurnResponse {
-                thinking: reply.thinking.clone(),
-                thinking_signature: reply.thinking_signature.clone(),
-                text: reply.text.clone(),
-                usage: usage(&reply),
-            },
-        );
-        self.save_session()?;
-        if reply.output_items.is_empty() {
-            self.history.push(
-                json!({"role":"assistant","content":[{"type":"output_text","text":reply.text}]}),
-            );
-        } else {
-            self.history.extend(reply.output_items);
-        }
-        if let Some((prompt, behavior)) = self.prompt_queue.take_next() {
-            on_event(AgentEvent::QueuedPromptStarted {
-                prompt: prompt.clone(),
-                behavior,
-            });
-            return Box::pin(self.submit(prompt, on_event)).await;
-        }
-        Ok(())
+        self.submit_with_cancel(prompt, on_event, &CancellationToken::new())
+            .await
     }
 }
 
@@ -3103,12 +2648,13 @@ pub async fn run_cli() -> Result<(), AgentError> {
 mod tests {
     use std::collections::HashSet;
 
+    use super::runtime::{responses_input, session_messages};
     use super::{
         AgentPromptQueue, FunctionCall, PromptBehavior, Reply, TerminalResponse, configured_models,
-        execute_in_parallel, find_session_id_path, latest_session_path, load_session,
-        merge_final_response_text, resolve_session_options, response_message_text,
-        session_active_mcp_tools, session_codemode_store, session_history, session_preview,
-        session_transcript, trusted_url, validate_session_id,
+        find_session_id_path, latest_session_path, load_session, merge_final_response_text,
+        resolve_session_options, response_message_text, session_active_mcp_tools,
+        session_codemode_store, session_preview, session_transcript, trusted_url,
+        validate_session_id,
     };
     use super::{Config, SessionOptions};
     use mu_session::{
@@ -3687,6 +3233,7 @@ mod tests {
             header.parent_session.as_deref(),
             Some(source_path.to_string_lossy().as_ref())
         );
+        let history = responses_input(&history);
         assert_eq!(history[0]["content"][0]["text"], "forked context");
         assert!(fork_path.exists());
         assert_eq!(source.header().unwrap().id.as_str(), "source-id");
@@ -3717,6 +3264,7 @@ mod tests {
 
         let (loaded, history) = load_session(&path).unwrap();
         assert_eq!(loaded.header().unwrap().cwd, "/tmp/project");
+        let history = responses_input(&history);
         assert_eq!(history.len(), 2);
         assert_eq!(history[0]["content"][0]["text"], "remember this");
         assert_eq!(history[1]["content"][0]["text"], "I will.");
@@ -3755,7 +3303,7 @@ mod tests {
             MessageUsage::default(),
         );
 
-        let history = session_history(&session);
+        let history = responses_input(&session_messages(&session));
         assert_eq!(history.len(), 4);
         assert_eq!(history[0]["role"], "user");
         assert_eq!(history[0]["content"][0]["text"], "hello");
@@ -4150,10 +3698,16 @@ mod tests {
         }));
         assert!(events.contains(&super::AgentEvent::ThinkingDelta("v".into())));
         assert!(events.contains(&super::AgentEvent::TextDelta("s".into())));
-        assert_eq!(agent.history[1]["type"], "function_call");
-        assert_eq!(agent.history[2]["type"], "function_call_output");
         assert_eq!(
-            agent.history[2]["output"],
+            responses_input(&agent.transcript)[1]["type"],
+            "function_call"
+        );
+        assert_eq!(
+            responses_input(&agent.transcript)[2]["type"],
+            "function_call_output"
+        );
+        assert_eq!(
+            responses_input(&agent.transcript)[2]["output"],
             "Successfully wrote to result.txt"
         );
         let session = std::fs::read_to_string(agent.session_path()).expect("read session");
@@ -4310,9 +3864,9 @@ mod tests {
             .await
             .expect("agent loop should have no arbitrary tool-round limit");
 
-        assert_eq!(agent.history.len(), 20);
+        assert_eq!(responses_input(&agent.transcript).len(), 20);
         assert_eq!(
-            agent.history.last().unwrap()["content"][0]["text"],
+            responses_input(&agent.transcript).last().unwrap()["content"][0]["text"],
             "all nine rounds completed"
         );
         std::fs::remove_dir_all(root).expect("remove temporary project");
@@ -4392,8 +3946,8 @@ mod tests {
             2
         );
         assert!(events.contains(&super::AgentEvent::TextDelta("r".into())));
-        assert_eq!(agent.history[0]["role"], "user");
-        assert_eq!(agent.history[1]["role"], "assistant");
+        assert_eq!(responses_input(&agent.transcript)[0]["role"], "user");
+        assert_eq!(responses_input(&agent.transcript)[1]["role"], "assistant");
         std::fs::remove_dir_all(root).expect("remove temporary project");
     }
 
@@ -4529,8 +4083,8 @@ mod tests {
             "provider: invalid request: malformed payload"
         );
         assert!(events.is_empty());
-        assert_eq!(agent.history.len(), 1);
-        assert_eq!(agent.history[0]["role"], "user");
+        assert_eq!(responses_input(&agent.transcript).len(), 1);
+        assert_eq!(responses_input(&agent.transcript)[0]["role"], "user");
         let session = std::fs::read_to_string(agent.session_path()).expect("read session");
         let parsed = SessionDocument::parse_jsonl(&session).expect("parse session");
         let messages = parsed
@@ -4541,6 +4095,138 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    fn scripted_reply(text: &str, calls: Vec<(&str, &str, Value)>) -> Reply {
+        Reply {
+            text: text.into(),
+            thinking: String::new(),
+            thinking_signature: None,
+            output_items: Vec::new(),
+            tool_calls: calls
+                .into_iter()
+                .map(|(call_id, name, arguments)| FunctionCall {
+                    call_id: call_id.into(),
+                    name: name.into(),
+                    arguments,
+                })
+                .collect(),
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: None,
+            total_tokens: 0,
+            incomplete_reason: None,
+        }
+    }
+
+    fn scripted_agent(root: &Path, replies: Vec<Result<Reply, String>>) -> super::MuAgent {
+        std::fs::create_dir_all(root).expect("create temporary project");
+        let mut agent = super::MuAgent::demo_from_config(super::Config {
+            agent_dir: root.join("agent"),
+            cwd: root.to_owned(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            model_choices: vec!["test-model".into()],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+            enabled_tools: super::resolve_default_tools(None),
+        })
+        .expect("demo agent");
+        agent.provider.transport = super::ProviderTransport::Scripted(std::sync::Arc::new(
+            std::sync::Mutex::new(replies.into()),
+        ));
+        agent
+    }
+
+    #[tokio::test]
+    async fn unknown_tools_become_error_results_the_model_can_see() {
+        let root = std::env::temp_dir().join(format!("mu-unknown-tool-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(
+            &root,
+            vec![
+                Ok(scripted_reply(
+                    "",
+                    vec![("call-1", "missing_tool", serde_json::json!({}))],
+                )),
+                Ok(scripted_reply("recovered", vec![])),
+            ],
+        );
+        let mut finished = Vec::new();
+        agent
+            .submit("use a tool".into(), &mut |event| {
+                if let super::AgentEvent::ToolFinished {
+                    output, is_error, ..
+                } = event
+                {
+                    finished.push((output, is_error));
+                }
+            })
+            .await
+            .expect("the loop continues after a failed tool call");
+
+        assert_eq!(finished, [("Tool missing_tool not found".to_owned(), true)]);
+        let input = responses_input(&agent.transcript);
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[3]["content"][0]["text"], "recovered");
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_arguments_report_pi_validation_errors_without_executing() {
+        let root = std::env::temp_dir().join(format!("mu-invalid-args-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(
+            &root,
+            vec![
+                Ok(scripted_reply(
+                    "",
+                    vec![("call-1", "write", serde_json::json!({"path": 7}))],
+                )),
+                Ok(scripted_reply("done", vec![])),
+            ],
+        );
+        let mut outputs = Vec::new();
+        agent
+            .submit("write".into(), &mut |event| {
+                if let super::AgentEvent::ToolFinished { output, .. } = event {
+                    outputs.push(output);
+                }
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            outputs[0].starts_with("Validation failed for tool \"write\":"),
+            "{}",
+            outputs[0]
+        );
+        assert!(outputs[0].contains("Received arguments:"));
+        std::fs::remove_dir_all(root).expect("remove temporary project");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_ends_cleanly_without_persisting_an_assistant_message() {
+        let root = std::env::temp_dir().join(format!("mu-cancelled-turn-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![Ok(scripted_reply("never sent", vec![]))]);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        agent
+            .submit_with_cancel("hello".into(), &mut |_| {}, &cancel)
+            .await
+            .expect("an aborted turn is not an error");
+
+        let session = std::fs::read_to_string(agent.session_path()).expect("read session");
+        let parsed = SessionDocument::parse_jsonl(&session).expect("parse session");
+        let roles = parsed
+            .active_branch_entries()
+            .into_iter()
+            .filter_map(|entry| entry.extra_fields().get("message"))
+            .map(|message| message["role"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["user"]);
         std::fs::remove_dir_all(root).expect("remove temporary project");
     }
 
@@ -4573,7 +4259,7 @@ mod tests {
         agent.start_new_session().expect("start new session");
 
         assert_ne!(agent.session_path(), old_path);
-        assert!(agent.history.is_empty());
+        assert!(responses_input(&agent.transcript).is_empty());
         assert!(agent.active_mcp_tools.is_empty());
         assert_eq!(agent.prompt_queue.take_next(), None);
         let old_session = std::fs::read_to_string(&old_path).expect("preserve old session file");
@@ -4613,19 +4299,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn independent_tool_calls_run_concurrently_and_keep_call_order() {
-        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-        let futures = (0..2).map(|value| {
-            let barrier = std::sync::Arc::clone(&barrier);
-            async move {
-                barrier.wait().await;
-                value
-            }
-        });
-        assert_eq!(execute_in_parallel(futures).await, [0, 1]);
-    }
-
-    #[tokio::test]
     async fn submit_consumes_steering_then_follow_up_prompts_as_new_user_turns() {
         let mut agent = super::MuAgent::demo().expect("demo agent");
         let queue = agent.prompt_queue();
@@ -4659,8 +4332,8 @@ mod tests {
             queued_started,
             [PromptBehavior::Steer, PromptBehavior::FollowUp]
         );
-        let user_text = agent
-            .history
+        let input = responses_input(&agent.transcript);
+        let user_text = input
             .iter()
             .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
             .filter_map(|message| message.pointer("/content/0/text").and_then(Value::as_str))
