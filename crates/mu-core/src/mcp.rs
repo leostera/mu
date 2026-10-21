@@ -73,6 +73,8 @@ struct RemoteTool {
 
 struct ConnectedServer {
     client: Mutex<McpClient>,
+    /// The server advertised the `resources` capability at initialization.
+    has_resources: bool,
 }
 
 enum McpClient {
@@ -91,6 +93,8 @@ struct ExposedTool {
 #[derive(Clone)]
 pub(crate) struct McpRegistry {
     tools: BTreeMap<String, ExposedTool>,
+    /// Connected servers that offer resources, by configured name (for the resource tools).
+    resource_servers: BTreeMap<String, Arc<ConnectedServer>>,
     server_status: Vec<String>,
     auto_enable_codemode: bool,
 }
@@ -150,6 +154,11 @@ impl McpRegistry {
         for (name, server_exposure, tool_exposure, result) in connected {
             match result {
                 Ok((server, tools)) => {
+                    if server.has_resources {
+                        registry
+                            .resource_servers
+                            .insert(name.clone(), Arc::clone(&server));
+                    }
                     registry
                         .server_status
                         .push(format!("{name}: connected ({} tools)", tools.len()));
@@ -200,7 +209,38 @@ impl McpRegistry {
                 tool.exposure == Exposure::Direct || active_tools.contains(*name)
             })
             .map(|(_, tool)| tool.definition.clone())
+            .chain(self.resource_tool_definitions())
             .collect()
+    }
+
+    /// `list_mcp_resources`, `list_mcp_resource_templates` and `read_mcp_resource`, offered
+    /// whenever a connected server has resources (Pi's `extensions/mcp/resources.ts`).
+    fn resource_tool_definitions(&self) -> Vec<Value> {
+        if self.resource_servers.is_empty() {
+            return Vec::new();
+        }
+        let list_parameters = json!({
+            "type":"object",
+            "properties":{
+                "server":{"type":"string","description":"MCP server name. Omit to list every server with resources."},
+                "cursor":{"type":"string","description":"Opaque cursor from a previous call with the same server; omit for the first page."},
+            },
+            "additionalProperties":false,
+        });
+        vec![
+            json!({"type":"function","name":LIST_RESOURCES_TOOL,
+                "description":"Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.",
+                "parameters":list_parameters}),
+            json!({"type":"function","name":LIST_TEMPLATES_TOOL,
+                "description":"Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.",
+                "parameters":list_parameters}),
+            json!({"type":"function","name":READ_RESOURCE_TOOL,
+                "description":"Read a specific resource from an MCP server given the server name and resource URI.",
+                "parameters":{"type":"object","properties":{
+                    "server":{"type":"string","description":"MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources."},
+                    "uri":{"type":"string","description":"Resource URI to read. Must be one of the URIs returned by list_mcp_resources."},
+                },"required":["server","uri"],"additionalProperties":false}}),
+        ]
     }
 
     pub(crate) fn has_deferred_tools(&self) -> bool {
@@ -231,6 +271,7 @@ impl McpRegistry {
         self.tools
             .values()
             .map(|tool| tool.definition.clone())
+            .chain(self.resource_tool_definitions())
             .collect()
     }
 
@@ -247,6 +288,14 @@ impl McpRegistry {
         name: &str,
         arguments: &Value,
     ) -> Option<Result<McpToolResult, String>> {
+        if !self.resource_servers.is_empty()
+            && matches!(
+                name,
+                LIST_RESOURCES_TOOL | LIST_TEMPLATES_TOOL | READ_RESOURCE_TOOL
+            )
+        {
+            return Some(self.call_resource_tool(name, arguments).await);
+        }
         let tool = self.tools.get(name)?;
         Some(
             tool.server
@@ -259,10 +308,213 @@ impl McpRegistry {
     }
 }
 
+const LIST_RESOURCES_TOOL: &str = "list_mcp_resources";
+const LIST_TEMPLATES_TOOL: &str = "list_mcp_resource_templates";
+const READ_RESOURCE_TOOL: &str = "read_mcp_resource";
+
+/// MCP App user interfaces (`ui://` or `profile=mcp-app`) are for hosts that render them.
+fn is_mcp_app_resource(item: &Value) -> bool {
+    let uri = item
+        .get("uri")
+        .or_else(|| item.get("uriTemplate"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mime = item
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+    uri.starts_with("ui://")
+        || mime.contains("profile=mcp-app")
+        || mime.contains("profile=\"mcp-app\"")
+}
+
+/// A listed item without `_meta`/`icons`, tagged with its server.
+fn listed_resource(server: &str, item: &Value) -> Value {
+    let mut object = item.as_object().cloned().unwrap_or_default();
+    object.remove("_meta");
+    object.remove("icons");
+    let mut tagged = Map::new();
+    tagged.insert("server".into(), json!(server));
+    tagged.extend(object);
+    Value::Object(tagged)
+}
+
+impl McpRegistry {
+    fn resource_server(&self, name: &str) -> Result<&Arc<ConnectedServer>, String> {
+        self.resource_servers.get(name).ok_or_else(|| {
+            let available = self
+                .resource_servers
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "MCP server \"{name}\" has no resources{}",
+                if available.is_empty() {
+                    String::new()
+                } else {
+                    format!(". Servers with resources: {available}")
+                }
+            )
+        })
+    }
+
+    async fn list_all(
+        server: &ConnectedServer,
+        method: &str,
+        key: &str,
+    ) -> Result<Vec<Value>, String> {
+        let mut items = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..100 {
+            let params = cursor
+                .as_ref()
+                .map_or_else(|| json!({}), |c| json!({"cursor": c}));
+            let page = server.client.lock().await.request(method, params).await?;
+            items.extend(
+                page.get(key)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned);
+            if cursor.is_none() {
+                return Ok(items);
+            }
+        }
+        Err(format!("MCP {method} exceeded 100 pages"))
+    }
+
+    async fn call_resource_tool(
+        &self,
+        name: &str,
+        arguments: &Value,
+    ) -> Result<McpToolResult, String> {
+        let text = |key: &str| -> Result<Option<String>, String> {
+            match arguments.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(value)) => {
+                    Ok(Some(value.trim().to_owned()).filter(|v| !v.is_empty()))
+                }
+                Some(_) => Err(format!("{key} must be a string")),
+            }
+        };
+        let payload = if name == READ_RESOURCE_TOOL {
+            let server_name = text("server")?.ok_or("server must be provided")?;
+            let uri = text("uri")?.ok_or("uri must be provided")?;
+            let server = self.resource_server(&server_name)?;
+            let result = server
+                .client
+                .lock()
+                .await
+                .request("resources/read", json!({"uri": uri}))
+                .await?;
+            let contents = result
+                .get("contents")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut parts = Vec::new();
+            for item in &contents {
+                if contents.len() > 1 {
+                    parts.push(format!("{}:", item["uri"].as_str().unwrap_or_default()));
+                }
+                match item.get("text").and_then(Value::as_str) {
+                    Some(text) => parts.push(text.to_owned()),
+                    None => parts.push("[MCP blob resource omitted]".to_owned()),
+                }
+            }
+            let contents = contents
+                .into_iter()
+                .map(|mut item| {
+                    if let Some(object) = item.as_object_mut() {
+                        object.remove("_meta");
+                    }
+                    item
+                })
+                .collect::<Vec<_>>();
+            let content = if parts.is_empty() {
+                format!("Resource {uri} is empty.")
+            } else {
+                parts.join("\n")
+            };
+            return Ok(McpToolResult {
+                content,
+                structured_content: Some(
+                    json!({"server": server_name, "uri": uri, "contents": contents}),
+                ),
+                is_error: false,
+            });
+        } else {
+            let (method, key) = if name == LIST_RESOURCES_TOOL {
+                ("resources/list", "resources")
+            } else {
+                ("resources/templates/list", "resourceTemplates")
+            };
+            let visible = |item: &&Value| !is_mcp_app_resource(item);
+            match (text("server")?, text("cursor")?) {
+                (Some(server_name), cursor) => {
+                    let server = self.resource_server(&server_name)?;
+                    let params = cursor.map_or_else(|| json!({}), |c| json!({"cursor": c}));
+                    let page = server.client.lock().await.request(method, params).await?;
+                    let items = page
+                        .get(key)
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut payload = json!({
+                        "server": server_name,
+                        key: items.iter().filter(visible).map(|i| listed_resource(&server_name, i)).collect::<Vec<_>>(),
+                    });
+                    if let Some(next) = page.get("nextCursor") {
+                        payload["nextCursor"] = next.clone();
+                    }
+                    payload
+                }
+                (None, Some(_)) => {
+                    return Err("cursor can only be used when a server is specified".into());
+                }
+                (None, None) => {
+                    let (mut items, mut errors) = (Vec::new(), Vec::new());
+                    for (server_name, server) in &self.resource_servers {
+                        match Self::list_all(server, method, key).await {
+                            Ok(found) => items.extend(
+                                found
+                                    .iter()
+                                    .filter(visible)
+                                    .map(|i| listed_resource(server_name, i)),
+                            ),
+                            Err(error) => {
+                                errors.push(json!({"server": server_name, "error": error}))
+                            }
+                        }
+                    }
+                    let mut payload = json!({ key: items });
+                    if !errors.is_empty() {
+                        payload["errors"] = Value::Array(errors);
+                    }
+                    payload
+                }
+            }
+        };
+        Ok(McpToolResult {
+            content: payload.to_string(),
+            structured_content: Some(payload),
+            is_error: false,
+        })
+    }
+}
+
 impl Default for McpRegistry {
     fn default() -> Self {
         Self {
             tools: BTreeMap::new(),
+            resource_servers: BTreeMap::new(),
             server_status: Vec::new(),
             auto_enable_codemode: true,
         }
@@ -691,6 +943,7 @@ async fn connect_server(
     {
         return Err("MCP initialize result is missing required fields".into());
     }
+    let has_resources = initialized.pointer("/capabilities/resources").is_some();
     let protocol_version = initialized
         .get("protocolVersion")
         .and_then(Value::as_str)
@@ -749,6 +1002,7 @@ async fn connect_server(
         if cursor.is_none() {
             let server = Arc::new(ConnectedServer {
                 client: Mutex::new(client),
+                has_resources,
             });
             return Ok((server, tools));
         }
@@ -1267,6 +1521,83 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn resource_helpers_hide_app_uis_and_tag_servers() {
+        assert!(is_mcp_app_resource(&json!({"uri":"ui://widget"})));
+        assert!(is_mcp_app_resource(
+            &json!({"uri":"file:///a","mimeType":"text/html;profile=mcp-app"})
+        ));
+        assert!(!is_mcp_app_resource(
+            &json!({"uri":"file:///a","mimeType":"text/plain"})
+        ));
+        let tagged = listed_resource("s", &json!({"uri":"u","name":"n","_meta":{},"icons":[]}));
+        assert_eq!(tagged, json!({"server":"s","uri":"u","name":"n"}));
+    }
+
+    #[tokio::test]
+    async fn resource_tools_appear_only_with_resource_servers_and_validate_arguments() {
+        let mut registry = McpRegistry::default();
+        assert!(registry.resource_tool_definitions().is_empty());
+        assert!(
+            registry
+                .call("read_mcp_resource", &json!({}))
+                .await
+                .is_none()
+        );
+        let client = McpClient::Http(McpHttpClient {
+            client: Client::new(),
+            endpoint: Url::parse("http://127.0.0.1:1/").unwrap(),
+            headers: HeaderMap::new(),
+            session_id: None,
+            next_id: 1,
+            protocol_version: None,
+            request_timeout: Duration::from_secs(1),
+        });
+        registry.resource_servers.insert(
+            "docs".into(),
+            Arc::new(ConnectedServer {
+                client: Mutex::new(client),
+                has_resources: true,
+            }),
+        );
+        let names = registry
+            .resource_tool_definitions()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource"
+            ]
+        );
+        let missing = registry
+            .call("read_mcp_resource", &json!({"server":"docs"}))
+            .await
+            .unwrap();
+        assert_eq!(missing.err().as_deref(), Some("uri must be provided"));
+        let unknown = registry
+            .call("list_mcp_resources", &json!({"server":"nope"}))
+            .await
+            .unwrap();
+        assert!(
+            unknown
+                .err()
+                .unwrap()
+                .contains("Servers with resources: docs")
+        );
+        let cursor = registry
+            .call("list_mcp_resources", &json!({"cursor":"c"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            cursor.err().as_deref(),
+            Some("cursor can only be used when a server is specified")
+        );
+    }
 
     #[test]
     fn status_reports_when_no_servers_are_configured() {
