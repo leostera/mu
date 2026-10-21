@@ -222,7 +222,7 @@ async fn main() {
         }
         return;
     }
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_from(expand_pi_short_flags(std::env::args())) {
         Ok(cli) => cli,
         Err(error) => {
             let exit_code = if error.use_stderr() { 1 } else { 0 };
@@ -495,6 +495,26 @@ fn initial_prompt_from(
     Ok(initial_message::build(stdin, &files, &parsed.messages))
 }
 
+/// Pi's multi-letter short flags (`-ns`, `-xt`, …); clap only supports one-letter shorts.
+fn expand_pi_short_flags(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    const SHORTS: &[(&str, &str)] = &[
+        ("-xt", "--exclude-tools"),
+        ("-nt", "--no-tools"),
+        ("-nbt", "--no-builtin-tools"),
+        ("-ns", "--no-skills"),
+        ("-np", "--no-prompt-templates"),
+        ("-nc", "--no-context-files"),
+        ("-ne", "--no-extensions"),
+        ("-na", "--no-approve"),
+    ];
+    args.into_iter()
+        .map(|arg| match SHORTS.iter().find(|(short, _)| *short == arg) {
+            Some((_, long)) => (*long).to_owned(),
+            None => arg,
+        })
+        .collect()
+}
+
 /// `--model <pattern>:<level>` → (`<pattern>`, level) when the suffix is a valid thinking level;
 /// any other `:` text stays part of the model id.
 fn split_thinking_suffix(
@@ -526,6 +546,27 @@ mod tests {
     use super::{Cli, select_session};
     use clap::{CommandFactory, Parser};
     use std::path::PathBuf;
+
+    #[test]
+    fn pi_multi_letter_short_flags_expand_to_long_flags() {
+        let expanded = super::expand_pi_short_flags(
+            ["mu", "-ns", "-xt", "bash", "-nbt", "hello"].map(String::from),
+        );
+        assert_eq!(
+            expanded,
+            [
+                "mu",
+                "--no-skills",
+                "--exclude-tools",
+                "bash",
+                "--no-builtin-tools",
+                "hello"
+            ]
+        );
+        let cli = Cli::try_parse_from(expanded).expect("parse expanded flags");
+        assert!(cli.no_skills && cli.no_builtin_tools);
+        assert_eq!(cli.exclude_tools, ["bash"]);
+    }
 
     #[test]
     fn model_thinking_suffix_is_split_only_for_valid_levels() {
