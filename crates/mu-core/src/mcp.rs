@@ -917,7 +917,7 @@ fn project_is_trusted(agent_dir: &Path, cwd: &Path) -> Result<bool, String> {
     }
     let trust_path = agent_dir.join("trust.json");
     if !trust_path.exists() {
-        return Ok(false);
+        return Ok(default_project_trust(agent_dir));
     }
     let source = std::fs::read_to_string(&trust_path)
         .map_err(|error| format!("{}: {error}", trust_path.display()))?;
@@ -944,9 +944,20 @@ fn project_is_trusted(agent_dir: &Path, cwd: &Path) -> Result<bool, String> {
             }
         }
         if !current.pop() {
-            return Ok(false);
+            return Ok(default_project_trust(agent_dir));
         }
     }
+}
+
+/// Pi's global `defaultProjectTrust` when no decision is stored: `always` trusts, `never` and
+/// `ask` do not (Mu has no startup prompt yet, so `ask` behaves like `never`).
+fn default_project_trust(agent_dir: &Path) -> bool {
+    let settings = crate::settings::Settings::load(agent_dir, agent_dir, false);
+    settings
+        .get("defaultProjectTrust")
+        .as_ref()
+        .and_then(Value::as_str)
+        == Some("always")
 }
 
 fn load_config(agent_dir: &Path, project_cwd: &Path) -> Result<(Vec<ServerConfig>, bool), String> {
@@ -1481,6 +1492,32 @@ mod tests {
         assert_eq!(project_is_trusted(&dir, &project), Ok(true));
         save_project_trust(&dir, &project, false).unwrap();
         assert_eq!(project_is_trusted(&dir, &project), Ok(false));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn default_project_trust_always_applies_only_without_a_stored_decision() {
+        let dir = std::env::temp_dir().join(format!("mu-deftrust-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"defaultProjectTrust":"always"}"#,
+        )
+        .unwrap();
+        assert_eq!(project_is_trusted(&dir, &dir), Ok(true));
+        save_project_trust(&dir, &dir, false).unwrap();
+        assert_eq!(
+            project_is_trusted(&dir, &dir),
+            Ok(false),
+            "stored decision wins"
+        );
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"defaultProjectTrust":"never"}"#,
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join("trust.json")).unwrap();
+        assert_eq!(project_is_trusted(&dir, &dir), Ok(false));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
