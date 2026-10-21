@@ -24,3 +24,6 @@ tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
 yaml-rust2.workspace = true
+jsonschema = { version = "0.59.0", default-features = false }
+async-trait = "0.1.92"
+tokio-util = "0.7.20"

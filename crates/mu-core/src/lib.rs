@@ -4,6 +4,7 @@
 //! runtime can evolve without changing the on-disk compatibility contract.
 
 mod agent;
+pub mod agent_loop;
 mod codemode;
 mod mcp;
 pub mod path_utils;
