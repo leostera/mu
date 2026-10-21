@@ -2573,7 +2573,18 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         "reload" => {
             let status = match agent.try_lock() {
-                Ok(mut agent) => agent.reload_resources(),
+                Ok(mut agent) => {
+                    let resources = agent.reload_resources();
+                    app.keybindings = keybindings::Keybindings::load(agent.agent_dir());
+                    app.extra_commands = agent
+                        .dynamic_slash_commands()
+                        .into_iter()
+                        .map(|(name, description, hint)| {
+                            chrome::SlashCommand::dynamic(name, description, hint)
+                        })
+                        .collect();
+                    format!("{resources}, keybindings")
+                }
                 Err(_) => "Mu is busy.".to_owned(),
             };
             app.show_status(status);
