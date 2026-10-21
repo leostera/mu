@@ -387,6 +387,14 @@ fn bedrock_region_from_host(host: &str) -> Option<String> {
     rest.strip_suffix(".amazonaws.com").map(str::to_owned)
 }
 
+/// How a Gemini request authenticates: Generative AI takes an API key header, Vertex AI an OAuth
+/// access token.
+#[derive(Clone)]
+enum GoogleAuth {
+    ApiKey(String),
+    Bearer(String),
+}
+
 #[derive(Clone)]
 enum ProviderTransport {
     OpenCode {
@@ -417,7 +425,7 @@ enum ProviderTransport {
     Google {
         http: Client,
         endpoint: Url,
-        key: String,
+        auth: GoogleAuth,
     },
     Demo,
     #[cfg(test)]
@@ -1602,7 +1610,7 @@ impl Provider {
         &self,
         http: &Client,
         endpoint: &Url,
-        key: &str,
+        auth: &GoogleAuth,
         history: &[Value],
         tools: &[Value],
         on_event: &mut impl FnMut(AgentEvent),
@@ -1615,9 +1623,12 @@ impl Provider {
         if !self.appendix.is_empty() {
             system = format!("{system}\n\n{}", self.appendix);
         }
-        let response = http
-            .post(endpoint.clone())
-            .header("x-goog-api-key", key)
+        let request = http.post(endpoint.clone());
+        let request = match auth {
+            GoogleAuth::Bearer(token) => request.bearer_auth(token),
+            GoogleAuth::ApiKey(key) => request.header("x-goog-api-key", key),
+        };
+        let response = request
             .json(&{
                 let mut body = google::request_body(&system, history, tools);
                 if self.supports_reasoning {
@@ -1955,11 +1966,11 @@ impl Provider {
         if let ProviderTransport::Google {
             http,
             endpoint,
-            key,
+            auth,
         } = &self.transport
         {
             return self
-                .complete_google(http, endpoint, key, history, tools, on_event)
+                .complete_google(http, endpoint, auth, history, tools, on_event)
                 .await;
         }
         if let ProviderTransport::Completions {
@@ -2299,25 +2310,32 @@ fn connect_custom_provider(
             | "anthropic-messages"
             | "openai-completions"
             | "google-generative-ai"
+            | "google-vertex"
             | "bedrock-converse-stream",
         ) => {}
         other => {
             return Err(AgentError::Configuration(format!(
-                "Provider `{}` uses unsupported api `{}` (supported: openai-responses, openai-completions, anthropic-messages, google-generative-ai, bedrock-converse-stream)",
+                "Provider `{}` uses unsupported api `{}` (supported: openai-responses, openai-completions, anthropic-messages, google-generative-ai, google-vertex, bedrock-converse-stream)",
                 config.provider,
                 other.unwrap_or("none")
             )));
         }
     }
-    let base = entry
-        .get("baseUrl")
-        .and_then(Value::as_str)
-        .ok_or_else(unsupported)?;
+    let base = match (
+        entry.get("baseUrl").and_then(Value::as_str),
+        entry.get("api").and_then(Value::as_str),
+    ) {
+        (Some(base), _) => base.to_owned(),
+        (None, Some("google-vertex")) => vertex_base_url(entry)?,
+        (None, _) => return Err(unsupported()),
+    };
+    let base = base.as_str();
     let mut endpoint = Url::parse(base)
         .map_err(|error| AgentError::Configuration(format!("invalid baseUrl: {error}")))?;
     let anthropic = entry.get("api").and_then(Value::as_str) == Some("anthropic-messages");
     let completions = entry.get("api").and_then(Value::as_str) == Some("openai-completions");
-    let google = entry.get("api").and_then(Value::as_str) == Some("google-generative-ai");
+    let vertex = entry.get("api").and_then(Value::as_str) == Some("google-vertex");
+    let google = vertex || entry.get("api").and_then(Value::as_str) == Some("google-generative-ai");
     let bedrock = entry.get("api").and_then(Value::as_str) == Some("bedrock-converse-stream");
     let suffix = if bedrock {
         format!("model/{}/converse-stream", config.model)
@@ -2408,7 +2426,11 @@ fn connect_custom_provider(
             ProviderTransport::Google {
                 http: http.clone(),
                 endpoint,
-                key: token,
+                auth: if vertex {
+                    GoogleAuth::Bearer(token)
+                } else {
+                    GoogleAuth::ApiKey(token)
+                },
             }
         } else if completions {
             ProviderTransport::Completions {
@@ -2463,9 +2485,46 @@ fn provider_http_client(headers: Option<&Value>) -> Result<Client, AgentError> {
         .map_err(|error| AgentError::Configuration(format!("cannot build HTTP client: {error}")))
 }
 
+/// Vertex AI's regional endpoint from `project` and `location` (default `us-central1`) when
+/// `models.json` gives no `baseUrl`.
+fn vertex_base_url(entry: &Value) -> Result<String, AgentError> {
+    let project = entry
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT").ok())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| {
+            AgentError::Configuration(
+                "Vertex AI needs `baseUrl`, or `project` (or GOOGLE_CLOUD_PROJECT) in models.json"
+                    .into(),
+            )
+        })?;
+    let location = entry
+        .get("location")
+        .and_then(Value::as_str)
+        .unwrap_or("us-central1");
+    let host = if location == "global" {
+        "aiplatform.googleapis.com".to_owned()
+    } else {
+        format!("{location}-aiplatform.googleapis.com")
+    };
+    Ok(format!(
+        "https://{host}/v1/projects/{project}/locations/{location}/publishers/google"
+    ))
+}
+
 fn api_name(transport: &ProviderTransport) -> &'static str {
     if matches!(transport, ProviderTransport::Demo) {
         "mu-demo"
+    } else if matches!(
+        transport,
+        ProviderTransport::Google {
+            auth: GoogleAuth::Bearer(_),
+            ..
+        }
+    ) {
+        "google-vertex"
     } else if matches!(transport, ProviderTransport::Google { .. }) {
         "google-generative-ai"
     } else if matches!(transport, ProviderTransport::Completions { .. }) {
@@ -6441,6 +6500,26 @@ mod tests {
             "The following is a summary of a branch that this conversation came back from:\n\n<summary>\nexplored X</summary>"
         );
         assert_eq!(inputs.len(), 2);
+    }
+
+    #[test]
+    fn vertex_base_url_is_built_from_project_and_location() {
+        let url =
+            super::vertex_base_url(&serde_json::json!({"project":"p1","location":"europe-west4"}))
+                .unwrap();
+        assert_eq!(
+            url,
+            "https://europe-west4-aiplatform.googleapis.com/v1/projects/p1/locations/europe-west4/publishers/google"
+        );
+        let global =
+            super::vertex_base_url(&serde_json::json!({"project":"p1","location":"global"}))
+                .unwrap();
+        assert!(
+            global
+                .starts_with("https://aiplatform.googleapis.com/v1/projects/p1/locations/global/")
+        );
+        let default = super::vertex_base_url(&serde_json::json!({"project":"p1"})).unwrap();
+        assert!(default.contains("us-central1-aiplatform"));
     }
 
     #[test]
