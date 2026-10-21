@@ -1900,6 +1900,21 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "logout" => {
+            let provider = if argument.is_empty() { None } else { Some(argument.to_owned()) };
+            let status = match agent.try_lock() {
+                Err(_) => "Mu is busy.".to_owned(),
+                Ok(agent) => {
+                    let provider = provider.unwrap_or_else(|| agent.provider().to_owned());
+                    match agent.logout(&provider) {
+                        Ok(true) => format!("Removed credentials for {provider}"),
+                        Ok(false) => format!("No stored credentials for {provider}"),
+                        Err(error) => format!("Could not log out: {error}"),
+                    }
+                }
+            };
+            app.show_status(status);
+        }
         "copy" => {
             let status = match last_assistant_text(&app.messages) {
                 None => "No agent messages to copy yet.".to_owned(),

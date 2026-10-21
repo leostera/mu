@@ -3153,6 +3153,12 @@ impl MuAgent {
         stats
     }
 
+    /// Remove a provider's stored credential from `auth.json`; returns whether one existed.
+    pub fn logout(&self, provider: &str) -> Result<bool, AgentError> {
+        crate::auth::remove(&self.agent_dir.join("auth.json"), provider)
+            .map_err(|error| AgentError::Configuration(error.to_string()))
+    }
+
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }
@@ -5260,6 +5266,17 @@ mod tests {
         };
         assert_eq!(token, "runtime");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn logout_removes_the_stored_credential() {
+        let root = std::env::temp_dir().join(format!("mu-logout-{}", uuid::Uuid::new_v4()));
+        let agent = scripted_agent(&root, vec![]);
+        let auth = root.join("agent/auth.json");
+        crate::auth::set_api_key(&auth, "acme", "k").unwrap();
+        assert!(agent.logout("acme").unwrap());
+        assert!(!agent.logout("acme").unwrap());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
