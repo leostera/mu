@@ -1865,6 +1865,22 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "thinking" => {
+            let reply = match agent.try_lock() {
+                Err(_) => "Mu is busy.".to_owned(),
+                Ok(agent) if argument.is_empty() => {
+                    format!("Thinking level: {}", format!("{:?}", agent.thinking()).to_lowercase())
+                }
+                Ok(mut agent) => match argument.parse::<mu_core::ThinkingSetting>() {
+                    Ok(level) => {
+                        agent.set_thinking(level);
+                        format!("Thinking level: {argument}")
+                    }
+                    Err(message) => message,
+                },
+            };
+            app.show_status(reply);
+        }
         "session" => {
             let text = agent
                 .try_lock()
@@ -2559,6 +2575,31 @@ mod tests {
         assert_eq!(app.queued_prompts.len(), 1);
         assert_eq!(app.messages[0].text, "add a test");
         assert!(matches!(app.messages[0].role, Role::User));
+    }
+
+    #[tokio::test]
+    async fn thinking_command_reports_and_sets_the_level() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.input = "/thinking high".chars().collect();
+        execute_command(&mut app, &agent);
+        assert_eq!(app.statuses.last().unwrap().1, "Thinking level: high");
+        assert_eq!(
+            agent.lock().await.thinking(),
+            mu_core::ThinkingSetting::High
+        );
+        app.input = "/thinking".chars().collect();
+        execute_command(&mut app, &agent);
+        assert_eq!(app.statuses.last().unwrap().1, "Thinking level: high");
+        app.input = "/thinking loud".chars().collect();
+        execute_command(&mut app, &agent);
+        assert!(
+            app.statuses
+                .last()
+                .unwrap()
+                .1
+                .starts_with("Invalid thinking level")
+        );
     }
 
     #[test]

@@ -2423,6 +2423,7 @@ impl Prepared {
             no_tools: self.no_tools,
             tool_selection: self.tool_selection,
             excluded_tools: self.excluded_tools,
+            thinking: self.prompt.thinking,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup,
             active_mcp_tools,
@@ -2449,6 +2450,7 @@ pub struct MuAgent {
     no_tools: bool,
     tool_selection: Option<ToolSelection>,
     excluded_tools: Vec<String>,
+    thinking: ThinkingSetting,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -2561,6 +2563,7 @@ impl MuAgent {
             no_tools: false,
             tool_selection: None,
             excluded_tools: Vec::new(),
+            thinking: ThinkingSetting::default(),
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup: None,
             active_mcp_tools,
@@ -2638,6 +2641,16 @@ impl MuAgent {
             write_session(&self.session, &self.session_path)?;
         }
         Ok(())
+    }
+
+    /// Set the reasoning level for later requests (`/thinking`).
+    pub fn set_thinking(&mut self, level: ThinkingSetting) {
+        self.provider.reasoning_effort = level.effort();
+        self.thinking = level;
+    }
+
+    pub fn thinking(&self) -> ThinkingSetting {
+        self.thinking
     }
 
     pub fn select_model(&mut self, model: &str) -> Result<bool, AgentError> {
