@@ -1872,6 +1872,23 @@ const HOTKEYS: &str = "**Keyboard Shortcuts**
 | `Ctrl+D` | Exit (when editor is empty) |
 | `/` | Slash commands |";
 
+/// `/model <id>` or `/model <provider>/<id>`; a unique id substring also matches.
+fn resolve_model_argument(models: &[String], argument: &str) -> Option<String> {
+    let wanted = argument
+        .rsplit('/')
+        .next()
+        .unwrap_or(argument)
+        .to_lowercase();
+    if let Some(exact) = models.iter().find(|m| m.to_lowercase() == wanted) {
+        return Some(exact.clone());
+    }
+    let hits = models
+        .iter()
+        .filter(|m| m.to_lowercase().contains(&wanted))
+        .collect::<Vec<_>>();
+    (hits.len() == 1).then(|| hits[0].clone())
+}
+
 fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
     let input = app.input_text();
     let command_line = input.trim_start_matches('/');
@@ -1935,6 +1952,24 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "model" if !argument.is_empty() => {
+            let status = match resolve_model_argument(&app.models, argument) {
+                None => format!("No unique model matches \"{argument}\""),
+                Some(model) => match agent.try_lock() {
+                    Err(_) => "Mu is busy.".to_owned(),
+                    Ok(mut agent) => match agent.select_model(&model) {
+                        Ok(true) => {
+                            app.model_selection =
+                                app.models.iter().position(|m| *m == model).unwrap_or(0);
+                            app.model = model.clone();
+                            format!("Switched to {model}")
+                        }
+                        _ => format!("Could not switch to {model}"),
+                    },
+                },
+            };
+            app.show_status(status);
+        }
         "model" => {
             app.model_selection = app
                 .models
@@ -2902,6 +2937,24 @@ mod tests {
         assert_eq!(tool.name, "bash");
         assert!(tool.output.as_deref().unwrap().contains("local-ok"));
         assert!(app.input.is_empty() && !app.loading);
+    }
+
+    #[test]
+    fn model_argument_matches_by_id_provider_prefix_or_unique_substring() {
+        let models = ["mu-demo", "mu-demo-alt", "other"]
+            .map(String::from)
+            .to_vec();
+        let find = |q| super::resolve_model_argument(&models, q);
+        assert_eq!(find("mu-demo-alt").as_deref(), Some("mu-demo-alt"));
+        assert_eq!(
+            find("mu-demo").as_deref(),
+            Some("mu-demo"),
+            "exact beats substring"
+        );
+        assert_eq!(find("acme/OTHER").as_deref(), Some("other"));
+        assert_eq!(find("alt").as_deref(), Some("mu-demo-alt"));
+        assert_eq!(find("mu"), None, "ambiguous");
+        assert_eq!(find("zzz"), None);
     }
 
     #[test]
