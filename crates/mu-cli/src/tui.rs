@@ -2001,16 +2001,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         "session" => {
             let text = agent
                 .try_lock()
-                .map(|agent| {
-                    let info = agent.session_info();
-                    format!(
-                        "Session: {}\nName: {}\nFile: {}\nCreated: {}",
-                        info.id,
-                        info.name.as_deref().unwrap_or("(unnamed)"),
-                        info.path.display(),
-                        info.timestamp
-                    )
-                })
+                .map(|agent| agent.session_summary())
                 .unwrap_or_else(|_| "Session info is unavailable while Mu is busy.".into());
             app.messages.push(Message {
                 role: Role::Assistant,

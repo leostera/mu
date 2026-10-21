@@ -3347,6 +3347,41 @@ impl MuAgent {
         Ok(true)
     }
 
+    /// Text block for `/session`: identity plus message counts and token/cost totals.
+    pub fn session_summary(&self) -> String {
+        let info = self.session_info();
+        let (mut user, mut assistant, mut tool_results, mut tool_calls) = (0, 0, 0, 0);
+        for entry in self.session.entries() {
+            let Some(message) = entry.extra_fields().get("message") else {
+                continue;
+            };
+            match message["role"].as_str() {
+                Some("user") => user += 1,
+                Some("assistant") => {
+                    assistant += 1;
+                    tool_calls += message["content"].as_array().map_or(0, |blocks| {
+                        blocks.iter().filter(|b| b["type"] == "toolCall").count()
+                    });
+                }
+                Some("toolResult") => tool_results += 1,
+                _ => {}
+            }
+        }
+        let stats = self.footer_stats();
+        format!(
+            "Session: {}\nName: {}\nFile: {}\nCreated: {}\nMessages: {user} user, {assistant} assistant, {tool_calls} tool calls, {tool_results} tool results\nTokens: {} input, {} output, {} cache read, {} cache write\nCost: ${:.3}",
+            info.id,
+            info.name.as_deref().unwrap_or("(unnamed)"),
+            info.path.display(),
+            info.timestamp,
+            stats.input,
+            stats.output,
+            stats.cache_read,
+            stats.cache_write,
+            stats.cost,
+        )
+    }
+
     /// Display name for a model id (`name` in `models.json`, else the id).
     pub fn model_display_name(&self, model: &str) -> String {
         configured_model_entry(&self.agent_dir, &self.provider_id, model)
@@ -5690,6 +5725,35 @@ mod tests {
         );
         assert_eq!(rows[2].depth, 1);
         assert!(agent.navigate_to("nope").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn session_summary_counts_messages_and_tokens() {
+        let root = std::env::temp_dir().join(format!("mu-summary-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![]);
+        agent.session.append_user_text("hi");
+        agent.session.append_assistant_response(
+            "a",
+            "p",
+            "m",
+            mu_session::AssistantTurnResponse {
+                thinking: String::new(),
+                thinking_signature: None,
+                text: "yo".into(),
+                usage: mu_session::MessageUsage {
+                    input: 7,
+                    output: 3,
+                    ..Default::default()
+                },
+            },
+        );
+        let summary = agent.session_summary();
+        assert!(
+            summary.contains("Messages: 1 user, 1 assistant, 0 tool calls, 0 tool results"),
+            "{summary}"
+        );
+        assert!(summary.contains("Tokens: 7 input, 3 output"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
