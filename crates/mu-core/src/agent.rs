@@ -2476,6 +2476,13 @@ impl MuAgent {
         expand_skill_prompt(prompt, &self.skills, on_event)
     }
 
+    /// The `theme` setting (project settings override agent settings), if any.
+    pub fn theme_name(&self) -> Option<String> {
+        configured_setting(&self.agent_dir, &self.cwd, "theme", |value| {
+            value.as_str().map(str::to_owned)
+        })
+    }
+
     pub fn hide_thinking_block(&self) -> bool {
         self.hide_thinking_block
     }

@@ -1,5 +1,7 @@
 mod layout;
+mod markdown;
 mod terminal;
+mod theme;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -30,7 +32,11 @@ use tokio::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use self::layout::ChatViewport;
+use self::{
+    layout::ChatViewport,
+    markdown::{MarkdownOptions, MarkdownStyle, render_markdown},
+    theme::Theme,
+};
 
 #[derive(Clone)]
 struct Message {
@@ -1021,6 +1027,7 @@ struct App {
     queued_prompts: VecDeque<(String, PromptBehavior)>,
     hide_thinking: bool,
     tools_expanded: bool,
+    theme: Theme,
 }
 
 impl Deref for App {
@@ -1054,6 +1061,9 @@ impl App {
         self.session_path = agent.session_path().display().to_string();
         self.prompt_queue = agent.prompt_queue();
         self.hide_thinking = agent.hide_thinking_block();
+        if let Some(theme) = agent.theme_name().and_then(|name| Theme::named(&name)) {
+            self.theme = theme;
+        }
         self.models = agent.model_choices().to_vec();
         self.messages.messages = agent
             .session_transcript()
@@ -1120,6 +1130,7 @@ impl App {
             queued_prompts: VecDeque::new(),
             hide_thinking: false,
             tools_expanded: false,
+            theme: Theme::dark(),
         }
     }
 
@@ -2032,39 +2043,60 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         if index > 0 {
             lines.push(Line::from(""));
         }
-        let (label, color) = match message.role {
-            Role::User => ("› you", Color::Cyan),
-            Role::Assistant => (
-                "◆ mu",
-                if message.error {
-                    Color::Red
-                } else {
-                    Color::Green
-                },
-            ),
-        };
-        lines.push(Line::from(Span::styled(
-            label,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )));
-        if !app.hide_thinking && !message.thinking.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  ◇ thinking",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            )));
-            for line in message.thinking.lines() {
+        if matches!(message.role, Role::User) {
+            lines.extend(user_message_lines(&message.text, area.width, &app.theme));
+            continue;
+        }
+        let markdown_style = MarkdownStyle::from_theme(&app.theme);
+        let thinking_style = app.theme.fg("thinkingText").add_modifier(Modifier::ITALIC);
+        let has_visible_content = !message.text.trim().is_empty()
+            || (!app.hide_thinking && !message.thinking.trim().is_empty());
+        if has_visible_content {
+            lines.push(Line::from(""));
+        }
+        if !message.thinking.trim().is_empty() {
+            if app.hide_thinking {
                 lines.push(Line::from(vec![
-                    Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        line.to_owned(),
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
+                    Span::raw(" "),
+                    Span::styled("Thinking...", thinking_style),
                 ]));
+            } else {
+                lines.extend(render_markdown(
+                    message.thinking.trim(),
+                    usize::from(area.width),
+                    &markdown_style,
+                    &MarkdownOptions {
+                        padding_x: 1,
+                        text: thinking_style,
+                        ..MarkdownOptions::default()
+                    },
+                ));
             }
+            if !message.text.trim().is_empty() {
+                lines.push(Line::from(""));
+            }
+        }
+        if message.error {
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(format!("Error: {}", message.text), app.theme.fg("error")),
+            ]));
+        } else if !message.text.trim().is_empty() {
+            lines.extend(render_markdown(
+                message.text.trim(),
+                usize::from(area.width),
+                &markdown_style,
+                &MarkdownOptions {
+                    padding_x: 1,
+                    text: app.theme.fg("text"),
+                    ..MarkdownOptions::default()
+                },
+            ));
+        } else if app.loading && message.thinking.is_empty() && message.tools.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("Thinking…", app.theme.fg("muted")),
+            ]));
         }
         for tool in &message.tools {
             let status = if tool.error {
@@ -2128,28 +2160,6 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 }
             }
         }
-        let content = if message.text.is_empty()
-            && app.loading
-            && message.thinking.is_empty()
-            && message.tools.is_empty()
-        {
-            "Thinking…"
-        } else {
-            &message.text
-        };
-        for line in content.split('\n') {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    line.to_owned(),
-                    Style::default().fg(if message.error {
-                        Color::Red
-                    } else {
-                        Color::White
-                    }),
-                ),
-            ]));
-        }
     }
     for (prompt, behavior) in &app.queued_prompts {
         let label = match behavior {
@@ -2195,6 +2205,22 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             &mut state,
         );
     }
+}
+
+/// A user message: Markdown on the `userMessageBg` background with one row of padding.
+fn user_message_lines(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    render_markdown(
+        text,
+        usize::from(width),
+        &MarkdownStyle::from_theme(theme),
+        &MarkdownOptions {
+            padding_x: 1,
+            padding_y: 1,
+            text: theme.fg("userMessageText"),
+            background: Some(theme.color("userMessageBg")),
+            preserve_list_markers: true,
+        },
+    )
 }
 
 fn skill_name(tool: &ToolActivity) -> Option<&str> {
@@ -2715,8 +2741,16 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(screen.contains("gpt-6-luna"));
-        assert!(screen.contains("› you"));
+        assert!(screen.contains("Check this project"));
         assert!(screen.contains("Ready."));
+        // User messages sit on Pi's `userMessageBg` background.
+        let buffer = terminal.backend().buffer();
+        let user_row = row_with_text(terminal.backend(), "Check this project");
+        let background = buffer[(0, u16::try_from(user_row).unwrap())].bg;
+        assert_eq!(
+            background,
+            super::theme::Theme::dark().color("userMessageBg")
+        );
         assert!(screen.contains("Enter send"));
         assert!(screen.contains("session mu-session.jsonl"));
     }
