@@ -119,6 +119,7 @@ struct McpHttpClient {
 }
 
 pub(crate) struct McpToolResult {
+    pub images: Vec<crate::tools::ToolImage>,
     pub content: String,
     pub structured_content: Option<Value>,
     pub is_error: bool,
@@ -512,6 +513,7 @@ impl McpRegistry {
                 parts.join("\n")
             };
             return Ok(McpToolResult {
+                images: Vec::new(),
                 content,
                 structured_content: Some(
                     json!({"server": server_name, "uri": uri, "contents": contents}),
@@ -571,6 +573,7 @@ impl McpRegistry {
             }
         };
         Ok(McpToolResult {
+            images: Vec::new(),
             content: payload.to_string(),
             structured_content: Some(payload),
             is_error: false,
@@ -991,6 +994,11 @@ fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
                 block.get("text").and_then(Value::as_str).map(str::to_owned)
             } else if block.get("type").and_then(Value::as_str) == Some("resource_link") {
                 Some(resource_link_text(block))
+            } else if block.get("type").and_then(Value::as_str) == Some("image")
+                && block.get("data").and_then(Value::as_str).is_some()
+                && block.get("mimeType").and_then(Value::as_str).is_some()
+            {
+                None
             } else if block.get("type").and_then(Value::as_str) == Some("resource") {
                 let resource = block.get("resource").unwrap_or(&Value::Null);
                 Some(match resource.get("text").and_then(Value::as_str) {
@@ -1006,13 +1014,28 @@ fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    if content.is_empty() {
+    if content.is_empty()
+        && !blocks
+            .iter()
+            .any(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+    {
         if let Some(structured) = result.get("structuredContent") {
             content =
                 serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string());
         }
     }
+    let images = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|block| {
+            Some(crate::tools::ToolImage {
+                data: block.get("data")?.as_str()?.to_owned(),
+                mime_type: block.get("mimeType")?.as_str()?.to_owned(),
+            })
+        })
+        .collect();
     Ok(McpToolResult {
+        images,
         content,
         structured_content: result.get("structuredContent").cloned(),
         is_error: result
@@ -1731,6 +1754,26 @@ mod tests {
     }
 
     #[test]
+    fn image_blocks_become_attachments_not_placeholders() {
+        let result = parse_tool_result(json!({"content":[
+            {"type":"text","text":"chart"},
+            {"type":"image","data":"QUJD","mimeType":"image/png"},
+        ]}))
+        .unwrap();
+        assert_eq!(result.content, "chart");
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(
+            (
+                result.images[0].mime_type.as_str(),
+                result.images[0].data.as_str()
+            ),
+            ("image/png", "QUJD")
+        );
+        let broken = parse_tool_result(json!({"content":[{"type":"image"}]})).unwrap();
+        assert!(broken.images.is_empty() && broken.content == "[MCP image content omitted]");
+    }
+
+    #[test]
     fn embedded_blob_resources_in_tool_results_are_decoded() {
         use base64::Engine;
         let blob = base64::engine::general_purpose::STANDARD.encode("hello");
@@ -1765,6 +1808,7 @@ mod tests {
     #[test]
     fn empty_error_results_name_the_failing_tool() {
         let result = |content: &str, is_error| McpToolResult {
+            images: Vec::new(),
             content: content.into(),
             structured_content: None,
             is_error,

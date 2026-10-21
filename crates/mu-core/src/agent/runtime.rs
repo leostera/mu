@@ -553,8 +553,9 @@ impl ToolRuntime {
     ) -> Result<AgentToolResult, String> {
         let mcp = lock(&self.shared).mcp.clone();
         match mcp.call(name, params).await {
-            Some(Ok(result)) => Ok(flatten_result(
+            Some(Ok(result)) => Ok(flatten_result_with_images(
                 result.content,
+                result.images,
                 result.is_error,
                 result.structured_content,
             )),
