@@ -1830,6 +1830,28 @@ fn session_transcript(session: &SessionDocument) -> Vec<SessionTranscriptMessage
     transcript
 }
 
+/// The active branch as Pi-style JSON entries (`type`, `id`, and the entry's own fields).
+pub(crate) fn branch_entry_values(session: &SessionDocument) -> Vec<Value> {
+    session
+        .active_branch_entries()
+        .into_iter()
+        .map(|entry| {
+            let mut value = serde_json::Map::new();
+            value.insert("type".into(), json!(entry.entry_type.as_str()));
+            if let Some(id) = &entry.id {
+                value.insert("id".into(), json!(id.as_str()));
+            }
+            value.extend(
+                entry
+                    .extra_fields()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
+            Value::Object(value)
+        })
+        .collect()
+}
+
 /// Message content as blocks; Pi stores plain-text user messages as a bare string.
 pub(crate) fn message_blocks(message: &serde_json::Map<String, Value>) -> Vec<Value> {
     match message.get("content") {
@@ -2280,6 +2302,39 @@ fn write_session(session: &SessionDocument, path: &Path) -> Result<(), AgentErro
         .map_err(|error| AgentError::Session(error.to_string()))
 }
 
+/// Result of [`MuAgent::compact`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompactionOutcome {
+    pub summary: String,
+    pub tokens_before: u64,
+}
+
+/// Plain-text rendering of messages for the summarizer.
+fn conversation_text(entries: &[Value]) -> String {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let message = entry.get("message")?.as_object()?;
+            let role = message.get("role")?.as_str()?;
+            let text = message_blocks(message)
+                .iter()
+                .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+                    Some("text") => block.get("text")?.as_str().map(str::to_owned),
+                    Some("toolCall") => Some(format!(
+                        "[tool call {}: {}]",
+                        block.get("name")?.as_str()?,
+                        block.get("arguments")?
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(format!("[{role}]: {text}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Token, cost, and context totals shown in Pi's footer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FooterStats {
@@ -2689,6 +2744,56 @@ impl MuAgent {
 
     pub fn session_name(&self) -> Option<&str> {
         self.session.session_name()
+    }
+
+    /// Summarize older history, append a `compaction` entry, and rebuild the transcript.
+    ///
+    /// Returns `Ok(None)` when there is nothing before the cut point to compact.
+    pub async fn compact(&mut self) -> Result<Option<CompactionOutcome>, AgentError> {
+        let settings = crate::compaction::CompactionSettings::default();
+        let path = branch_entry_values(&self.session);
+        let cut =
+            crate::compaction::find_cut_point(&path, 0, path.len(), settings.keep_recent_tokens);
+        let Some(first_kept_id) = path
+            .get(cut.first_kept_entry_index)
+            .and_then(|entry| entry.get("id")?.as_str().map(str::to_owned))
+        else {
+            return Ok(None);
+        };
+        let summarized = &path[..cut.first_kept_entry_index];
+        if !summarized
+            .iter()
+            .any(|entry| entry.get("message").is_some())
+        {
+            return Ok(None);
+        }
+        let tokens_before = path
+            .iter()
+            .filter_map(|entry| entry.get("message"))
+            .map(crate::compaction::estimate_tokens)
+            .sum();
+        let conversation = conversation_text(summarized);
+        let history = vec![json!({
+            "role":"user",
+            "content":[{"type":"input_text","text":format!(
+                "<conversation>\n{conversation}\n</conversation>\n\n{}",
+                crate::compaction::SUMMARIZATION_PROMPT
+            )}],
+        })];
+        let reply = self.provider.complete(&history, &[], &mut |_| {}).await?;
+        if reply.incomplete_reason.is_some() || reply.text.trim().is_empty() {
+            return Err(AgentError::Provider(
+                "Summarization did not complete; the session was not changed".into(),
+            ));
+        }
+        self.session
+            .append_compaction(&reply.text, &first_kept_id, tokens_before);
+        self.save_session()?;
+        self.transcript = runtime::session_messages(&self.session);
+        Ok(Some(CompactionOutcome {
+            summary: reply.text,
+            tokens_before,
+        }))
     }
 
     pub fn session_path(&self) -> &Path {
@@ -4631,6 +4736,63 @@ mod tests {
         );
         assert_eq!(super::QueueMode::from_setting("bogus"), None);
         assert_eq!(super::QueueMode::default(), super::QueueMode::OneAtATime);
+    }
+
+    #[tokio::test]
+    async fn compact_summarizes_old_history_and_rebuilds_the_transcript() {
+        let root = std::env::temp_dir().join(format!("mu-compact-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![Ok(scripted_reply("## Goal\nship it", vec![]))]);
+        for index in 0..6 {
+            agent
+                .session
+                .append_user_text(format!("question {index} {}", "x".repeat(20_000)));
+            agent.session.append_assistant_response(
+                "openai-responses",
+                "p",
+                "m",
+                mu_session::AssistantTurnResponse {
+                    thinking: String::new(),
+                    thinking_signature: None,
+                    text: format!("answer {index} {}", "y".repeat(20_000)),
+                    usage: mu_session::MessageUsage::default(),
+                },
+            );
+        }
+        let outcome = agent
+            .compact()
+            .await
+            .unwrap()
+            .expect("something to compact");
+        assert_eq!(outcome.summary, "## Goal\nship it");
+        assert!(outcome.tokens_before > 20_000);
+
+        let input = responses_input(&agent.transcript);
+        let first = input[0]["content"][0]["text"].as_str().unwrap();
+        assert!(first.starts_with("The conversation history before this point was compacted"));
+        assert!(first.contains("ship it"));
+        assert!(
+            input.len() < 12,
+            "old messages were dropped: {}",
+            input.len()
+        );
+        assert!(
+            input.last().unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("answer 5")
+        );
+        let saved = std::fs::read_to_string(agent.session_path()).unwrap();
+        assert!(saved.contains("\"type\":\"compaction\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_does_nothing_for_short_sessions_and_keeps_failed_summaries_out() {
+        let root = std::env::temp_dir().join(format!("mu-compact-short-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![]);
+        agent.session.append_user_text("hi");
+        assert_eq!(agent.compact().await.unwrap(), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

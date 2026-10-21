@@ -1884,6 +1884,24 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "compact" => {
+            let agent = Arc::clone(agent);
+            let status = match agent.try_lock() {
+                Err(_) => "Mu is busy.".to_owned(),
+                Ok(mut agent) => {
+                    match tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(agent.compact())
+                    }) {
+                        Ok(Some(outcome)) => {
+                            format!("Compacted context (was ~{} tokens)", outcome.tokens_before)
+                        }
+                        Ok(None) => "Nothing to compact".to_owned(),
+                        Err(error) => format!("Compaction failed: {error}"),
+                    }
+                }
+            };
+            app.show_status(status);
+        }
         "hotkeys" => app.messages.push(Message {
             role: Role::Assistant,
             text: HOTKEYS.into(),

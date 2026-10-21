@@ -531,6 +531,38 @@ impl SessionDocument {
         }));
     }
 
+    /// Append a Pi `compaction` entry: `summary` replaces everything before `first_kept_entry_id`.
+    pub fn append_compaction(
+        &mut self,
+        summary: &str,
+        first_kept_entry_id: &str,
+        tokens_before: u64,
+    ) {
+        let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
+        let id = next_entry_id(
+            &mut self
+                .entries()
+                .filter_map(|entry| entry.id.as_ref().map(|id| id.as_str().to_owned()))
+                .collect(),
+        );
+        let mut extra = BTreeMap::new();
+        extra.insert("summary".into(), Value::String(summary.to_owned()));
+        extra.insert(
+            "firstKeptEntryId".into(),
+            Value::String(first_kept_entry_id.to_owned()),
+        );
+        extra.insert("tokensBefore".into(), Value::from(tokens_before));
+        self.records.push(SessionRecord::Entry(SessionEntry {
+            entry_type: EntryType("compaction".into()),
+            id: Some(id),
+            parent_id: parent_id
+                .map(ParentReference::Entry)
+                .unwrap_or(ParentReference::Root),
+            timestamp: now_timestamp(),
+            extra,
+        }));
+    }
+
     pub fn append_model_change(&mut self, provider: &str, model_id: &str) {
         let parent_id = self.entries().last().and_then(|entry| entry.id.clone());
         let id = next_entry_id(
@@ -931,6 +963,27 @@ mod tests {
         AssistantTurnResponse, CURRENT_SESSION_VERSION, MessageCost, MessageUsage, ParentReference,
         SessionDocument, SessionRecord,
     };
+
+    #[test]
+    fn compaction_entries_serialize_in_pi_shape_and_link_to_the_branch() {
+        let mut session = SessionDocument::new("/tmp/p");
+        session.append_user_text("hello");
+        let kept = session.entries().last().unwrap().id.clone().unwrap();
+        session.append_compaction("the summary", kept.as_str(), 1234);
+        let line = session
+            .to_jsonl()
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "compaction");
+        assert_eq!(value["summary"], "the summary");
+        assert_eq!(value["firstKeptEntryId"], kept.as_str());
+        assert_eq!(value["tokensBefore"], 1234);
+        assert_eq!(value["parentId"], kept.as_str());
+    }
 
     #[test]
     fn session_names_are_pi_compatible_branch_entries() {

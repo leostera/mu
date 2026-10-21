@@ -148,15 +148,26 @@ fn synthesize_assistant_items(assistant: &AssistantMessage, input: &mut Vec<Valu
     }
 }
 
+const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
+
 /// Reconstruct the active branch of a session as transcript messages.
 pub(super) fn session_messages(session: &SessionDocument) -> Vec<AgentMessage> {
     let mut messages = Vec::new();
-    for entry in session.active_branch_entries() {
-        let Some(message) = entry
-            .extra_fields()
-            .get("message")
-            .and_then(Value::as_object)
-        else {
+    let path = super::branch_entry_values(session);
+    for entry in crate::compaction::build_context_entries(&path) {
+        if entry.get("type").and_then(Value::as_str) == Some("compaction") {
+            let summary = entry
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            messages.push(AgentMessage::user_text(
+                format!("{COMPACTION_SUMMARY_PREFIX}{summary}{COMPACTION_SUMMARY_SUFFIX}"),
+                0,
+            ));
+            continue;
+        }
+        let Some(message) = entry.get("message").and_then(Value::as_object) else {
             continue;
         };
         let role = message
