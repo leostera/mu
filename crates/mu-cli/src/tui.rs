@@ -2122,6 +2122,20 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "login" => {
+            let status = match (agent.try_lock(), argument.split_once(' ')) {
+                (Err(_), _) => "Mu is busy.".to_owned(),
+                (Ok(_), None) => {
+                    "Usage: /login <provider> <api-key> (OAuth login is not supported yet)".to_owned()
+                }
+                (Ok(agent), Some((provider, key))) => match agent.login_api_key(provider, key) {
+                    // The key is never echoed back into the transcript.
+                    Ok(()) => format!("Stored API key for {provider} in auth.json"),
+                    Err(error) => format!("Could not log in: {error}"),
+                },
+            };
+            app.show_status(status);
+        }
         "logout" => {
             let provider = if argument.is_empty() { None } else { Some(argument.to_owned()) };
             let status = match agent.try_lock() {
@@ -3245,6 +3259,21 @@ mod tests {
                 .all(super::chrome::SlashCommand::is_builtin)
         );
         assert_eq!(all[24].name, "review");
+    }
+
+    #[tokio::test]
+    async fn login_without_arguments_shows_usage_and_never_writes_credentials() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.composer.insert_text("/login acme");
+        execute_command(&mut app, &agent);
+        assert!(
+            app.statuses
+                .last()
+                .unwrap()
+                .1
+                .starts_with("Usage: /login <provider> <api-key>")
+        );
     }
 
     #[test]

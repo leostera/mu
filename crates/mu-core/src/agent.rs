@@ -3712,6 +3712,21 @@ impl MuAgent {
             .map_err(AgentError::Configuration)
     }
 
+    /// Store an API key for `provider` in `auth.json` (0600, atomic).
+    pub fn login_api_key(&self, provider: &str, key: &str) -> Result<(), AgentError> {
+        if provider.trim().is_empty() || key.trim().is_empty() {
+            return Err(AgentError::Configuration(
+                "provider and API key must not be empty".into(),
+            ));
+        }
+        crate::auth::set_api_key(
+            &self.agent_dir.join("auth.json"),
+            provider.trim(),
+            key.trim(),
+        )
+        .map_err(|error| AgentError::Configuration(error.to_string()))
+    }
+
     /// Remove a provider's stored credential from `auth.json`; returns whether one existed.
     pub fn logout(&self, provider: &str) -> Result<bool, AgentError> {
         crate::auth::remove(&self.agent_dir.join("auth.json"), provider)
