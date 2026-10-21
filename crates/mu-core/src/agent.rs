@@ -180,6 +180,8 @@ pub struct SessionOptions {
     pub project_trust: Option<bool>,
     /// `--theme`: theme name for this run (overrides the `theme` setting).
     pub theme: Option<String>,
+    /// `--models`: comma-separated patterns scoping Ctrl+P cycling (overrides `enabledModels`).
+    pub models: Vec<String>,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -239,6 +241,7 @@ struct PromptOptions {
     thinking: ThinkingSetting,
     api_key: Option<String>,
     theme: Option<String>,
+    models: Vec<String>,
 }
 
 impl PromptOptions {
@@ -254,6 +257,7 @@ impl PromptOptions {
             thinking: options.thinking,
             api_key: options.api_key.clone().filter(|key| !key.is_empty()),
             theme: options.theme.clone(),
+            models: options.models.clone(),
         }
     }
 
@@ -2700,6 +2704,7 @@ fn resolve_session_options(
         api_key: _,
         project_trust: _,
         theme: _,
+        models: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -3114,6 +3119,7 @@ impl Prepared {
             thinking: self.prompt.thinking,
             no_mcp: false,
             theme_override: self.prompt.theme,
+            model_scope_override: self.prompt.models,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup,
             active_mcp_tools,
@@ -3144,6 +3150,7 @@ pub struct MuAgent {
     thinking: ThinkingSetting,
     no_mcp: bool,
     theme_override: Option<String>,
+    model_scope_override: Vec<String>,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -3273,6 +3280,7 @@ impl MuAgent {
             thinking: ThinkingSetting::default(),
             no_mcp: false,
             theme_override: None,
+            model_scope_override: Vec::new(),
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup: None,
             active_mcp_tools,
@@ -3348,16 +3356,20 @@ impl MuAgent {
 
     /// Models Ctrl+P cycles through: `enabledModels` patterns applied to the choices.
     pub fn cycle_models(&self) -> Vec<String> {
-        let patterns = configured_setting(&self.agent_dir, &self.cwd, "enabledModels", |value| {
-            value.as_array().map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
+        let patterns = if self.model_scope_override.is_empty() {
+            configured_setting(&self.agent_dir, &self.cwd, "enabledModels", |value| {
+                value.as_array().map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
             })
-        })
-        .unwrap_or_default();
+            .unwrap_or_default()
+        } else {
+            self.model_scope_override.clone()
+        };
         scope_models(&patterns, &self.model_choices, &self.provider_id)
     }
 

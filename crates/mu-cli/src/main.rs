@@ -104,6 +104,10 @@ struct Cli {
     #[arg(long, conflicts_with = "approve")]
     no_approve: bool,
 
+    /// Comma-separated model patterns for Ctrl+P cycling (overrides enabledModels).
+    #[arg(long, value_delimiter = ',', value_name = "PATTERNS")]
+    models: Vec<String>,
+
     /// Theme name for this run (dark or light).
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
@@ -296,6 +300,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         no_mcp: cli.no_mcp,
         api_key: cli.api_key,
         theme: cli.theme,
+        models: cli.models,
         project_trust: match (cli.approve, cli.no_approve) {
             (true, _) => Some(true),
             (_, true) => Some(false),
