@@ -382,6 +382,61 @@ pub mod anthropic {
     }
 }
 
+/// OpenRouter login: the code is exchanged for a permanent API key (Pi's `openrouter.ts`).
+pub mod openrouter {
+    use super::*;
+
+    const AUTHORIZE_URL: &str = "https://openrouter.ai/auth";
+    pub const TOKEN_URL: &str = "https://openrouter.ai/api/v1/auth/keys";
+
+    /// `callback_url` is the loopback redirect URI; OpenRouter sends no `state`.
+    pub fn authorize(callback_url: &str, pkce: &Pkce) -> String {
+        authorize_url(
+            AUTHORIZE_URL,
+            &[
+                ("callback_url", callback_url),
+                ("code_challenge", &pkce.challenge),
+                ("code_challenge_method", "S256"),
+            ],
+        )
+        .expect("static authorize URL parses")
+    }
+
+    /// The bare code from a pasted redirect URL, `code=…` query, or the code itself.
+    pub fn code_from_input(input: &str) -> Option<String> {
+        let parsed = parse_authorization_input(input);
+        parsed.code.filter(|code| !code.is_empty())
+    }
+
+    pub fn credential_from_key_response(body: &Value) -> Result<Credential, String> {
+        let key = body
+            .get("key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .ok_or("OpenRouter OAuth response carries no \"key\"")?;
+        Ok(Credential::Oauth {
+            access: key.to_owned(),
+            refresh: String::new(),
+            expires: 9_007_199_254_740_991.0,
+            extra: Default::default(),
+        })
+    }
+
+    pub async fn exchange(
+        code: &str,
+        verifier: &str,
+        token_url: &str,
+    ) -> Result<Credential, String> {
+        let body = post_json(
+            token_url,
+            json!({"code": code, "code_verifier": verifier, "code_challenge_method": "S256"}),
+        )
+        .await
+        .map_err(|error| format!("OpenRouter OAuth key exchange failed: {error}"))?;
+        credential_from_key_response(&body)
+    }
+}
+
 /// Whether a stored OAuth credential needs refreshing.
 pub fn is_expired(expires_ms: f64) -> bool {
     now_ms() >= expires_ms
@@ -414,6 +469,25 @@ mod tests {
             .unwrap()
             .block_on(login.finish_with_input("code#wrong", "http://127.0.0.1:1/t"));
         assert_eq!(mismatch.err().as_deref(), Some("OAuth state mismatch"));
+    }
+
+    #[test]
+    fn openrouter_authorize_url_and_key_response() {
+        let pkce = Pkce::from_verifier("v".into());
+        let url = openrouter::authorize("http://127.0.0.1:9/oauth/callback/x", &pkce);
+        assert!(url.starts_with("https://openrouter.ai/auth?callback_url=http%3A%2F%2F127.0.0.1%3A9%2Foauth%2Fcallback%2Fx&code_challenge="));
+        assert_eq!(
+            openrouter::code_from_input("http://x/cb?code=abc").as_deref(),
+            Some("abc")
+        );
+        assert_eq!(openrouter::code_from_input("abc").as_deref(), Some("abc"));
+        assert_eq!(openrouter::code_from_input(" "), None);
+        let credential =
+            openrouter::credential_from_key_response(&json!({"key":"sk-or-1"})).unwrap();
+        assert!(
+            matches!(credential, Credential::Oauth { ref access, ref refresh, .. } if access == "sk-or-1" && refresh.is_empty())
+        );
+        assert!(openrouter::credential_from_key_response(&json!({"key":""})).is_err());
     }
 
     #[test]

@@ -94,6 +94,31 @@ pub fn run(command: &AuthCommand, agent_dir: &Path) -> Result<String, AuthComman
     }
 }
 
+async fn login_openrouter(agent_dir: &Path) -> Result<String, AuthCommandError> {
+    use mu_core::oauth::{CallbackServer, Pkce, openrouter};
+    let fail = |e: String| AuthCommandError::Login(e);
+    let pkce = Pkce::generate();
+    // OpenRouter sends no `state`; a random path keeps stray requests from completing the login.
+    let path = format!("/oauth/callback/{}", uuid::Uuid::new_v4());
+    let server = CallbackServer::bind("127.0.0.1", 0, &path, "127.0.0.1")
+        .await
+        .map_err(|e| fail(e.to_string()))?;
+    eprintln!(
+        "Open this URL to sign in to OpenRouter:\n\n{}\n",
+        openrouter::authorize(&server.redirect_uri, &pkce)
+    );
+    let code = server
+        .wait_for_code("OpenRouter", None, std::time::Duration::from_secs(300))
+        .await
+        .map_err(fail)?;
+    let credential = openrouter::exchange(&code, &pkce.verifier, openrouter::TOKEN_URL)
+        .await
+        .map_err(fail)?;
+    mu_core::auth::set_credential(&agent_dir.join("auth.json"), "openrouter", credential)
+        .map_err(|e| AuthCommandError::Login(e.to_string()))?;
+    Ok("Logged in to openrouter; credential saved to auth.json".to_owned())
+}
+
 /// `mu auth login --provider anthropic [--copy-code]`: OAuth login stored in `auth.json`.
 pub async fn login(
     provider: &str,
@@ -101,9 +126,12 @@ pub async fn login(
     agent_dir: &Path,
 ) -> Result<String, AuthCommandError> {
     use mu_core::oauth::{CallbackServer, anthropic};
+    if provider == "openrouter" {
+        return login_openrouter(agent_dir).await;
+    }
     if provider != "anthropic" {
         return Err(AuthCommandError::Login(format!(
-            "OAuth login is only implemented for \"anthropic\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
+            "OAuth login is only implemented for \"anthropic\" and \"openrouter\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
         )));
     }
     let fail = AuthCommandError::Login;
@@ -232,11 +260,7 @@ mod tests {
     async fn login_rejects_providers_without_an_oauth_flow() {
         let dir = std::env::temp_dir();
         let error = login("acme", false, &dir).await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("only implemented for \"anthropic\"")
-        );
+        assert!(error.to_string().contains("only implemented for"));
     }
 
     #[test]
