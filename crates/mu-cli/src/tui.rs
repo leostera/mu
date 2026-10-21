@@ -2458,6 +2458,17 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                         tokio::runtime::Handle::current().block_on(agent.compact_with(Some(argument)))
                     }) {
                         Ok(Some(outcome)) => {
+                            app.messages.push(Message {
+                                role: Role::Summary {
+                                    label: "[compaction]",
+                                    tokens: Some(outcome.tokens_before),
+                                },
+                                text: outcome.summary.clone(),
+                                thinking: String::new(),
+                                tools: Vec::new(),
+                                error: false,
+                            });
+                            app.messages.scroll.scroll_to_end();
                             format!("Compacted context (was ~{} tokens)", outcome.tokens_before)
                         }
                         Ok(None) => "Nothing to compact".to_owned(),
