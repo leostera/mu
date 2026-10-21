@@ -249,9 +249,20 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
 }
 
 fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    read_file_with(&LocalFiles, cwd, args)
+}
+
+/// The read tool over any [`FileOperations`] (Pi's `ReadOperations`).
+pub fn read_file_with(
+    files: &dyn FileOperations,
+    cwd: &Path,
+    args: &Value,
+) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let path = resolve_read_path(cwd, args)?;
-    let bytes = std::fs::read(&path).map_err(|error| read_file_io_error(&path, error))?;
+    let bytes = files
+        .read(&path)
+        .map_err(|error| read_file_io_error(&path, error))?;
     if let Some(mime_type) = detect_image_mime(&bytes) {
         let options = crate::image_process::ResizeOptions::default();
         return Ok(
@@ -3772,6 +3783,17 @@ mod tests {
 
     /// Ported from Pi's `tools.test.ts` ("unknown edit access errors") and its in-memory edit
     /// operations.
+    #[test]
+    fn read_tool_runs_over_injected_file_operations() {
+        let memory = MemoryFiles(std::sync::Mutex::new(b"one\ntwo\nthree\n".to_vec()), false);
+        let cwd = std::env::temp_dir();
+        let slice =
+            read_file_with(&memory, &cwd, &json!({"path":"x.txt","offset":2,"limit":1})).unwrap();
+        assert!(slice.content.starts_with("two"), "{}", slice.content);
+        let offline = MemoryFiles(std::sync::Mutex::new(Vec::new()), true);
+        assert!(read_file_with(&offline, &cwd, &json!({"path":"x.txt"})).is_err());
+    }
+
     #[tokio::test]
     async fn write_tool_runs_over_injected_file_operations() {
         let memory = MemoryFiles(std::sync::Mutex::new(Vec::new()), false);
