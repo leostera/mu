@@ -164,6 +164,7 @@ struct Provider {
     model: String,
     instructions: String,
     supports_reasoning: bool,
+    supports_strict_sampling: bool,
 }
 
 enum ProviderTransport {
@@ -791,6 +792,13 @@ fn instructions_for_tools(base: &str, tools: &[Value]) -> String {
     )
 }
 
+fn model_supports_strict_sampling(model: &Value) -> bool {
+    model
+        .pointer("/compat/supportsStrictMode")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 fn mark_strict_builtin_tool(mut definition: Value) -> Value {
     let name = definition
         .get("name")
@@ -1037,6 +1045,7 @@ async fn connect(config: &Config, skill_prompt: String) -> Result<Provider, Agen
         .ok_or_else(|| AgentError::Provider("config has no provider catalog".into()))?;
     let mut endpoint = None;
     let mut supports_reasoning = false;
+    let mut supports_strict_sampling = true;
     for (id, p) in providers {
         let Some(m) = p.pointer(&format!("/models/{}", config.model)) else {
             continue;
@@ -1060,6 +1069,7 @@ async fn connect(config: &Config, skill_prompt: String) -> Result<Provider, Agen
         let mut url = trusted_url(base)?;
         url.set_path(&format!("{}/responses", url.path().trim_end_matches('/')));
         supports_reasoning = m.get("reasoning").and_then(Value::as_bool).unwrap_or(false);
+        supports_strict_sampling = model_supports_strict_sampling(m);
         endpoint = Some(url);
         break;
     }
@@ -1080,6 +1090,7 @@ async fn connect(config: &Config, skill_prompt: String) -> Result<Provider, Agen
             "You are Mu, a helpful coding assistant. Be clear, practical, and concise.{skill_prompt}"
         ),
         supports_reasoning,
+        supports_strict_sampling,
     })
 }
 
@@ -2326,6 +2337,7 @@ impl MuAgent {
                 model: config.model.clone(),
                 instructions: "You are Mu, a deterministic demo assistant.".into(),
                 supports_reasoning: false,
+                supports_strict_sampling: true,
             },
             provider_id: config.provider,
             model_choices: config.model_choices,
@@ -2697,7 +2709,13 @@ impl MuAgent {
                     })
                     .cloned()
             })
-            .map(mark_strict_builtin_tool)
+            .map(|definition| {
+                if self.provider.supports_strict_sampling {
+                    mark_strict_builtin_tool(definition)
+                } else {
+                    definition
+                }
+            })
             .collect::<Vec<_>>();
         definitions.extend(self.mcp.definitions_for_model(active_mcp_tools));
         if self.mcp.codemode_enabled() {
@@ -3870,6 +3888,17 @@ mod tests {
                 .iter()
                 .any(|variant| variant["type"] == "null")
         );
+        agent.provider.supports_strict_sampling = false;
+        let unsupported_definitions = agent.tool_definitions(&HashSet::new());
+        let unsupported_read = unsupported_definitions
+            .iter()
+            .find(|definition| definition["name"] == "read")
+            .unwrap();
+        assert!(unsupported_read.get("strict").is_none());
+        assert_eq!(
+            unsupported_read["parameters"]["required"],
+            serde_json::json!(["path"])
+        );
         agent.no_tools = true;
         assert!(agent.tool_definitions(&HashSet::new()).is_empty());
         std::fs::remove_dir_all(root).unwrap();
@@ -3973,6 +4002,19 @@ mod tests {
             ],
         );
         assert!(!shell_with_search.contains("Use bash for file operations like ls, rg, find"));
+    }
+
+    #[test]
+    fn model_strict_sampling_capability_defaults_to_openai_support_and_honors_opt_out() {
+        assert!(super::model_supports_strict_sampling(
+            &serde_json::json!({})
+        ));
+        assert!(super::model_supports_strict_sampling(&serde_json::json!({
+            "compat":{"supportsStrictMode":true}
+        })));
+        assert!(!super::model_supports_strict_sampling(&serde_json::json!({
+            "compat":{"supportsStrictMode":false}
+        })));
     }
 
     #[test]
