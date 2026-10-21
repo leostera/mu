@@ -494,7 +494,7 @@ impl McpRegistry {
                 }
                 match item.get("text").and_then(Value::as_str) {
                     Some(text) => parts.push(text.to_owned()),
-                    None => parts.push("[MCP blob resource omitted]".to_owned()),
+                    None => parts.push(blob_resource_text(item)),
                 }
             }
             let contents = contents
@@ -886,6 +886,64 @@ fn parse_http_response(
     Err(format!(
         "MCP HTTP {method} response contained no matching JSON-RPC result"
     ))
+}
+
+fn is_text_mime(mime: Option<&str>) -> bool {
+    let Some(mime) = mime else { return false };
+    let kind = mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    kind.starts_with("text/")
+        || kind == "application/json"
+        || kind.ends_with("+json")
+        || kind.ends_with("+xml")
+}
+
+/// File extension of a resource URI path (`.bin` when none), as Pi's `extensionOf`.
+fn uri_extension(uri: &str) -> String {
+    let path = uri.split(['?', '#']).next().unwrap_or(uri);
+    path.rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .filter(|ext| {
+            (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+        .map_or_else(|| ".bin".to_owned(), |ext| format!(".{ext}"))
+}
+
+/// Pi's handling of a `blob` resource: text types decode to text, others are saved to a temp file.
+fn blob_resource_text(resource: &Value) -> String {
+    use base64::Engine;
+    let uri = resource["uri"].as_str().unwrap_or_default();
+    let mime = resource.get("mimeType").and_then(Value::as_str);
+    let Some(blob) = resource.get("blob").and_then(Value::as_str) else {
+        return "[MCP resource has no content]".to_owned();
+    };
+    let Ok(data) = base64::engine::general_purpose::STANDARD.decode(blob) else {
+        return format!("[Binary resource {uri} could not be decoded]");
+    };
+    if is_text_mime(mime) {
+        return String::from_utf8_lossy(&data).into_owned();
+    }
+    let kind = format!(
+        "{}, {}",
+        mime.unwrap_or("unknown type"),
+        format_size(data.len() as u64)
+    );
+    let path = std::env::temp_dir().join(format!(
+        "pi-mcp-{}{}",
+        uuid::Uuid::new_v4(),
+        uri_extension(uri)
+    ));
+    match std::fs::write(&path, &data) {
+        Ok(()) => format!(
+            "[Binary resource {uri} ({kind}) saved to {}]",
+            path.display()
+        ),
+        Err(error) => format!("[Binary resource {uri} ({kind}) could not be saved: {error}]"),
+    }
 }
 
 /// Pi's `formatSize`.
@@ -1670,6 +1728,28 @@ mod tests {
         );
         assert_eq!(format_size(10), "10B");
         assert_eq!(format_size(3 * 1024 * 1024), "3.0MB");
+    }
+
+    #[test]
+    fn blob_resources_decode_text_or_save_binary_files() {
+        use base64::Engine;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let text = blob_resource_text(
+            &json!({"uri":"file:///a.json","mimeType":"application/json","blob":b64(b"{\"a\":1}")}),
+        );
+        assert_eq!(text, "{\"a\":1}");
+        let saved = blob_resource_text(
+            &json!({"uri":"file:///pic.png?x=1","mimeType":"image/png","blob":b64(&[1,2,3])}),
+        );
+        assert!(
+            saved.starts_with("[Binary resource file:///pic.png?x=1 (image/png, 3B) saved to "),
+            "{saved}"
+        );
+        assert!(saved.ends_with(".png]"));
+        assert!(
+            blob_resource_text(&json!({"uri":"u","blob":"!!"})).contains("could not be decoded")
+        );
+        assert_eq!(uri_extension("file:///noext"), ".bin");
     }
 
     #[test]
