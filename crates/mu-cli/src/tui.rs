@@ -1067,6 +1067,8 @@ struct App {
     model_selector_open: bool,
     /// Generic selector overlay (thinking level, fork point); Enter runs `command <value>`.
     picker: Option<Picker>,
+    /// Prompt-template and skill commands offered after the built-ins in the slash menu.
+    extra_commands: Vec<chrome::SlashCommand>,
     model_selection: usize,
     loading: bool,
     quit: bool,
@@ -1128,6 +1130,11 @@ impl App {
             .map(|model| (model.clone(), agent.model_display_name(model)))
             .collect();
         self.cwd = agent.cwd().display().to_string();
+        self.extra_commands = agent
+            .dynamic_slash_commands()
+            .into_iter()
+            .map(|(name, description, hint)| chrome::SlashCommand::dynamic(name, description, hint))
+            .collect();
         self.refresh_stats(agent);
         self.messages.messages = agent
             .session_transcript()
@@ -1187,6 +1194,7 @@ impl App {
             command_selection: 0,
             model_selector_open: false,
             picker: None,
+            extra_commands: Vec::new(),
             model_selection: 0,
             loading: false,
             quit: false,
@@ -1741,10 +1749,17 @@ fn handle_command_menu(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>
         }
         KeyCode::Enter => {
             if let Some(command) = commands.get(app.command_selection) {
-                app.input = format!("/{}", command.name).chars().collect();
-                app.cursor = app.input.len();
-                app.command_menu_open = false;
-                execute_command(app, agent);
+                if command.is_builtin() {
+                    app.input = format!("/{}", command.name).chars().collect();
+                    app.cursor = app.input.len();
+                    app.command_menu_open = false;
+                    execute_command(app, agent);
+                } else {
+                    // Templates and skills take arguments: complete into the editor instead of running.
+                    app.input = format!("/{} ", command.name).chars().collect();
+                    app.cursor = app.input.len();
+                    app.command_menu_open = false;
+                }
             }
         }
         KeyCode::Backspace if app.cursor > 1 => {
@@ -1847,7 +1862,10 @@ fn cycle_model(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
 
 fn filtered_commands(app: &App) -> Vec<chrome::SlashCommand> {
     let query: String = app.input.iter().skip(1).collect();
-    chrome::matching_commands(query.split_whitespace().next().unwrap_or_default())
+    chrome::matching_commands(
+        query.split_whitespace().next().unwrap_or_default(),
+        &app.extra_commands,
+    )
 }
 
 /// The session whose name or id (prefix) matches `query`; names win over id prefixes.
@@ -3187,6 +3205,46 @@ mod tests {
         assert_eq!(state("compaction.enabled"), "on", "Pi default");
         assert_eq!(state("hideThinkingBlock"), "off");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn template_and_skill_commands_follow_builtins_and_complete_into_the_editor() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.extra_commands = vec![super::chrome::SlashCommand::dynamic(
+            "review".into(),
+            "Review code".into(),
+            Some("<file>".into()),
+        )];
+        app.input = "/rev".chars().collect();
+        app.cursor = app.input.len();
+        app.command_menu_open = true;
+        let names = super::filtered_commands(&app)
+            .iter()
+            .map(|c| c.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"review".to_owned()));
+        let at = names.iter().position(|n| n == "review").unwrap();
+        app.command_selection = at;
+        super::handle_command_menu(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &agent,
+        );
+        assert_eq!(
+            app.input_text(),
+            "/review ",
+            "completes instead of executing"
+        );
+        assert!(!app.command_menu_open);
+        app.input = "/".chars().collect();
+        let all = super::filtered_commands(&app);
+        assert!(
+            all[..24]
+                .iter()
+                .all(super::chrome::SlashCommand::is_builtin)
+        );
+        assert_eq!(all[24].name, "review");
     }
 
     #[test]

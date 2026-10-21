@@ -6,6 +6,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use std::borrow::Cow;
 use unicode_width::UnicodeWidthStr;
 
 use super::{fuzzy::fuzzy_filter, markdown::wrap_spans, theme::Theme};
@@ -160,17 +161,34 @@ pub fn editor_frame(
 // Slash commands and select list
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlashCommand {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub argument_hint: Option<&'static str>,
+    pub name: Cow<'static, str>,
+    pub description: Cow<'static, str>,
+    pub argument_hint: Option<Cow<'static, str>>,
+}
+
+impl SlashCommand {
+    /// A prompt template or skill command discovered at runtime.
+    pub fn dynamic(name: String, description: String, argument_hint: Option<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            argument_hint: argument_hint.map(Cow::Owned),
+        }
+    }
+
+    pub fn is_builtin(&self) -> bool {
+        SLASH_COMMANDS
+            .iter()
+            .any(|builtin| builtin.name == self.name)
+    }
 }
 
 const fn command(name: &'static str, description: &'static str) -> SlashCommand {
     SlashCommand {
-        name,
-        description,
+        name: Cow::Borrowed(name),
+        description: Cow::Borrowed(description),
         argument_hint: None,
     }
 }
@@ -181,9 +199,9 @@ const fn command_with(
     hint: &'static str,
 ) -> SlashCommand {
     SlashCommand {
-        name,
-        description,
-        argument_hint: Some(hint),
+        name: Cow::Borrowed(name),
+        description: Cow::Borrowed(description),
+        argument_hint: Some(Cow::Borrowed(hint)),
     }
 }
 
@@ -232,8 +250,13 @@ pub const SLASH_COMMANDS: [SlashCommand; 24] = [
 ];
 
 /// Commands matching the text after `/` (everything when empty), best fuzzy match first.
-pub fn matching_commands(query: &str) -> Vec<SlashCommand> {
-    fuzzy_filter(&SLASH_COMMANDS, query, |command| command.name.to_owned())
+pub fn matching_commands(query: &str, extra: &[SlashCommand]) -> Vec<SlashCommand> {
+    let all = SLASH_COMMANDS
+        .iter()
+        .chain(extra)
+        .cloned()
+        .collect::<Vec<_>>();
+    fuzzy_filter(&all, query, |command| command.name.to_string())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,12 +267,12 @@ pub struct SelectItem {
 
 impl From<&SlashCommand> for SelectItem {
     fn from(command: &SlashCommand) -> Self {
-        let description = match command.argument_hint {
+        let description = match &command.argument_hint {
             Some(hint) => format!("{hint} — {}", command.description),
-            None => command.description.to_owned(),
+            None => command.description.to_string(),
         };
         Self {
-            label: command.name.to_owned(),
+            label: command.name.to_string(),
             description: Some(description),
         }
     }
@@ -520,7 +543,7 @@ mod tests {
     #[test]
     fn slash_list_pads_the_name_column_and_shows_a_counter() {
         let theme = Theme::dark();
-        let items = matching_commands("")
+        let items = matching_commands("", &[])
             .iter()
             .map(SelectItem::from)
             .collect::<Vec<_>>();

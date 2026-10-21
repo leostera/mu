@@ -3892,6 +3892,29 @@ impl MuAgent {
         )
     }
 
+    /// Prompt templates, then `skill:<name>` commands: `(name, description, argument hint)`.
+    pub fn dynamic_slash_commands(&self) -> Vec<(String, String, Option<String>)> {
+        let templates = self.templates.iter().map(|template| {
+            (
+                template.name.clone(),
+                template.description.clone(),
+                template.argument_hint.clone(),
+            )
+        });
+        let skills = skill_commands_enabled(&self.agent_dir, &self.cwd)
+            .then(|| self.skills.skills.iter())
+            .into_iter()
+            .flatten()
+            .map(|skill| {
+                (
+                    format!("skill:{}", skill.name),
+                    skill.description.clone(),
+                    None,
+                )
+            });
+        templates.chain(skills).collect()
+    }
+
     /// Skills discovered from Pi's global and project skill directories.
     pub fn skills(&self) -> &crate::skills::SkillCatalog {
         &self.skills
