@@ -70,6 +70,10 @@ async fn run_prompt(agent: &mut MuAgent, command: &Value, inbox: &mut Inbox) -> 
                 let kind = incoming["type"].as_str().unwrap_or_default().to_owned();
                 let text = incoming["message"].as_str().map(str::to_owned);
                 let outcome = match (kind.as_str(), text) {
+                    ("clear_queue", _) => {
+                        queue.clear();
+                        Ok(None)
+                    }
                     ("abort", _) => {
                         cancel.cancel();
                         Ok(None)
@@ -280,6 +284,10 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
                 _ => Err(format!("{kind} requires mode \"all\" or \"one-at-a-time\"")),
             }
         }
+        "clear_queue" => {
+            agent.prompt_queue().clear();
+            Ok(None)
+        }
         "get_session_stats" => Ok(Some(json!({"summary": agent.session_summary()}))),
         "get_last_assistant_text" => Ok(Some(json!({"text": agent.last_assistant_text()}))),
         other => Err(format!("Unknown command: {other}")),
@@ -458,6 +466,8 @@ mod tests {
             bad_flag["error"],
             "set_auto_retry requires boolean `enabled`"
         );
+        let cleared = handle(&mut agent, &json!({"type":"clear_queue"})).await;
+        assert_eq!(cleared["success"], true);
         let nothing = handle(&mut agent, &json!({"type":"compact"})).await;
         assert_eq!(nothing["error"], "Nothing to compact");
         let missing = handle(&mut agent, &json!({"type":"prompt"})).await;
