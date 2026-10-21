@@ -1,8 +1,9 @@
 //! `--mode rpc`: Pi's JSONL command protocol over stdin/stdout (a subset).
 //!
 //! Commands are read one per line and handled sequentially, so `abort`/`steer` cannot interrupt
-//! a running `prompt` yet. Supported: `prompt`, `get_state`, `set_thinking_level`,
-//! `cycle_thinking_level`, `new_session`, `get_session_stats`, `get_last_assistant_text`.
+//! a running `prompt` yet. Supported: `prompt`, `get_state`, `set_model`, `get_available_models`,
+//! `set_thinking_level`, `cycle_thinking_level`, `new_session`, `get_session_stats`,
+//! `get_last_assistant_text`.
 
 use std::io::{BufRead, Write};
 
@@ -76,6 +77,21 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
             .start_new_session()
             .map(|()| Some(json!({"cancelled": false})))
             .map_err(|error| error.to_string()),
+        "get_available_models" => Ok(Some(json!({
+            "models": agent
+                .model_choices()
+                .iter()
+                .map(|id| json!({"id": id, "provider": agent.provider(), "name": agent.model_display_name(id)}))
+                .collect::<Vec<_>>(),
+        }))),
+        "set_model" => match command["modelId"].as_str() {
+            None => Err("set_model requires `modelId`".into()),
+            Some(model) => match agent.select_model(model) {
+                Ok(true) => Ok(Some(json!({"id": model, "provider": agent.provider()}))),
+                Ok(false) => Err(format!("Model not found: {model}")),
+                Err(error) => Err(error.to_string()),
+            },
+        },
         "get_session_stats" => Ok(Some(json!({"summary": agent.session_summary()}))),
         "get_last_assistant_text" => Ok(Some(json!({"text": agent.last_assistant_text()}))),
         other => Err(format!("Unknown command: {other}")),
@@ -123,6 +139,18 @@ mod tests {
         assert_eq!(state["id"], "1");
         assert_eq!(state["success"], true);
         assert_eq!(state["data"]["thinkingLevel"], "medium");
+
+        let models = handle(&mut agent, &json!({"type":"get_available_models"})).await;
+        let listed = models["data"]["models"].as_array().unwrap().clone();
+        assert!(
+            listed.iter().any(|m| m["id"] == agent.model()),
+            "current model is listed"
+        );
+        let target = listed[0]["id"].as_str().unwrap().to_owned();
+        let switched = handle(&mut agent, &json!({"type":"set_model","modelId":target})).await;
+        assert_eq!(switched["data"]["id"], target.as_str());
+        let missing = handle(&mut agent, &json!({"type":"set_model","modelId":"zzz"})).await;
+        assert_eq!(missing["error"], "Model not found: zzz");
 
         let set = handle(
             &mut agent,
