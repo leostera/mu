@@ -112,6 +112,10 @@ struct Cli {
     #[arg(long)]
     verbose: bool,
 
+    /// TUI screen mode: fullscreen (default). `regular` (main screen) is not implemented yet.
+    #[arg(long, value_name = "MODE", value_parser = ["fullscreen", "regular"])]
+    tui_mode: Option<String>,
+
     /// Theme name for this run (dark or light).
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
@@ -216,6 +220,9 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if cli.tui_mode.as_deref() == Some("regular") {
+        return Err("--tui-mode regular (main-screen mode) is not implemented yet; Mu always uses the fullscreen alternate screen".into());
+    }
     if let Some(input) = &cli.export {
         let output = cli.prompt.first().map(PathBuf::from);
         match mu_core::export_session_file(input, output.as_deref()) {
