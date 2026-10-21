@@ -1888,6 +1888,8 @@ struct Picker {
     /// Sessions behind a `/resume` picker, so Ctrl+N can filter to named ones.
     sessions: Vec<mu_core::SessionInfo>,
     named_only: bool,
+    /// Typed filter text (fuzzy-matched against session labels) for `/resume`.
+    query: String,
     command: &'static str,
     items: Vec<chrome::SelectItem>,
     values: Vec<String>,
@@ -1905,13 +1907,32 @@ fn handle_picker(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         {
             // Ctrl+N toggles the named-sessions filter (Pi's `app.session.toggleNamedFilter`).
             let all = picker.sessions.clone();
-            let next = session_picker_filtered(&all, !picker.named_only);
+            let next = session_picker_filtered(&all, !picker.named_only, &picker.query);
             if !next.items.is_empty() {
                 app.picker = Some(next);
             }
         }
+        KeyCode::Char(ch)
+            if picker.command == "resume"
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            let query = format!("{}{ch}", picker.query);
+            let next = session_picker_filtered(&picker.sessions.clone(), picker.named_only, &query);
+            app.picker = Some(next);
+        }
+        KeyCode::Backspace if picker.command == "resume" && !picker.query.is_empty() => {
+            let mut query = picker.query.clone();
+            query.pop();
+            let next = session_picker_filtered(&picker.sessions.clone(), picker.named_only, &query);
+            app.picker = Some(next);
+        }
         KeyCode::Up => picker.selection = picker.selection.saturating_sub(1),
-        KeyCode::Down => picker.selection = (picker.selection + 1).min(picker.items.len() - 1),
+        KeyCode::Down => {
+            picker.selection = (picker.selection + 1).min(picker.items.len().saturating_sub(1))
+        }
+        KeyCode::Enter if picker.items.is_empty() => {}
         KeyCode::Enter => {
             let line = format!("/{} {}", picker.command, picker.values[picker.selection]);
             app.picker = None;
@@ -2045,6 +2066,7 @@ fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
     Picker {
         sessions: Vec::new(),
         named_only: false,
+        query: String::new(),
         command: "settings",
         items: TOGGLE_SETTINGS
             .iter()
@@ -2062,18 +2084,27 @@ fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
 }
 
 fn session_picker(sessions: &[mu_core::SessionInfo]) -> Picker {
-    session_picker_filtered(sessions, false)
+    session_picker_filtered(sessions, false, "")
 }
 
-fn session_picker_filtered(all: &[mu_core::SessionInfo], named_only: bool) -> Picker {
-    let sessions = all
+fn session_label(s: &mu_core::SessionInfo) -> String {
+    s.name
+        .clone()
+        .or_else(|| s.preview.clone())
+        .unwrap_or_else(|| "(unnamed)".into())
+}
+
+fn session_picker_filtered(all: &[mu_core::SessionInfo], named_only: bool, query: &str) -> Picker {
+    let named = all
         .iter()
         .filter(|s| !named_only || s.name.is_some())
         .cloned()
         .collect::<Vec<_>>();
+    let sessions = fuzzy::fuzzy_filter(&named, query, |s| format!("{} {}", session_label(s), s.id));
     Picker {
         sessions: all.to_vec(),
         named_only,
+        query: query.to_owned(),
         command: "resume",
         items: sessions
             .iter()
@@ -2381,6 +2412,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                     app.picker = Some(Picker {
  sessions: Vec::new(),
  named_only: false,
+ query: String::new(),
                         command: "thinking",
                         items: levels
                             .iter()
@@ -2452,6 +2484,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             app.picker = Some(Picker {
  sessions: Vec::new(),
  named_only: false,
+ query: String::new(),
                 command: "trust",
                 items: vec![
                     chrome::SelectItem {
@@ -2549,6 +2582,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                                 app.picker = Some(Picker {
  sessions: Vec::new(),
  named_only: false,
+ query: String::new(),
                                     command: "tree",
                                     items: rows
                                         .iter()
@@ -2603,6 +2637,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                                 app.picker = Some(Picker {
  sessions: Vec::new(),
  named_only: false,
+ query: String::new(),
                                     command: "fork",
                                     items: messages
                                         .iter()
@@ -3624,8 +3659,39 @@ mod tests {
         let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
         handle_key(ctrl_n, &mut app, agent.clone(), tx.clone());
         assert_eq!(app.picker.as_ref().unwrap().values, ["a"]);
-        handle_key(ctrl_n, &mut app, agent, tx);
+        handle_key(ctrl_n, &mut app, agent.clone(), tx.clone());
         assert_eq!(app.picker.as_ref().unwrap().values, ["a", "b"]);
+        // Typing filters by fuzzy match; Backspace widens again; no match leaves an empty list.
+        for ch in "wor".chars() {
+            handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut app,
+                agent.clone(),
+                tx.clone(),
+            );
+        }
+        assert_eq!(app.picker.as_ref().unwrap().values, ["a"]);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+            &mut app,
+            agent.clone(),
+            tx.clone(),
+        );
+        assert!(app.picker.as_ref().unwrap().values.is_empty());
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            agent.clone(),
+            tx.clone(),
+        );
+        assert!(app.picker.is_some(), "Enter on an empty list does nothing");
+        handle_key(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut app,
+            agent,
+            tx,
+        );
+        assert_eq!(app.picker.as_ref().unwrap().values, ["a"]);
     }
 
     #[test]
