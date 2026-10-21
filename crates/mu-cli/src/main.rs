@@ -80,6 +80,10 @@ struct Cli {
     #[arg(long, value_name = "SEARCH", num_args = 0..=1, default_missing_value = "")]
     list_models: Option<String>,
 
+    /// Thinking level: off, minimal, low, medium, high, xhigh, max.
+    #[arg(long, value_name = "LEVEL")]
+    thinking: Option<String>,
+
     /// Disable tools by name or `*` pattern, after selection.
     #[arg(
         short = 'x',
@@ -237,6 +241,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         append_system_prompt: cli.append_system_prompt,
         no_context_files: cli.no_context_files,
         exclude_tools: cli.exclude_tools,
+        thinking: cli
+            .thinking
+            .as_deref()
+            .map(str::parse)
+            .transpose()?
+            .unwrap_or_default(),
     };
 
     if cli.print || !is_terminal {

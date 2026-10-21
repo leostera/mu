@@ -16,7 +16,7 @@ pub mod tools;
 pub use agent::{
     AgentError, AgentEvent, AgentPromptQueue, FooterStats, MuAgent, PromptBehavior, SessionInfo,
     SessionOptions, SessionTranscriptMessage, SessionTranscriptRole, SessionTranscriptTool,
-    latest_session_for_current_cwd, list_sessions_for_current_cwd, run_cli, run_prompt,
-    run_prompt_json, run_prompt_with_options, run_prompt_with_session,
+    ThinkingSetting, latest_session_for_current_cwd, list_sessions_for_current_cwd, run_cli,
+    run_prompt, run_prompt_json, run_prompt_with_options, run_prompt_with_session,
 };
 pub use mu_session as session;

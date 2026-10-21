@@ -159,6 +159,61 @@ pub struct SessionOptions {
     pub no_context_files: bool,
     /// `--exclude-tools`: names or `*` patterns to disable, applied after selection.
     pub exclude_tools: Vec<String>,
+    /// `--thinking`: requested reasoning level.
+    pub thinking: ThinkingSetting,
+}
+
+/// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThinkingSetting {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Default for ThinkingSetting {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+impl std::str::FromStr for ThinkingSetting {
+    type Err = String;
+
+    fn from_str(level: &str) -> Result<Self, String> {
+        Ok(match level {
+            "off" => Self::Off,
+            "minimal" => Self::Minimal,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::Xhigh,
+            "max" => Self::Max,
+            other => {
+                return Err(format!(
+                    "Invalid thinking level \"{other}\". Valid values: off, minimal, low, medium, high, xhigh, max"
+                ));
+            }
+        })
+    }
+}
+
+impl ThinkingSetting {
+    /// OpenAI Responses `reasoning.effort`, or `None` when thinking is off.
+    fn effort(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Minimal => Some("minimal"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::Xhigh | Self::Max => Some("xhigh"),
+        }
+    }
 }
 
 /// Resolved prompt customizations.
@@ -167,6 +222,7 @@ struct PromptOptions {
     system_prompt: Option<String>,
     appended: Vec<String>,
     context: String,
+    thinking: ThinkingSetting,
 }
 
 impl PromptOptions {
@@ -179,6 +235,7 @@ impl PromptOptions {
                 .map(|text| read_prompt_input(text))
                 .collect(),
             context: String::new(),
+            thinking: options.thinking,
         }
     }
 
@@ -233,6 +290,8 @@ struct Provider {
     /// `--append-system-prompt` text placed after everything else.
     appendix: String,
     supports_reasoning: bool,
+    /// Requested reasoning effort (`--thinking`); `None` means off.
+    reasoning_effort: Option<&'static str>,
     supports_strict_sampling: bool,
 }
 
@@ -1218,6 +1277,7 @@ async fn connect(
         describes_tools: prompt.system_prompt.is_none(),
         appendix: prompt.appendix(),
         supports_reasoning,
+        reasoning_effort: prompt.thinking.effort(),
         supports_strict_sampling,
     })
 }
@@ -1288,8 +1348,8 @@ impl Provider {
             instructions = format!("{instructions}\n\n{}", self.appendix);
         }
         let mut request_body = json!({"model":self.model,"instructions":instructions,"input":input,"tools":tools,"stream":true,"store":false});
-        if self.supports_reasoning {
-            request_body["reasoning"] = json!({"effort":"medium","summary":"auto"});
+        if let Some(effort) = self.reasoning_effort.filter(|_| self.supports_reasoning) {
+            request_body["reasoning"] = json!({"effort":effort,"summary":"auto"});
             request_body["include"] = json!(["reasoning.encrypted_content"]);
         }
         let response = http
@@ -2009,6 +2069,7 @@ fn resolve_session_options(
         append_system_prompt: _,
         no_context_files: _,
         exclude_tools: _,
+        thinking: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2468,6 +2529,7 @@ impl MuAgent {
             describes_tools: true,
             appendix: String::new(),
             supports_reasoning: false,
+            reasoning_effort: None,
             supports_strict_sampling: true,
         };
         Ok(prepared.into_agent(provider, None))
@@ -2486,6 +2548,7 @@ impl MuAgent {
                 describes_tools: true,
                 appendix: String::new(),
                 supports_reasoning: false,
+                reasoning_effort: None,
                 supports_strict_sampling: true,
             },
             provider_id: config.provider,
@@ -4519,6 +4582,18 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["read", "find"]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn thinking_levels_parse_like_pi_and_map_to_effort() {
+        assert_eq!("high".parse::<ThinkingSetting>(), Ok(ThinkingSetting::High));
+        assert_eq!(ThinkingSetting::Off.effort(), None);
+        assert_eq!(ThinkingSetting::Max.effort(), Some("xhigh"));
+        assert_eq!(ThinkingSetting::default().effort(), Some("medium"));
+        assert_eq!(
+            "loud".parse::<ThinkingSetting>().unwrap_err(),
+            "Invalid thinking level \"loud\". Valid values: off, minimal, low, medium, high, xhigh, max"
+        );
     }
 
     #[test]
