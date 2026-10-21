@@ -163,11 +163,11 @@ pub(super) fn session_messages(session: &SessionDocument) -> Vec<AgentMessage> {
             .get("role")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let blocks = message.get("content").and_then(Value::as_array);
+        let blocks_owned = super::message_blocks(message);
+        let blocks = &blocks_owned;
         let text_blocks = || {
             blocks
-                .into_iter()
-                .flatten()
+                .iter()
                 .filter_map(|block| block.get("text")?.as_str())
                 .map(ContentBlock::text)
                 .collect::<Vec<_>>()
@@ -184,7 +184,7 @@ pub(super) fn session_messages(session: &SessionDocument) -> Vec<AgentMessage> {
             }
             "assistant" => {
                 let mut content = Vec::new();
-                for block in blocks.into_iter().flatten() {
+                for block in blocks {
                     match block.get("type").and_then(Value::as_str) {
                         Some("text") => {
                             if let Some(text) = block.get("text").and_then(Value::as_str) {

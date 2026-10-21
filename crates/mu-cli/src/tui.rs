@@ -1,11 +1,12 @@
-mod layout;
+mod chrome;
+mod fuzzy;
 mod markdown;
 mod terminal;
 mod theme;
 mod tool_view;
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     future::Future,
     io,
     ops::{Deref, DerefMut},
@@ -16,7 +17,8 @@ use std::{
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use mu_core::{
-    AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior, SessionTranscriptRole,
+    AgentError, AgentEvent, AgentPromptQueue, FooterStats, MuAgent, PromptBehavior,
+    SessionTranscriptRole,
 };
 use ratatui::{
     Frame, Terminal,
@@ -24,17 +26,16 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 use tokio::{
     sync::{Mutex, mpsc},
     task::AbortHandle,
 };
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use self::{
-    layout::ChatViewport,
     markdown::{MarkdownOptions, MarkdownStyle, render_markdown},
     theme::Theme,
     tool_view::{ToolView, tool_lines},
@@ -185,6 +186,8 @@ struct Composer {
     kill_ring: Vec<String>,
     last_action: Option<ComposerActionKind>,
     last_yanked: String,
+    /// First visible editor row (keeps the cursor on screen like Pi's editor).
+    scroll_offset: usize,
 }
 
 impl Composer {
@@ -694,6 +697,16 @@ impl Composer {
         lines
     }
 
+    /// Wrapped editor rows as text, plus the cursor's `(row, column)`.
+    fn layout_rows(&self) -> (Vec<String>, (usize, usize)) {
+        let lines = self.visual_lines();
+        let rows = lines
+            .iter()
+            .map(|line| self.input[line.start..line.end].iter().collect::<String>())
+            .collect();
+        (rows, self.visual_cursor(&lines))
+    }
+
     fn visual_cursor(&self, lines: &[VisualLine]) -> (usize, usize) {
         let line_index = lines
             .iter()
@@ -1033,6 +1046,12 @@ struct App {
     tools_expanded: bool,
     theme: Theme,
     home: Option<String>,
+    stats: FooterStats,
+    cwd: String,
+    session_name: Option<String>,
+    model_names: HashMap<String, String>,
+    /// Status lines (`Switched to …`) with the message count they follow.
+    statuses: Vec<(usize, String)>,
 }
 
 impl Deref for App {
@@ -1070,6 +1089,13 @@ impl App {
             self.theme = theme;
         }
         self.models = agent.model_choices().to_vec();
+        self.model_names = self
+            .models
+            .iter()
+            .map(|model| (model.clone(), agent.model_display_name(model)))
+            .collect();
+        self.cwd = agent.cwd().display().to_string();
+        self.refresh_stats(agent);
         self.messages.messages = agent
             .session_transcript()
             .into_iter()
@@ -1139,6 +1165,27 @@ impl App {
             tools_expanded: false,
             theme: Theme::dark(),
             home: std::env::var("HOME").ok(),
+            stats: FooterStats::default(),
+            cwd: std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            session_name: None,
+            model_names: HashMap::new(),
+            statuses: Vec::new(),
+        }
+    }
+
+    fn refresh_stats(&mut self, agent: &MuAgent) {
+        self.stats = agent.footer_stats();
+        self.session_name = agent.session_name().map(str::to_owned);
+    }
+
+    /// Show a status line after the current messages, replacing a trailing status.
+    fn show_status(&mut self, text: String) {
+        let position = self.messages.len();
+        match self.statuses.last_mut() {
+            Some((at, existing)) if *at == position => *existing = text,
+            _ => self.statuses.push((position, text)),
         }
     }
 
@@ -1448,6 +1495,9 @@ async fn run_loop(
                 let finished = matches!(&event, UiEvent::Finished(_));
                 app.apply(event);
                 if finished {
+                    if let Some(Ok(agent)) = agent.as_ref().map(|agent| agent.try_lock()) {
+                        app.refresh_stats(&agent);
+                    }
                     if let (Some(agent), Some((prompt, behavior))) =
                         (agent.as_ref(), app.prompt_queue.take_next())
                     {
@@ -1580,17 +1630,18 @@ fn handle_command_menu(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>
     let commands = filtered_commands(app);
     match key.code {
         KeyCode::Esc => app.command_menu_open = false,
-        KeyCode::Up => {
-            app.command_selection = app.command_selection.saturating_sub(1);
+        KeyCode::Up if !commands.is_empty() => {
+            app.command_selection = app
+                .command_selection
+                .checked_sub(1)
+                .unwrap_or(commands.len() - 1);
         }
-        KeyCode::Down => {
-            if !commands.is_empty() {
-                app.command_selection = (app.command_selection + 1).min(commands.len() - 1);
-            }
+        KeyCode::Down if !commands.is_empty() => {
+            app.command_selection = (app.command_selection + 1) % commands.len();
         }
         KeyCode::Enter => {
-            if let Some((name, _)) = commands.get(app.command_selection) {
-                app.input = format!("/{name}").chars().collect();
+            if let Some(command) = commands.get(app.command_selection) {
+                app.input = format!("/{}", command.name).chars().collect();
                 app.cursor = app.input.len();
                 app.command_menu_open = false;
                 execute_command(app, agent);
@@ -1653,30 +1704,19 @@ fn cycle_model(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         .unwrap_or(false);
     if selected {
         app.model_selection = next;
+        let name = app
+            .model_names
+            .get(&model)
+            .cloned()
+            .unwrap_or_else(|| model.clone());
         app.model = model;
+        app.show_status(format!("Switched to {name}"));
     }
 }
 
-const COMMANDS: &[(&str, &str)] = &[
-    ("model", "Select model (opens selector UI)"),
-    ("new", "Start a new session"),
-    ("clear", "Start a fresh session"),
-    ("clone", "Clone the current session"),
-    ("name", "Set the current session display name"),
-    ("session", "Show current session info"),
-    ("export", "Export the current session as JSONL"),
-    ("import", "Import and resume a JSONL session"),
-    ("mcp", "Show MCP status or list connected tools"),
-    ("help", "Show available commands"),
-    ("quit", "Exit Mu"),
-];
-
-fn filtered_commands(app: &App) -> Vec<&'static (&'static str, &'static str)> {
+fn filtered_commands(app: &App) -> Vec<chrome::SlashCommand> {
     let query: String = app.input.iter().skip(1).collect();
-    COMMANDS
-        .iter()
-        .filter(|(name, _)| name.starts_with(&query))
-        .collect()
+    chrome::matching_commands(query.split_whitespace().next().unwrap_or_default())
 }
 
 fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
@@ -1930,82 +1970,93 @@ fn insert_char(app: &mut App, ch: char) {
 }
 
 fn render(frame: &mut Frame, app: &mut App) {
-    let input_text = app.input_text();
-    let editor_width = frame.area().width.max(1);
-    app.composer.set_visual_width(usize::from(editor_width));
-    let editor_lines = editor_line_count(&input_text, editor_width).clamp(1, 8) as u16;
-    let menu_rows = if app.command_menu_open || app.model_selector_open {
-        let item_count = if app.model_selector_open {
-            app.models.len()
-        } else {
-            filtered_commands(app).len()
-        };
-        item_count.clamp(1, 6) as u16
-    } else {
-        0
+    let area = frame.area();
+    let width = usize::from(area.width);
+    // Pi lays text out one column short of the width so the cursor has room.
+    app.composer
+        .set_visual_width(width.saturating_sub(1).max(1));
+    let (rows, cursor) = app.composer.layout_rows();
+    let mut editor_scroll = app.composer.scroll_offset;
+    let editor = chrome::editor_frame(
+        &rows,
+        cursor,
+        &mut editor_scroll,
+        width,
+        area.height,
+        &app.theme,
+    );
+    app.composer.scroll_offset = editor_scroll;
+
+    let menu = command_menu_lines(app, width);
+    let footer = chrome::footer_lines(
+        &chrome::FooterInput {
+            cwd: &app.cwd,
+            home: app.home.as_deref(),
+            git_branch: None,
+            session_name: app.session_name.as_deref(),
+            stats: &app.stats,
+            model_id: &app.model,
+            auto_compact: true,
+        },
+        width,
+        &app.theme,
+    );
+    let dock_height = u16::try_from(editor.lines.len() + menu.len() + footer.len())
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let transcript = Rect {
+        height: area.height - dock_height,
+        ..area
     };
-    let viewport = ChatViewport::new(frame.area(), menu_rows, editor_lines);
+    render_transcript(frame, transcript, app);
 
-    render_transcript(frame, viewport.transcript, app);
-    render_command_menu(frame, viewport.command_menu, app);
-    render_editor(frame, viewport.editor, app, &input_text);
-    render_footer(frame, viewport.footer, app);
+    let mut dock = editor.lines;
+    let editor_top = transcript.y + transcript.height;
+    dock.extend(menu);
+    dock.extend(footer);
+    let dock_area = Rect {
+        y: editor_top,
+        height: dock_height,
+        ..area
+    };
+    frame.render_widget(Paragraph::new(dock), dock_area);
 
-    if !app.loading && viewport.editor.width > 2 && viewport.editor.height > 2 {
-        let inner = Block::default()
-            .borders(Borders::TOP | Borders::BOTTOM)
-            .inner(viewport.editor);
-        let cursor = editor_cursor_position(&app.input, app.cursor, inner);
-        frame.set_cursor_position(cursor);
+    if !app.loading && editor_top + (editor.cursor.0 as u16) < area.y + area.height {
+        frame.set_cursor_position(Position {
+            x: area.x + (editor.cursor.1.min(width.saturating_sub(1))) as u16,
+            y: editor_top + editor.cursor.0 as u16,
+        });
     }
 }
 
-fn header_lines(app: &App) -> Vec<Line<'static>> {
-    let version = env!("CARGO_PKG_VERSION");
-    let title = Line::from(vec![
-        Span::styled(
-            "▞ mu ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(version, Style::default().fg(Color::DarkGray)),
-        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            app.model.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {}", app.provider),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            if app.loading {
-                "  ● thinking"
-            } else {
-                "  ● ready"
-            },
-            Style::default().fg(if app.loading {
-                Color::Yellow
-            } else {
-                Color::Green
-            }),
-        ),
-    ]);
-    let help = Line::from(Span::styled(
-        format!(
-            "Ctrl+P model · Ctrl+T thinking {} · / commands · PgUp/PgDn or wheel · Esc clear · Ctrl+C clear/twice quit · Ctrl+D quit when empty",
-            if app.hide_thinking {
-                "hidden"
-            } else {
-                "visible"
-            }
-        ),
-        Style::default().fg(Color::DarkGray),
-    ));
-    vec![title, help]
+/// Rows of the slash-command list shown under the editor.
+fn command_menu_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    if app.model_selector_open {
+        let items = app
+            .models
+            .iter()
+            .map(|model| chrome::SelectItem {
+                label: app
+                    .model_names
+                    .get(model)
+                    .cloned()
+                    .unwrap_or_else(|| model.clone()),
+                description: None,
+            })
+            .collect::<Vec<_>>();
+        return chrome::select_list_lines(&items, app.model_selection, width, &app.theme);
+    }
+    if !app.command_menu_open {
+        return Vec::new();
+    }
+    let items = filtered_commands(app)
+        .iter()
+        .map(chrome::SelectItem::from)
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return Vec::new();
+    }
+    chrome::select_list_lines(&items, app.command_selection, width, &app.theme)
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -2014,47 +2065,13 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let mut lines = header_lines(app);
-    lines.push(Line::from(""));
-    if app.messages.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Mu can chat with your Pi default model and saves turns as Pi sessions.",
-            Style::default().fg(Color::Gray),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "[Session]",
-            Style::default().fg(Color::Yellow),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("  provider: {}", app.provider),
-            Style::default().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("  model: {}", app.model),
-            Style::default().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "[Runtime]",
-            Style::default().fg(Color::Yellow),
-        )));
-        lines.push(Line::from(Span::styled(
-            "  Chat, Pi session persistence, tools, and skill discovery are active.",
-            Style::default().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Ask Mu how to help with your project.",
-            Style::default().fg(Color::Gray),
-        )));
-    }
+    let mut lines = chrome::header_lines(env!("CARGO_PKG_VERSION"), &app.theme);
+    push_statuses(&mut lines, &app.statuses, 0, &app.theme);
     for (index, message) in app.messages.iter().enumerate() {
-        if index > 0 {
-            lines.push(Line::from(""));
-        }
         if matches!(message.role, Role::User) {
+            lines.push(Line::from(""));
             lines.extend(user_message_lines(&message.text, area.width, &app.theme));
+            push_statuses(&mut lines, &app.statuses, index + 1, &app.theme);
             continue;
         }
         let markdown_style = MarkdownStyle::from_theme(&app.theme);
@@ -2124,6 +2141,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
                 &app.theme,
             ));
         }
+        push_statuses(&mut lines, &app.statuses, index + 1, &app.theme);
     }
     for (prompt, behavior) in &app.queued_prompts {
         let label = match behavior {
@@ -2171,6 +2189,22 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+/// Status lines recorded after `position` messages: a spacer and a dim line each.
+fn push_statuses(
+    lines: &mut Vec<Line<'static>>,
+    statuses: &[(usize, String)],
+    position: usize,
+    theme: &Theme,
+) {
+    for (_, text) in statuses.iter().filter(|(at, _)| *at == position) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {text}"),
+            theme.fg("dim"),
+        )));
+    }
+}
+
 /// A user message: Markdown on the `userMessageBg` background with one row of padding.
 fn user_message_lines(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     render_markdown(
@@ -2185,189 +2219,6 @@ fn user_message_lines(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static
             preserve_list_markers: true,
         },
     )
-}
-
-fn render_command_menu(frame: &mut Frame, area: Rect, app: &App) {
-    if area.height == 0 {
-        return;
-    }
-    let lines: Vec<Line<'_>> = if app.model_selector_open {
-        app.models
-            .iter()
-            .enumerate()
-            .take(usize::from(area.height))
-            .map(|(index, model)| {
-                let prefix = if index == app.model_selection {
-                    "→ "
-                } else {
-                    "  "
-                };
-                Line::from(Span::styled(
-                    format!("{prefix}{model}"),
-                    if index == app.model_selection {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    },
-                ))
-            })
-            .collect()
-    } else {
-        filtered_commands(app)
-            .into_iter()
-            .enumerate()
-            .take(usize::from(area.height))
-            .map(|(index, (name, description))| {
-                let prefix = if index == app.command_selection {
-                    "→ "
-                } else {
-                    "  "
-                };
-                Line::from(vec![
-                    Span::styled(
-                        format!("{prefix}{name:<14}"),
-                        if index == app.command_selection {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::Cyan)
-                        },
-                    ),
-                    Span::styled(*description, Style::default().fg(Color::DarkGray)),
-                ])
-            })
-            .collect()
-    };
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn editor_line_count(input: &str, width: u16) -> usize {
-    let wrapped_lines = Paragraph::new(input)
-        .wrap(Wrap { trim: false })
-        .line_count(width.max(1));
-    wrapped_lines + usize::from(input.ends_with('\n'))
-}
-
-fn editor_cursor_position(input: &[char], cursor: usize, inner: Rect) -> Position {
-    let width = inner.width.max(1);
-    let width_cells = usize::from(width);
-    let text: String = input.iter().collect();
-    let content_rows = editor_line_count(&text, width);
-    let visible_rows = usize::from(inner.height.max(1));
-    let scroll = content_rows.saturating_sub(visible_rows);
-
-    let mut row = 0usize;
-    let mut column = 0usize;
-    for character in input.iter().take(cursor.min(input.len())) {
-        if *character == '\n' {
-            row += 1;
-            column = 0;
-            continue;
-        }
-        let character_width = UnicodeWidthChar::width(*character).unwrap_or(0);
-        if character_width > 0 && column + character_width > width_cells {
-            row += 1;
-            column = 0;
-        }
-        column += character_width;
-        if column >= width_cells {
-            row += 1;
-            column = 0;
-        }
-    }
-
-    Position {
-        x: inner.x.saturating_add(column.min(width_cells - 1) as u16),
-        y: inner
-            .y
-            .saturating_add(row.saturating_sub(scroll).min(visible_rows - 1) as u16),
-    }
-}
-
-fn render_editor(frame: &mut Frame, area: Rect, app: &App, input: &str) {
-    let title = if app.loading {
-        " generating · Esc to interrupt "
-    } else {
-        " message · Enter send · Shift+Enter/Ctrl+J newline "
-    };
-    let color = if app.loading {
-        Color::Yellow
-    } else {
-        Color::Cyan
-    };
-    let block = Block::default()
-        .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(color))
-        .title(Span::styled(
-            title,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
-    let text = if input.is_empty() && !app.loading {
-        "Ask Mu to inspect or change something…"
-    } else {
-        input
-    };
-    let style = if input.is_empty() {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    let visible = area.height.saturating_sub(2);
-    let content_lines = editor_line_count(text, area.width);
-    let scroll = (content_lines as u16).saturating_sub(visible);
-    frame.render_widget(
-        Paragraph::new(text.to_owned())
-            .style(style)
-            .block(block)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        area,
-    );
-}
-
-fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let cwd = std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    let session = app
-        .session_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&app.session_path);
-    let path = if cwd.chars().count() > 50 {
-        format!(
-            "…{}",
-            cwd.chars()
-                .skip(cwd.chars().count() - 49)
-                .collect::<String>()
-        )
-    } else {
-        cwd
-    };
-    let first = Line::from(vec![
-        Span::styled(path, Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("  ·  session {session}"),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
-    let help = if let Some(status) = &app.retry_status {
-        format!("{status} · Esc interrupt · Ctrl+C cancel and exit")
-    } else if app.loading {
-        "Enter steer · Alt+Enter follow up · Esc interrupt · Ctrl+C cancel and exit".to_owned()
-    } else {
-        "Enter send · Shift+Enter/Ctrl+J newline · Ctrl+P model · / commands · Ctrl+C clear/twice quit · Ctrl+D quit when empty".to_owned()
-    };
-    frame.render_widget(
-        Paragraph::new(vec![
-            first,
-            Line::from(Span::styled(help, Style::default().fg(Color::DarkGray))),
-        ]),
-        area,
-    );
 }
 
 #[cfg(test)]

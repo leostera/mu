@@ -13,8 +13,8 @@ mod tool_search;
 pub mod tools;
 
 pub use agent::{
-    AgentError, AgentEvent, AgentPromptQueue, MuAgent, PromptBehavior, SessionInfo, SessionOptions,
-    SessionTranscriptMessage, SessionTranscriptRole, SessionTranscriptTool,
+    AgentError, AgentEvent, AgentPromptQueue, FooterStats, MuAgent, PromptBehavior, SessionInfo,
+    SessionOptions, SessionTranscriptMessage, SessionTranscriptRole, SessionTranscriptTool,
     latest_session_for_current_cwd, list_sessions_for_current_cwd, run_cli, run_prompt,
     run_prompt_with_options, run_prompt_with_session,
 };

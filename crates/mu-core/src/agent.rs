@@ -1604,11 +1604,8 @@ fn session_transcript(session: &SessionDocument) -> Vec<SessionTranscriptMessage
             .get("role")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let blocks = message
-            .get("content")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let blocks_owned = message_blocks(message);
+        let blocks = blocks_owned.as_slice();
         match role {
             "user" => {
                 let text = blocks
@@ -1696,6 +1693,15 @@ fn session_transcript(session: &SessionDocument) -> Vec<SessionTranscriptMessage
         }
     }
     transcript
+}
+
+/// Message content as blocks; Pi stores plain-text user messages as a bare string.
+pub(crate) fn message_blocks(message: &serde_json::Map<String, Value>) -> Vec<Value> {
+    match message.get("content") {
+        Some(Value::Array(blocks)) => blocks.clone(),
+        Some(Value::String(text)) => vec![json!({"type":"text","text":text})],
+        _ => Vec::new(),
+    }
 }
 
 fn session_preview(session: &SessionDocument) -> Option<String> {
@@ -2134,6 +2140,70 @@ fn write_session(session: &SessionDocument, path: &Path) -> Result<(), AgentErro
         .map_err(|error| AgentError::Session(error.to_string()))
 }
 
+/// Token, cost, and context totals shown in Pi's footer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FooterStats {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cost: f64,
+    /// Tokens in the most recent successful assistant response (the context size estimate).
+    pub context_tokens: Option<u64>,
+    pub context_window: u64,
+}
+
+fn session_footer_stats(session: &SessionDocument) -> FooterStats {
+    let mut stats = FooterStats::default();
+    for entry in session.entries() {
+        let Some(message) = entry.extra_fields().get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0);
+        stats.input += field("input");
+        stats.output += field("output");
+        stats.cache_read += field("cacheRead");
+        stats.cache_write += field("cacheWrite");
+        stats.cost += usage
+            .pointer("/cost/total")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let failed = matches!(
+            message.get("stopReason").and_then(Value::as_str),
+            Some("error" | "aborted")
+        );
+        if !failed {
+            let total = field("totalTokens");
+            stats.context_tokens = Some(if total > 0 {
+                total
+            } else {
+                field("input") + field("output") + field("cacheRead") + field("cacheWrite")
+            });
+        }
+    }
+    stats
+}
+
+/// A model's entry in `models.json` for `provider`.
+fn configured_model_entry(agent_dir: &Path, provider: &str, model: &str) -> Option<Value> {
+    let contents = std::fs::read_to_string(agent_dir.join("models.json")).ok()?;
+    let value: Value = serde_json::from_str(&contents).ok()?;
+    value
+        .get("providers")?
+        .get(provider)?
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model))
+        .cloned()
+}
+
 /// Everything both startup paths derive from the configuration and session options.
 struct Prepared {
     config: Config,
@@ -2405,6 +2475,31 @@ impl MuAgent {
         self.session.append_model_change(&self.provider_id, model);
         self.save_session()?;
         Ok(true)
+    }
+
+    /// Display name for a model id (`name` in `models.json`, else the id).
+    pub fn model_display_name(&self, model: &str) -> String {
+        configured_model_entry(&self.agent_dir, &self.provider_id, model)
+            .and_then(|entry| entry.get("name").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| model.to_owned())
+    }
+
+    /// Usage totals and context window for the footer.
+    pub fn footer_stats(&self) -> FooterStats {
+        let mut stats = session_footer_stats(&self.session);
+        stats.context_window =
+            configured_model_entry(&self.agent_dir, &self.provider_id, &self.provider.model)
+                .and_then(|entry| entry.get("contextWindow").and_then(Value::as_u64))
+                .unwrap_or(0);
+        stats
+    }
+
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    pub fn session_name(&self) -> Option<&str> {
+        self.session.session_name()
     }
 
     pub fn session_path(&self) -> &Path {
