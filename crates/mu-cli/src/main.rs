@@ -1,3 +1,4 @@
+mod auth_command;
 mod initial_message;
 mod list_models;
 mod rpc;
@@ -202,6 +203,21 @@ enum OutputMode {
 
 #[tokio::main]
 async fn main() {
+    let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+    if let Some(parsed) = auth_command::parse(&raw_args) {
+        let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
+            .unwrap_or_default();
+        match parsed.and_then(|command| auth_command::run(&command, &agent_dir)) {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                eprintln!("mu: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {

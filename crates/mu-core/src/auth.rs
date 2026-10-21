@@ -106,6 +106,40 @@ pub fn api_key(path: &Path, provider: &str) -> Option<String> {
     }
 }
 
+/// Where a provider's credential comes from, in Pi's priority order (after `--api-key`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// A stored API key in `auth.json`.
+    AuthJson(String),
+    /// A stored OAuth credential in `auth.json` (no API key available).
+    OAuth,
+    /// The provider's `apiKey` in `models.json`, resolved.
+    ModelsJson(String),
+    None,
+}
+
+pub fn credential_source(agent_dir: &Path, provider: &str) -> CredentialSource {
+    match load(&agent_dir.join("auth.json"))
+        .ok()
+        .and_then(|mut c| c.remove(provider))
+    {
+        Some(Credential::ApiKey { key: Some(key), .. }) if !key.is_empty() => {
+            return CredentialSource::AuthJson(key);
+        }
+        Some(Credential::Oauth { .. }) => return CredentialSource::OAuth,
+        _ => {}
+    }
+    let configured = std::fs::read_to_string(agent_dir.join("models.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|models| {
+            models["providers"][provider]["apiKey"]
+                .as_str()
+                .and_then(|key| crate::config_value::resolve(key, &Default::default()))
+        });
+    configured.map_or(CredentialSource::None, CredentialSource::ModelsJson)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +200,28 @@ mod tests {
         std::fs::write(&path, "[]").unwrap();
         assert_eq!(load(&path).unwrap_err(), AuthError::NotAnObject);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn credential_source_follows_auth_json_then_models_json() {
+        let dir = temp().parent().unwrap().to_owned();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"a":{"apiKey":"from-models"},"b":{"apiKey":"$MU_SURELY_UNSET_VAR_2"}}}"#,
+        )
+        .unwrap();
+        set_api_key(&dir.join("auth.json"), "a", "from-auth").unwrap();
+        assert_eq!(
+            credential_source(&dir, "a"),
+            CredentialSource::AuthJson("from-auth".into())
+        );
+        assert_eq!(credential_source(&dir, "b"), CredentialSource::None);
+        remove(&dir.join("auth.json"), "a").unwrap();
+        assert_eq!(
+            credential_source(&dir, "a"),
+            CredentialSource::ModelsJson("from-models".into())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
