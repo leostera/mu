@@ -28,8 +28,6 @@ pub enum FileArgumentError {
     NotFound(PathBuf),
     #[error("Could not read file {path}: {message}")]
     Unreadable { path: PathBuf, message: String },
-    #[error("Image attachment {0} is not supported yet")]
-    Image(PathBuf),
 }
 
 fn resolve(file: &str, cwd: &Path) -> PathBuf {
@@ -47,9 +45,19 @@ fn resolve(file: &str, cwd: &Path) -> PathBuf {
     }
 }
 
-/// Render `@file` arguments as Pi's `<file name="…">…</file>` blocks; empty files are skipped.
-pub fn file_text(files: &[String], cwd: &Path) -> Result<String, FileArgumentError> {
-    let mut text = String::new();
+/// Text blocks and image attachments from `@file` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FileAttachments {
+    pub text: String,
+    /// `(mime type, base64 data)`.
+    pub images: Vec<(String, String)>,
+}
+
+/// Render `@file` arguments as Pi's `<file name="…">…</file>` blocks; empty files are skipped and
+/// images become attachments (resized and converted like `read` does), with a text reference.
+pub fn file_text(files: &[String], cwd: &Path) -> Result<FileAttachments, FileArgumentError> {
+    let mut attachments = FileAttachments::default();
+    let text = &mut attachments.text;
     for file in files {
         let path = resolve(file, cwd);
         let bytes = std::fs::read(&path).map_err(|error| match error.kind() {
@@ -62,8 +70,27 @@ pub fn file_text(files: &[String], cwd: &Path) -> Result<String, FileArgumentErr
         if bytes.is_empty() {
             continue;
         }
-        if is_image(&bytes) {
-            return Err(FileArgumentError::Image(path));
+        if let Some(mime) = mu_core::tools::detect_image_mime(&bytes) {
+            let options = mu_core::image_process::ResizeOptions::default();
+            match mu_core::image_process::process_image(&bytes, mime, true, options) {
+                Ok(processed) => {
+                    attachments
+                        .images
+                        .push((processed.mime_type, processed.data));
+                    let hints = processed.hints.join("\n");
+                    text.push_str(&format!(
+                        "<file name=\"{}\">{hints}</file>\n",
+                        path.display()
+                    ));
+                }
+                Err(message) => {
+                    text.push_str(&format!(
+                        "<file name=\"{}\">{message}</file>\n",
+                        path.display()
+                    ));
+                }
+            }
+            continue;
         }
         let content = String::from_utf8_lossy(&bytes);
         let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
@@ -72,15 +99,7 @@ pub fn file_text(files: &[String], cwd: &Path) -> Result<String, FileArgumentErr
             path.display()
         ));
     }
-    Ok(text)
-}
-
-fn is_image(bytes: &[u8]) -> bool {
-    bytes.starts_with(&[0x89, b'P', b'N', b'G'])
-        || bytes.starts_with(&[0xff, 0xd8, 0xff])
-        || bytes.starts_with(b"GIF8")
-        || bytes.starts_with(b"BM")
-        || (bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
+    Ok(attachments)
 }
 
 /// Pi's `buildInitialMessage`: stdin, then `@file` text, then only the *first* message, joined
@@ -123,9 +142,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.txt"), "\u{feff}hello").unwrap();
         std::fs::write(dir.join("empty.txt"), "").unwrap();
-        let text = file_text(&args(&["a.txt", "empty.txt"]), &dir).unwrap();
+        let attachments = file_text(&args(&["a.txt", "empty.txt"]), &dir).unwrap();
+        assert!(attachments.images.is_empty());
         assert_eq!(
-            text,
+            attachments.text,
             format!(
                 "<file name=\"{}\">\nhello\n</file>\n",
                 dir.join("a.txt").display()
@@ -135,18 +155,34 @@ mod tests {
     }
 
     #[test]
-    fn missing_and_image_files_are_errors() {
+    fn missing_files_are_errors_and_images_become_attachments() {
         let dir = std::env::temp_dir().join(format!("mu-initial-err-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("p.png"), [0x89, b'P', b'N', b'G', 1]).unwrap();
         assert!(matches!(
             file_text(&args(&["nope"]), &dir),
             Err(FileArgumentError::NotFound(_))
         ));
-        assert!(matches!(
-            file_text(&args(&["p.png"]), &dir),
-            Err(FileArgumentError::Image(_))
-        ));
+        let png = mu_core::image_process::png_for_test();
+        std::fs::write(dir.join("p.png"), &png).unwrap();
+        let attached = file_text(&args(&["p.png"]), &dir).unwrap();
+        assert_eq!(attached.images.len(), 1);
+        assert_eq!(attached.images[0].0, "image/png");
+        assert_eq!(
+            attached.text,
+            format!("<file name=\"{}\"></file>\n", dir.join("p.png").display())
+        );
+        // A PNG signature with nothing valid behind it is described, not attached.
+        std::fs::write(
+            dir.join("bad.png"),
+            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1],
+        )
+        .unwrap();
+        let bad = file_text(&args(&["bad.png"]), &dir).unwrap();
+        assert!(
+            bad.images.is_empty() && bad.text.contains("[Image omitted:"),
+            "{}",
+            bad.text
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -300,7 +300,16 @@ pub(super) fn session_messages(session: &SessionDocument) -> Vec<AgentMessage> {
         };
         match role {
             "user" => {
-                let content = text_blocks();
+                let mut content = text_blocks();
+                content.extend(blocks.iter().filter_map(|block| {
+                    if block.get("type")?.as_str()? != "image" {
+                        return None;
+                    }
+                    Some(ContentBlock::Image {
+                        data: block.get("data")?.as_str()?.to_owned(),
+                        mime_type: block.get("mimeType")?.as_str()?.to_owned(),
+                    })
+                }));
                 if !content.is_empty() {
                     messages.push(AgentMessage::User(UserMessage {
                         content,
@@ -987,8 +996,20 @@ impl MuAgent {
         on_event: &mut impl FnMut(AgentEvent),
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.submit_with_images(prompt, Vec::new(), on_event, cancel)
+            .await
+    }
+
+    /// Like [`Self::submit_with_cancel`], with `(mime type, base64)` images attached to the prompt.
+    pub async fn submit_with_images(
+        &mut self,
+        prompt: String,
+        images: Vec<(String, String)>,
+        on_event: &mut impl FnMut(AgentEvent),
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
         let prompt = self.expand_prompt(prompt, on_event);
-        self.session.append_user_text(prompt.clone());
+        self.session.append_user_content(prompt.clone(), &images);
         self.save_session()?;
         self.ensure_mcp_ready().await;
 
@@ -1053,7 +1074,18 @@ impl MuAgent {
         drop(sender);
 
         let run = agent_loop::run_agent_loop(
-            vec![AgentMessage::user_text(prompt, 0)],
+            vec![{
+                let mut content = vec![ContentBlock::text(prompt)];
+                content.extend(
+                    images
+                        .into_iter()
+                        .map(|(mime_type, data)| ContentBlock::Image { data, mime_type }),
+                );
+                AgentMessage::User(UserMessage {
+                    content,
+                    timestamp: 0,
+                })
+            }],
             context,
             config,
             sink,

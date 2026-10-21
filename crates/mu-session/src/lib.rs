@@ -336,6 +336,20 @@ impl SessionDocument {
         }));
     }
 
+    /// A user message with text and base64 images (Pi's `ImageContent` blocks).
+    pub fn append_user_content(&mut self, text: impl Into<String>, images: &[(String, String)]) {
+        let message_timestamp = chrono::Utc::now().timestamp_millis();
+        let mut content = vec![serde_json::json!({ "type": "text", "text": text.into() })];
+        content.extend(images.iter().map(|(mime_type, data)| {
+            serde_json::json!({ "type": "image", "data": data, "mimeType": mime_type })
+        }));
+        self.append_message(serde_json::json!({
+            "role": "user",
+            "content": content,
+            "timestamp": message_timestamp,
+        }));
+    }
+
     pub fn append_assistant_text(
         &mut self,
         api: &str,

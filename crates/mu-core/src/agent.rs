@@ -4667,6 +4667,7 @@ pub async fn run_prompt_with_session(
 ) -> Result<(), AgentError> {
     run_prompt_with_options(
         vec![prompt],
+        Vec::new(),
         SessionOptions {
             path: session_file,
             ..SessionOptions::default()
@@ -4678,20 +4679,30 @@ pub async fn run_prompt_with_session(
 /// Run one prompt and print every agent event as a JSON line (Pi's `--mode json`).
 pub async fn run_prompt_json(
     prompts: Vec<String>,
+    images: Vec<(String, String)>,
     session_options: SessionOptions,
 ) -> Result<(), AgentError> {
     let mut agent = MuAgent::connect_with_options(session_options).await?;
     agent.set_event_tap(Arc::new(|event| {
         println!("{}", crate::agent_loop::event_to_json(event));
     }));
+    let mut images = Some(images);
     for prompt in prompts {
-        agent.submit(prompt, &mut |_| {}).await?;
+        agent
+            .submit_with_images(
+                prompt,
+                images.take().unwrap_or_default(),
+                &mut |_| {},
+                &CancellationToken::new(),
+            )
+            .await?;
     }
     Ok(())
 }
 
 pub async fn run_prompt_with_options(
     prompts: Vec<String>,
+    images: Vec<(String, String)>,
     session_options: SessionOptions,
 ) -> Result<(), AgentError> {
     let verbose = session_options.verbose;
@@ -4699,9 +4710,10 @@ pub async fn run_prompt_with_options(
     if verbose {
         eprintln!("{}", agent.startup_summary());
     }
+    let mut images = Some(images);
     for prompt in prompts {
         agent
-            .submit(prompt, &mut |event| {
+            .submit_with_images(prompt, images.take().unwrap_or_default(), &mut |event| {
                 match event {
                     AgentEvent::TextDelta(text) => print!("{text}"),
                     AgentEvent::RetryScheduled {
@@ -4716,7 +4728,7 @@ pub async fn run_prompt_with_options(
                     _ => {}
                 }
                 let _ = io::stdout().flush();
-            })
+            }, &CancellationToken::new())
             .await?;
     }
     println!();
@@ -6622,6 +6634,20 @@ mod tests {
             ]
         );
         assert_eq!(out[1]["output"], "plain");
+    }
+
+    #[test]
+    fn user_images_round_trip_through_the_session_into_responses_input() {
+        let mut session = SessionDocument::new("/w".to_owned());
+        session.append_user_content("see", &[("image/png".to_owned(), "QUJD".to_owned())]);
+        let reloaded = SessionDocument::parse_jsonl(&session.to_jsonl().unwrap()).unwrap();
+        let input = super::runtime::responses_input(&super::runtime::session_messages(&reloaded));
+        assert_eq!(input[0]["content"][0]["text"], "see");
+        assert_eq!(input[0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            input[0]["content"][1]["image_url"],
+            "data:image/png;base64,QUJD"
+        );
     }
 
     #[test]

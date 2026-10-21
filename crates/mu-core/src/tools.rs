@@ -232,7 +232,7 @@ fn read_file_io_error(path: &Path, error: std::io::Error) -> ToolError {
 }
 
 /// Image type by file magic (Pi's `detectSupportedImageMimeTypeFromFile`, minus BMP conversion).
-fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+pub fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
         Some("image/png")
     } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {

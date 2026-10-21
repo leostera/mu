@@ -223,6 +223,16 @@ pub fn process_image(
     })
 }
 
+/// A tiny valid PNG for tests in other crates.
+#[doc(hidden)]
+pub fn png_for_test() -> Vec<u8> {
+    let mut out = Vec::new();
+    DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+        .expect("encode png");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -414,7 +414,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let stdin = (!is_terminal)
             .then(|| read_stdin_prompt(is_terminal))
             .transpose()?;
-        let (first, rest) = initial_prompt_from(&cli.prompt, stdin.as_deref())?;
+        let InitialPrompt {
+            first,
+            rest,
+            images,
+        } = initial_prompt_from(&cli.prompt, stdin.as_deref())?;
         // The first message carries stdin and `@file` text; each later message is its own turn.
         let prompts = first
             .into_iter()
@@ -425,14 +429,24 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         if cli.mode == OutputMode::Json {
-            mu_core::run_prompt_json(prompts, session_options).await?;
+            mu_core::run_prompt_json(prompts, images, session_options).await?;
         } else {
-            mu_core::run_prompt_with_options(prompts, session_options).await?;
+            mu_core::run_prompt_with_options(prompts, images, session_options).await?;
         }
         return Ok(());
     }
 
-    let (first, rest) = initial_prompt_from(&cli.prompt, None)?;
+    let InitialPrompt {
+        first,
+        rest,
+        images,
+    } = initial_prompt_from(&cli.prompt, None)?;
+    if !images.is_empty() {
+        eprintln!(
+            "mu: @image attachments are only sent in print and JSON modes; ignoring {} image(s)",
+            images.len()
+        );
+    }
     // The TUI sends one opening prompt; later messages are kept by joining them onto it.
     let initial_prompt = (first.is_some() || !rest.is_empty())
         .then(|| first.into_iter().chain(rest).collect::<Vec<_>>().join(" "));
@@ -536,14 +550,26 @@ fn select_session(
     }
 }
 
+struct InitialPrompt {
+    first: Option<String>,
+    rest: Vec<String>,
+    /// `@file` images, attached to the first prompt.
+    images: Vec<(String, String)>,
+}
+
 /// Combine stdin, `@file` arguments and message arguments into the first prompt.
 fn initial_prompt_from(
     arguments: &[String],
     stdin: Option<&str>,
-) -> Result<(Option<String>, Vec<String>), Box<dyn std::error::Error>> {
+) -> Result<InitialPrompt, Box<dyn std::error::Error>> {
     let parsed = initial_message::PromptArguments::parse(arguments);
     let files = initial_message::file_text(&parsed.files, &std::env::current_dir()?)?;
-    Ok(initial_message::build(stdin, &files, &parsed.messages))
+    let (first, rest) = initial_message::build(stdin, &files.text, &parsed.messages);
+    Ok(InitialPrompt {
+        first,
+        rest,
+        images: files.images,
+    })
 }
 
 /// Pi's multi-letter short flags (`-ns`, `-xt`, …); clap only supports one-letter shorts.
