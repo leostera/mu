@@ -248,6 +248,7 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    mu_core::timings::time("args parsed");
     if let Some(agent_dir) = std::env::var_os("PI_CODING_AGENT_DIR")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
@@ -356,6 +357,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(level) => level.parse()?,
         None => suffix_thinking.unwrap_or_default(),
     };
+    mu_core::timings::time("settings and crash log");
     let session_options = mu_core::SessionOptions {
         path: session_file,
         directory: cli.session_dir,
@@ -392,6 +394,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         thinking,
     };
 
+    mu_core::timings::time("session options");
     if cli.mode == OutputMode::Rpc {
         let agent = mu_core::MuAgent::connect_with_options(session_options).await?;
         return rpc::run(agent).await;
@@ -416,6 +419,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let initial_prompt = initial_prompt_from(&cli.prompt, None)?;
+    mu_core::timings::print();
     tui::run_starting(
         async move { mu_core::MuAgent::connect_with_options(session_options).await },
         initial_prompt,
