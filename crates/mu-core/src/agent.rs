@@ -3542,6 +3542,21 @@ impl MuAgent {
             .map_err(|error| AgentError::Configuration(error.to_string()))
     }
 
+    /// Effective layered settings, read fresh from disk.
+    pub fn settings(&self) -> crate::settings::Settings {
+        crate::settings::Settings::load(&self.agent_dir, &self.cwd, true)
+    }
+
+    /// Flip a boolean setting in the global `settings.json`; returns the new value.
+    pub fn toggle_setting(&self, key: &str) -> Result<bool, AgentError> {
+        let mut settings = self.settings();
+        let next = !settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+        settings
+            .set(crate::settings::Scope::Global, key, Value::Bool(next))
+            .map_err(|error| AgentError::Configuration(error.to_string()))?;
+        Ok(next)
+    }
+
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }

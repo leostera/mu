@@ -1861,6 +1861,38 @@ fn find_session<'a>(
         .or_else(|| sessions.iter().find(|s| s.id.starts_with(query)))
 }
 
+/// Boolean settings the `/settings` overlay can flip: (settings key, label).
+const TOGGLE_SETTINGS: &[(&str, &str)] = &[
+    ("hideThinkingBlock", "Hide thinking blocks"),
+    ("quietStartup", "Quiet startup"),
+    ("enableSkillCommands", "Skill commands"),
+    ("compaction.enabled", "Auto-compaction"),
+    ("retry.enabled", "Auto-retry"),
+    ("terminal.showImages", "Show images"),
+    ("images.autoResize", "Auto-resize images"),
+    ("images.blockImages", "Block images"),
+    ("collapseChangelog", "Collapse changelog"),
+];
+
+fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
+    let state = |key: &str| settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    Picker {
+        command: "settings",
+        items: TOGGLE_SETTINGS
+            .iter()
+            .map(|(key, label)| chrome::SelectItem {
+                label: (*label).to_owned(),
+                description: Some(if state(key) { "on" } else { "off" }.to_owned()),
+            })
+            .collect(),
+        values: TOGGLE_SETTINGS
+            .iter()
+            .map(|(key, _)| (*key).to_owned())
+            .collect(),
+        selection: 0,
+    }
+}
+
 fn session_picker(sessions: &[mu_core::SessionInfo]) -> Picker {
     Picker {
         command: "resume",
@@ -2212,6 +2244,31 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                     ),
                     Err(error) => format!("Could not save trust: {error}"),
                 },
+            };
+            app.show_status(status);
+        }
+        "settings" => {
+            let status = match agent.try_lock() {
+                Err(_) => "Mu is busy.".to_owned(),
+                Ok(agent) if !argument.is_empty() => {
+                    match TOGGLE_SETTINGS.iter().find(|(key, _)| *key == argument) {
+                        None => format!("Unknown setting \"{argument}\""),
+                        Some((key, label)) => match agent.toggle_setting(key) {
+                            Ok(on) => {
+                                if *key == "hideThinkingBlock" {
+                                    app.hide_thinking = on;
+                                }
+                                format!("{label}: {} (saved to settings.json; most settings apply to new sessions)", if on { "on" } else { "off" })
+                            }
+                            Err(error) => format!("Could not save setting: {error}"),
+                        },
+                    }
+                }
+                Ok(agent) => {
+                    let settings = agent.settings();
+                    app.picker = Some(settings_picker(&settings));
+                    "Settings: Enter toggles the selected option.".to_owned()
+                }
             };
             app.show_status(status);
         }
@@ -3113,6 +3170,23 @@ mod tests {
         execute_command(&mut app, &agent);
         press(&mut app, KeyCode::Esc);
         assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn settings_picker_shows_current_values_with_defaults() {
+        let dir = std::env::temp_dir().join(format!("mu-settings-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"quietStartup":true}"#).unwrap();
+        let settings = mu_core::settings::Settings::load(&dir, &dir, true);
+        let picker = super::settings_picker(&settings);
+        let state = |key: &str| {
+            let at = picker.values.iter().position(|v| v == key).unwrap();
+            picker.items[at].description.clone().unwrap()
+        };
+        assert_eq!(state("quietStartup"), "on");
+        assert_eq!(state("compaction.enabled"), "on", "Pi default");
+        assert_eq!(state("hideThinkingBlock"), "off");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
