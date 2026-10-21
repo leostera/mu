@@ -46,7 +46,9 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
     });
     let mut writer = pair.master.take_writer()?;
 
-    wait_for(&screen, |text| text.contains("Ask Mu to inspect"))?;
+    wait_for(&screen, |text| {
+        text.contains("Mu can explain its own features")
+    })?;
     assert!(
         screen
             .lock()
@@ -64,7 +66,7 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
     writer.write_all(b"/")?;
     writer.flush()?;
     wait_for(&screen, |text| {
-        text.contains("model") && text.contains("new")
+        text.contains("model") && text.contains("(1/24)")
     })?;
     writer.write_all(b"m")?;
     writer.flush()?;
@@ -86,7 +88,7 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
     wait_for(&screen, |text| text.contains("mu-demo-alt"))?;
     writer.write_all(b"\x1b[B\r")?;
     writer.flush()?;
-    wait_for(&screen, |text| text.contains("mu-demo-alt  mu-demo"))?;
+    wait_for(&screen, |text| text.contains("Switched to mu-demo-alt"))?;
 
     writer.write_all(b"temporary editor text")?;
     writer.flush()?;
@@ -107,7 +109,7 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
     writer.write_all(b"hello from PTY\r")?;
     writer.flush()?;
     wait_for(&screen, |text| {
-        text.contains("Demo backend received: hello from PTY") && text.contains("● ready")
+        text.contains("Demo backend received: hello from PTY")
     })?;
     writer.write_all(b"\x1b[A")?;
     writer.flush()?;

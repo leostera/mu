@@ -1717,7 +1717,13 @@ fn handle_model_selector(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent
                     .and_then(|mut agent| agent.select_model(&model).ok())
                     .unwrap_or(false);
                 if selected {
+                    let name = app
+                        .model_names
+                        .get(&model)
+                        .cloned()
+                        .unwrap_or_else(|| model.clone());
                     app.model = model;
+                    app.show_status(format!("Switched to {name}"));
                 }
             }
             app.model_selector_open = false;
