@@ -6522,6 +6522,52 @@ mod tests {
         assert!(default.contains("us-central1-aiplatform"));
     }
 
+    /// Pi's `transformMessages` orphan handling: unanswered calls get a synthetic error result
+    /// before the next turn begins, and answered calls are left alone.
+    #[test]
+    fn orphaned_tool_calls_get_synthetic_results_before_the_next_turn() {
+        let call = |id: &str| serde_json::json!({"type":"function_call","call_id":id,"name":"read","arguments":"{}"});
+        let output = |id: &str| serde_json::json!({"type":"function_call_output","call_id":id,"output":"ok"});
+        let user =
+            serde_json::json!({"role":"user","content":[{"type":"input_text","text":"next"}]});
+        let items = super::runtime::close_orphaned_calls(vec![
+            call("a"),
+            call("b"),
+            output("a"),
+            user.clone(),
+            call("c"),
+        ]);
+        let shape = items
+            .iter()
+            .map(|i| {
+                format!(
+                    "{}:{}",
+                    i["type"].as_str().unwrap_or("message"),
+                    i["call_id"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            [
+                "function_call:a",
+                "function_call:b",
+                "function_call_output:a",
+                "function_call_output:b",
+                "message:",
+                "function_call:c",
+                "function_call_output:c"
+            ]
+        );
+        assert_eq!(items[3]["output"], "No result provided");
+        // A complete history is unchanged.
+        let complete = vec![call("x"), output("x"), user];
+        assert_eq!(
+            super::runtime::close_orphaned_calls(complete.clone()),
+            complete
+        );
+    }
+
     #[test]
     fn bedrock_region_comes_from_the_runtime_host() {
         assert_eq!(

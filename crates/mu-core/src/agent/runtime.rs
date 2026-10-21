@@ -136,7 +136,42 @@ pub(super) fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
             AgentMessage::System(_) | AgentMessage::Custom { .. } => {}
         }
     }
-    input
+    close_orphaned_calls(input)
+}
+
+/// Pi's `transformMessages` second pass: a tool call with no result (an interrupted turn, or a
+/// hand-edited session) gets a synthetic error result before the next assistant or user item,
+/// so every provider sees a complete call/result pairing.
+pub(super) fn close_orphaned_calls(input: Vec<Value>) -> Vec<Value> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut pending: Vec<String> = Vec::new();
+    let flush = |pending: &mut Vec<String>, out: &mut Vec<Value>| {
+        for call_id in pending.drain(..) {
+            out.push(json!({
+                "type":"function_call_output",
+                "call_id":call_id,
+                "output":"No result provided",
+            }));
+        }
+    };
+    for item in input {
+        match item.get("type").and_then(Value::as_str) {
+            Some("function_call") => {
+                if let Some(id) = item.get("call_id").and_then(Value::as_str) {
+                    pending.push(id.to_owned());
+                }
+            }
+            Some("function_call_output") => {
+                let id = item.get("call_id").and_then(Value::as_str);
+                pending.retain(|pending_id| Some(pending_id.as_str()) != id);
+            }
+            // A new message or reasoning item starts the next turn.
+            _ => flush(&mut pending, &mut out),
+        }
+        out.push(item);
+    }
+    flush(&mut pending, &mut out);
+    out
 }
 
 fn synthesize_assistant_items(assistant: &AssistantMessage, input: &mut Vec<Value>) {
