@@ -278,7 +278,8 @@ impl From<&SlashCommand> for SelectItem {
     }
 }
 
-const MAX_VISIBLE: usize = 5;
+/// Pi's default `autocompleteMaxVisible`.
+pub const DEFAULT_MAX_VISIBLE: usize = 5;
 const PRIMARY_COLUMN_GAP: usize = 2;
 const MIN_PRIMARY_COLUMN: usize = 12;
 const MAX_PRIMARY_COLUMN: usize = 32;
@@ -300,8 +301,10 @@ pub fn select_list_lines(
     items: &[SelectItem],
     selected: usize,
     width: usize,
+    max_visible: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    let max_visible = max_visible.max(1);
     if items.is_empty() {
         return vec![Line::from(Span::styled(
             "  No matching commands",
@@ -315,10 +318,10 @@ pub fn select_list_lines(
         .unwrap_or(0);
     let primary_width = widest.clamp(MIN_PRIMARY_COLUMN, MAX_PRIMARY_COLUMN);
     let start = selected
-        .saturating_sub(MAX_VISIBLE / 2)
-        .min(items.len().saturating_sub(MAX_VISIBLE));
-    let start = if items.len() <= MAX_VISIBLE { 0 } else { start };
-    let end = (start + MAX_VISIBLE).min(items.len());
+        .saturating_sub(max_visible / 2)
+        .min(items.len().saturating_sub(max_visible));
+    let start = if items.len() <= max_visible { 0 } else { start };
+    let end = (start + max_visible).min(items.len());
     let accent = theme.fg("accent");
     let description_style = theme.fg("muted");
     let mut lines = Vec::new();
@@ -517,6 +520,22 @@ mod tests {
     }
 
     #[test]
+    fn select_list_honors_max_visible() {
+        let theme = Theme::dark();
+        let items = (0..10)
+            .map(|i| SelectItem {
+                label: format!("item{i}"),
+                description: None,
+            })
+            .collect::<Vec<_>>();
+        let rows = |max| select_list_lines(&items, 0, 80, max, &theme).len();
+        // Visible rows plus Pi's trailing "(n/total)" position line.
+        assert_eq!(rows(3), 4);
+        assert_eq!(rows(8), 9);
+        assert_eq!(rows(0), rows(1), "zero is clamped to one row");
+    }
+
+    #[test]
     fn token_counts_and_cwd_use_pi_formats() {
         assert_eq!(format_tokens(999), "999");
         assert_eq!(format_tokens(1_234), "1.2k");
@@ -547,7 +566,7 @@ mod tests {
             .iter()
             .map(SelectItem::from)
             .collect::<Vec<_>>();
-        let lines = select_list_lines(&items, 0, 100, &theme);
+        let lines = select_list_lines(&items, 0, 100, DEFAULT_MAX_VISIBLE, &theme);
         assert_eq!(text(&lines[0]), "→ settings       Open settings menu");
         assert_eq!(
             text(&lines[1]),
@@ -555,7 +574,7 @@ mod tests {
         );
         assert_eq!(text(&lines[5]), "  (1/24)");
         assert_eq!(
-            text(&select_list_lines(&[], 0, 100, &theme)[0]),
+            text(&select_list_lines(&[], 0, 100, DEFAULT_MAX_VISIBLE, &theme)[0]),
             "  No matching commands"
         );
     }

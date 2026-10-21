@@ -1070,6 +1070,8 @@ struct App {
     picker: Option<Picker>,
     /// `quietStartup: true` hides the startup header.
     quiet_startup: bool,
+    /// `autocompleteMaxVisible`: rows shown in menus and pickers.
+    autocomplete_max_visible: usize,
     /// When Esc was last pressed on an empty editor (double-Esc opens `/tree` or `/fork`).
     last_escape: Option<std::time::Instant>,
     /// Prompt-template and skill commands offered after the built-ins in the slash menu.
@@ -1139,6 +1141,11 @@ impl App {
             .collect();
         self.cwd = agent.cwd().display().to_string();
         self.quiet_startup = agent.settings().get("quietStartup") == Some(serde_json::json!(true));
+        self.autocomplete_max_visible = agent
+            .settings()
+            .get("autocompleteMaxVisible")
+            .and_then(|v| v.as_u64())
+            .map_or(chrome::DEFAULT_MAX_VISIBLE, |n| n.clamp(1, 20) as usize);
         self.extra_commands = agent
             .dynamic_slash_commands()
             .into_iter()
@@ -1204,6 +1211,7 @@ impl App {
             model_selector_open: false,
             picker: None,
             quiet_startup: false,
+            autocomplete_max_visible: chrome::DEFAULT_MAX_VISIBLE,
             last_escape: None,
             extra_commands: Vec::new(),
             model_selection: 0,
@@ -2798,7 +2806,13 @@ fn render(frame: &mut Frame, app: &mut App) {
 /// Rows of the slash-command list shown under the editor.
 fn command_menu_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     if let Some(picker) = &app.picker {
-        return chrome::select_list_lines(&picker.items, picker.selection, width, &app.theme);
+        return chrome::select_list_lines(
+            &picker.items,
+            picker.selection,
+            width,
+            app.autocomplete_max_visible,
+            &app.theme,
+        );
     }
     if app.model_selector_open {
         let items = app
@@ -2813,7 +2827,13 @@ fn command_menu_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 description: None,
             })
             .collect::<Vec<_>>();
-        return chrome::select_list_lines(&items, app.model_selection, width, &app.theme);
+        return chrome::select_list_lines(
+            &items,
+            app.model_selection,
+            width,
+            app.autocomplete_max_visible,
+            &app.theme,
+        );
     }
     if !app.command_menu_open {
         return Vec::new();
@@ -2825,7 +2845,13 @@ fn command_menu_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     if items.is_empty() {
         return Vec::new();
     }
-    chrome::select_list_lines(&items, app.command_selection, width, &app.theme)
+    chrome::select_list_lines(
+        &items,
+        app.command_selection,
+        width,
+        app.autocomplete_max_visible,
+        &app.theme,
+    )
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
