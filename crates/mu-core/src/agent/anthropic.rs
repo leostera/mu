@@ -7,6 +7,15 @@ use serde_json::{Value, json};
 
 use super::{AgentEvent, FunctionCall, Reply};
 
+/// Anthropic OAuth (Claude subscription) tokens contain `sk-ant-oat`.
+pub(super) fn is_oauth_token(key: &str) -> bool {
+    key.contains("sk-ant-oat")
+}
+
+/// OAuth requests must identify as Claude Code (Pi's `anthropic-messages.ts`).
+pub(super) const CLAUDE_CODE_IDENTITY: &str =
+    "You are Claude Code, Anthropic's official CLI for Claude.";
+
 fn text_of(content: &Value) -> String {
     content
         .as_array()
@@ -233,6 +242,12 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_tokens_are_recognised_by_their_prefix() {
+        assert!(is_oauth_token("sk-ant-oat01-abc"));
+        assert!(!is_oauth_token("sk-ant-api03-abc"));
+    }
 
     #[test]
     fn history_translates_to_alternating_anthropic_messages_with_tool_blocks() {

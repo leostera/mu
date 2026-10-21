@@ -117,6 +117,19 @@ pub fn api_key(path: &Path, provider: &str) -> Option<String> {
     }
 }
 
+/// The stored OAuth access token for `provider`, if any (expiry is the caller's concern).
+pub fn oauth_access(path: &Path, provider: &str) -> Option<(String, String, f64)> {
+    match load(path).ok()?.remove(provider)? {
+        Credential::Oauth {
+            access,
+            refresh,
+            expires,
+            ..
+        } => Some((access, refresh, expires)),
+        Credential::ApiKey { .. } => None,
+    }
+}
+
 /// Where a provider's credential comes from, in Pi's priority order (after `--api-key`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialSource {

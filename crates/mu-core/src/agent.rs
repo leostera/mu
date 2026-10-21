@@ -1445,12 +1445,33 @@ fn trusted_url(value: &str) -> Result<Url, AgentError> {
     Ok(url)
 }
 
+/// Refresh a stored Anthropic OAuth credential that has expired and save the new tokens.
+async fn refresh_expired_oauth(config: &Config) -> Result<(), AgentError> {
+    let path = config.agent_dir.join("auth.json");
+    let Some((_, refresh, expires)) = crate::auth::oauth_access(&path, &config.provider) else {
+        return Ok(());
+    };
+    if config.provider != "anthropic" || !crate::oauth::is_expired(expires) {
+        return Ok(());
+    }
+    let credential = crate::oauth::anthropic::refresh_token(&refresh)
+        .await
+        .map_err(|error| {
+            AgentError::Provider(format!(
+                "OAuth refresh failed ({error}); run `mu auth login --provider anthropic`"
+            ))
+        })?;
+    crate::auth::set_credential(&path, &config.provider, credential)
+        .map_err(|error| AgentError::Configuration(error.to_string()))
+}
+
 async fn connect(
     config: &Config,
     skill_prompt: String,
     prompt: &PromptOptions,
 ) -> Result<Provider, AgentError> {
     if !config.provider.starts_with("opencode-cf") {
+        refresh_expired_oauth(config).await?;
         return connect_custom_provider(config, skill_prompt, prompt);
     }
     let token = match &prompt.api_key {
@@ -1784,13 +1805,26 @@ impl Provider {
                 "high" => 16_384,
                 _ => 32_768,
             });
+        let oauth = anthropic::is_oauth_token(key);
+        if oauth {
+            system = format!("{}\n\n{system}", anthropic::CLAUDE_CODE_IDENTITY);
+        }
         let mut body = anthropic::request_body(&self.model, &system, history, tools, budget);
         if let Some(budget) = budget {
             body["max_tokens"] = json!(budget + 16_384);
         }
-        let response = http
-            .post(endpoint.clone())
-            .header("x-api-key", key)
+        let request = http.post(endpoint.clone());
+        let request = if oauth {
+            // Pi: OAuth tokens use Bearer auth plus Claude Code identity headers.
+            request
+                .bearer_auth(key)
+                .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
+                .header("user-agent", "claude-cli/2.1.280")
+                .header("x-app", "cli")
+        } else {
+            request.header("x-api-key", key)
+        };
+        let response = request
             .header("anthropic-version", "2023-06-01")
             .header(header::ACCEPT, "text/event-stream")
             .json(&body)
@@ -2264,12 +2298,17 @@ fn connect_custom_provider(
     let key = match entry.get("apiKey").and_then(Value::as_str) {
         Some(key) => key,
         None if bedrock => "",
+        None if anthropic => "",
         None => return Err(unsupported()),
     };
     let token = prompt
         .api_key
         .clone()
         .or_else(|| crate::auth::api_key(&config.agent_dir.join("auth.json"), &config.provider))
+        .or_else(|| {
+            crate::auth::oauth_access(&config.agent_dir.join("auth.json"), &config.provider)
+                .map(|(access, _, _)| access)
+        })
         .or_else(|| crate::config_value::resolve(key, &HashMap::new()))
         .filter(|v| !v.is_empty())
         .unwrap_or_default();
