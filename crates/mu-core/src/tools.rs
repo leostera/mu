@@ -1202,32 +1202,64 @@ fn sort_directory_entries(entries: &mut [String]) {
     entries.sort_by_key(|entry| entry.to_lowercase());
 }
 
+/// Injectable directory access for the ls tool (Pi's `LsOperations`).
+pub trait DirectoryOperations: Send + Sync {
+    fn exists(&self, path: &Path) -> bool;
+    /// Whether `path` is a directory, following symlinks.
+    fn is_dir(&self, path: &Path) -> std::io::Result<bool>;
+    /// Entry names directly under `path`.
+    fn read_dir(&self, path: &Path) -> std::io::Result<Vec<String>>;
+}
+
+impl DirectoryOperations for LocalFiles {
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn is_dir(&self, path: &Path) -> std::io::Result<bool> {
+        std::fs::metadata(path).map(|metadata| metadata.is_dir())
+    }
+
+    fn read_dir(&self, path: &Path) -> std::io::Result<Vec<String>> {
+        std::fs::read_dir(path)?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect()
+    }
+}
+
 fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    list_directory_with(&LocalFiles, cwd, args)
+}
+
+/// The ls tool over any [`DirectoryOperations`].
+pub fn list_directory_with(
+    files: &dyn DirectoryOperations,
+    cwd: &Path,
+    args: &Value,
+) -> Result<ToolResult, ToolError> {
     let ListDirectoryInput { path, limit } = parse_list_directory_input(cwd, args)?;
-    if !path.exists() {
+    if !files.exists(&path) {
         return Err(ToolError::Command(format!(
             "Path not found: {}",
             path.display()
         )));
     }
-    let metadata = std::fs::metadata(&path)
+    let is_dir = files
+        .is_dir(&path)
         .map_err(|error| ToolError::Command(node_stat_error(&path, error)))?;
-    if !metadata.is_dir() {
+    if !is_dir {
         return Err(ToolError::Command(format!(
             "Not a directory: {}",
             path.display()
         )));
     }
 
-    let mut entries = std::fs::read_dir(&path)
-        .map_err(|error| {
-            ToolError::Command(format!(
-                "Cannot read directory: {}",
-                node_scandir_error(&path, error)
-            ))
-        })?
-        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut entries = files.read_dir(&path).map_err(|error| {
+        ToolError::Command(format!(
+            "Cannot read directory: {}",
+            node_scandir_error(&path, error)
+        ))
+    })?;
     sort_directory_entries(&mut entries);
 
     let mut names = Vec::new();
@@ -1237,12 +1269,8 @@ fn list_directory(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
             limit_reached = true;
             break;
         }
-        if let Ok(metadata) = std::fs::metadata(path.join(&name)) {
-            names.push(if metadata.is_dir() {
-                format!("{name}/")
-            } else {
-                name
-            });
+        if let Ok(is_dir) = files.is_dir(&path.join(&name)) {
+            names.push(if is_dir { format!("{name}/") } else { name });
         }
     }
     if names.is_empty() {
@@ -3783,6 +3811,40 @@ mod tests {
 
     /// Ported from Pi's `tools.test.ts` ("unknown edit access errors") and its in-memory edit
     /// operations.
+    struct FakeDirectory;
+
+    impl DirectoryOperations for FakeDirectory {
+        fn exists(&self, path: &Path) -> bool {
+            !path.ends_with("missing")
+        }
+
+        fn is_dir(&self, path: &Path) -> std::io::Result<bool> {
+            Ok(path.ends_with("sub") || path.ends_with("root"))
+        }
+
+        fn read_dir(&self, _path: &Path) -> std::io::Result<Vec<String>> {
+            Ok(vec![
+                "b.txt".into(),
+                "Sub".into(),
+                "sub".into(),
+                "a.txt".into(),
+            ])
+        }
+    }
+
+    #[test]
+    fn ls_tool_runs_over_injected_directory_operations() {
+        let cwd = Path::new("/virtual");
+        let listed = list_directory_with(&FakeDirectory, cwd, &json!({"path":"root"})).unwrap();
+        // `Sub` is not a directory in the fake, only `sub` is; names sort case-insensitively.
+        assert_eq!(listed.content, "a.txt\nb.txt\nSub\nsub/");
+        let missing =
+            list_directory_with(&FakeDirectory, cwd, &json!({"path":"missing"})).unwrap_err();
+        assert!(missing.to_string().starts_with("Path not found: "));
+        let file = list_directory_with(&FakeDirectory, cwd, &json!({"path":"a.txt"})).unwrap_err();
+        assert!(file.to_string().starts_with("Not a directory: "));
+    }
+
     #[test]
     fn read_tool_runs_over_injected_file_operations() {
         let memory = MemoryFiles(std::sync::Mutex::new(b"one\ntwo\nthree\n".to_vec()), false);
