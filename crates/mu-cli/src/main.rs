@@ -213,7 +213,14 @@ async fn main() {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
             .unwrap_or_default();
-        match parsed.and_then(|command| auth_command::run(&command, &agent_dir)) {
+        let outcome = match parsed {
+            Ok(auth_command::AuthCommand::Login {
+                provider,
+                copy_code,
+            }) => auth_command::login(&provider, copy_code, &agent_dir).await,
+            other => other.and_then(|command| auth_command::run(&command, &agent_dir)),
+        };
+        match outcome {
             Ok(output) => println!("{output}"),
             Err(error) => {
                 eprintln!("mu: {error}");

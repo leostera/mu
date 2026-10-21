@@ -8,6 +8,7 @@ use mu_core::auth::{CredentialSource, credential_source};
 pub enum AuthCommand {
     PrintApiKey { provider: String },
     Check { provider: String, json: bool },
+    Login { provider: String, copy_code: bool },
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -20,6 +21,8 @@ pub enum AuthCommandError {
     UnknownOption(String),
     #[error("Provider \"{0}\" is configured with OAuth, not an API key")]
     OAuthNotKey(String),
+    #[error("{0}")]
+    Login(String),
     #[error("No usable API key is configured for \"{0}\"")]
     NoKey(String),
 }
@@ -33,20 +36,28 @@ pub fn parse(args: &[String]) -> Option<Result<AuthCommand, AuthCommandError>> {
     let (name, check) = match sub.as_str() {
         "print-api-key" => ("print-api-key", false),
         "check" => ("check", true),
+        "login" => ("login", false),
         _ => return Some(Err(AuthCommandError::Unknown(sub))),
     };
-    let (mut provider, mut json) = (None, false);
+    let (mut provider, mut json, mut copy_code) = (None, false, false);
     let mut rest = args[2..].iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--provider" => provider = rest.next().map(|p| p.trim().to_owned()),
             "--json" if check => json = true,
+            "--copy-code" if name == "login" => copy_code = true,
             other => return Some(Err(AuthCommandError::UnknownOption(other.to_owned()))),
         }
     }
     let Some(provider) = provider.filter(|p| !p.is_empty()) else {
         return Some(Err(AuthCommandError::MissingProvider(name)));
     };
+    if name == "login" {
+        return Some(Ok(AuthCommand::Login {
+            provider,
+            copy_code,
+        }));
+    }
     Some(Ok(if check {
         AuthCommand::Check { provider, json }
     } else {
@@ -57,6 +68,7 @@ pub fn parse(args: &[String]) -> Option<Result<AuthCommand, AuthCommandError>> {
 /// Run the command; the returned text is printed to stdout.
 pub fn run(command: &AuthCommand, agent_dir: &Path) -> Result<String, AuthCommandError> {
     match command {
+        AuthCommand::Login { .. } => unreachable!("login is async; see `login`"),
         AuthCommand::PrintApiKey { provider } => match credential_source(agent_dir, provider) {
             CredentialSource::AuthJson(key) | CredentialSource::ModelsJson(key) => Ok(key),
             CredentialSource::OAuth => Err(AuthCommandError::OAuthNotKey(provider.clone())),
@@ -80,6 +92,81 @@ pub fn run(command: &AuthCommand, agent_dir: &Path) -> Result<String, AuthComman
             })
         }
     }
+}
+
+/// `mu auth login --provider anthropic [--copy-code]`: OAuth login stored in `auth.json`.
+pub async fn login(
+    provider: &str,
+    copy_code: bool,
+    agent_dir: &Path,
+) -> Result<String, AuthCommandError> {
+    use mu_core::oauth::{CallbackServer, anthropic};
+    if provider != "anthropic" {
+        return Err(AuthCommandError::Login(format!(
+            "OAuth login is only implemented for \"anthropic\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
+        )));
+    }
+    let fail = AuthCommandError::Login;
+    let server = if copy_code {
+        None
+    } else {
+        match CallbackServer::bind(
+            "127.0.0.1",
+            anthropic::CALLBACK_PORT,
+            anthropic::CALLBACK_PATH,
+            "localhost",
+        )
+        .await
+        {
+            Ok(server) => Some(server),
+            Err(_) => CallbackServer::bind("127.0.0.1", 0, anthropic::CALLBACK_PATH, "localhost")
+                .await
+                .ok(),
+        }
+    };
+    let redirect = server
+        .as_ref()
+        .map_or(anthropic::COPY_CODE_REDIRECT_URI, |s| {
+            s.redirect_uri.as_str()
+        });
+    let attempt = anthropic::Login::start(redirect);
+    eprintln!(
+        "Open this URL to sign in to Anthropic:\n\n{}\n",
+        attempt.url
+    );
+    eprintln!(
+        "Then paste the code or redirect URL here{}:",
+        if server.is_some() {
+            " (or just finish in the browser)"
+        } else {
+            ""
+        }
+    );
+    let pasted = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map(|_| line)
+    });
+    let credential = match server {
+        Some(server) => tokio::select! {
+            code = server.wait_for_code("Anthropic", Some(attempt.state()), std::time::Duration::from_secs(300)) => {
+                attempt.finish_with_code(&code.map_err(fail)?, anthropic::TOKEN_URL).await
+            }
+            line = pasted => {
+                let line = line.map_err(|e| AuthCommandError::Login(e.to_string()))?.map_err(|e| AuthCommandError::Login(e.to_string()))?;
+                attempt.finish_with_input(&line, anthropic::TOKEN_URL).await
+            }
+        },
+        None => {
+            let line = pasted.await.map_err(|e| AuthCommandError::Login(e.to_string()))?.map_err(|e| AuthCommandError::Login(e.to_string()))?;
+            attempt.finish_with_input(&line, anthropic::TOKEN_URL).await
+        }
+    }
+    .map_err(AuthCommandError::Login)?;
+    mu_core::auth::set_credential(&agent_dir.join("auth.json"), provider, credential)
+        .map_err(|e| AuthCommandError::Login(e.to_string()))?;
+    Ok(format!(
+        "Logged in to {provider}; credential saved to auth.json"
+    ))
 }
 
 #[cfg(test)]
@@ -117,6 +204,38 @@ mod tests {
                 "--json"
             ])),
             Some(Err(AuthCommandError::UnknownOption("--json".into())))
+        );
+    }
+
+    #[test]
+    fn parses_login_with_the_copy_code_option() {
+        assert_eq!(
+            parse(&args(&[
+                "auth",
+                "login",
+                "--provider",
+                "anthropic",
+                "--copy-code"
+            ])),
+            Some(Ok(AuthCommand::Login {
+                provider: "anthropic".into(),
+                copy_code: true
+            }))
+        );
+        assert_eq!(
+            parse(&args(&["auth", "check", "--provider", "a", "--copy-code"])),
+            Some(Err(AuthCommandError::UnknownOption("--copy-code".into())))
+        );
+    }
+
+    #[tokio::test]
+    async fn login_rejects_providers_without_an_oauth_flow() {
+        let dir = std::env::temp_dir();
+        let error = login("acme", false, &dir).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only implemented for \"anthropic\"")
         );
     }
 

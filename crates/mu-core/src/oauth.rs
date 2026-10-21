@@ -293,6 +293,95 @@ pub async fn refresh(
     credential_from_token_response(&body, now_ms())
 }
 
+/// Anthropic (Claude Pro/Max) login, as in Pi's `auth/oauth/anthropic.ts`.
+pub mod anthropic {
+    use super::*;
+
+    // Pi stores the client id base64-encoded; it is public.
+    const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
+    pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+    pub const CALLBACK_PORT: u16 = 53692;
+    pub const CALLBACK_PATH: &str = "/callback";
+    pub const COPY_CODE_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
+    const SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+
+    /// A started login: open `url`, then finish with the redirect or a pasted code.
+    pub struct Login {
+        pub url: String,
+        pub redirect_uri: String,
+        pkce: Pkce,
+    }
+
+    impl Login {
+        pub fn start(redirect_uri: &str) -> Self {
+            let pkce = Pkce::generate();
+            let url = authorize_url(
+                AUTHORIZE_URL,
+                &[
+                    ("code", "true"),
+                    ("client_id", CLIENT_ID),
+                    ("response_type", "code"),
+                    ("redirect_uri", redirect_uri),
+                    ("scope", SCOPES),
+                    ("code_challenge", &pkce.challenge),
+                    ("code_challenge_method", "S256"),
+                    ("state", &pkce.verifier),
+                ],
+            )
+            .expect("static authorize URL parses");
+            Self {
+                url,
+                redirect_uri: redirect_uri.to_owned(),
+                pkce,
+            }
+        }
+
+        /// The `state` the redirect must carry (Pi uses the PKCE verifier).
+        pub fn state(&self) -> &str {
+            &self.pkce.verifier
+        }
+
+        /// Finish with a pasted redirect URL or code; rejects a mismatched state.
+        pub async fn finish_with_input(
+            &self,
+            input: &str,
+            token_url: &str,
+        ) -> Result<Credential, String> {
+            let parsed = parse_authorization_input(input);
+            if parsed
+                .state
+                .as_deref()
+                .is_some_and(|state| state != self.state())
+            {
+                return Err("OAuth state mismatch".into());
+            }
+            let code = parsed.code.ok_or("Missing authorization code")?;
+            self.finish_with_code(&code, token_url).await
+        }
+
+        pub async fn finish_with_code(
+            &self,
+            code: &str,
+            token_url: &str,
+        ) -> Result<Credential, String> {
+            exchange_code(
+                token_url,
+                CLIENT_ID,
+                code,
+                self.state(),
+                &self.pkce.verifier,
+                &self.redirect_uri,
+            )
+            .await
+        }
+    }
+
+    pub async fn refresh_token(refresh_token: &str) -> Result<Credential, String> {
+        refresh(TOKEN_URL, CLIENT_ID, refresh_token).await
+    }
+}
+
 /// Whether a stored OAuth credential needs refreshing.
 pub fn is_expired(expires_ms: f64) -> bool {
     now_ms() >= expires_ms
@@ -301,6 +390,31 @@ pub fn is_expired(expires_ms: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_login_url_carries_pkce_and_state_is_checked() {
+        let login = anthropic::Login::start("http://localhost:53692/callback");
+        let url = url::Url::parse(&login.url).unwrap();
+        let q = |k: &str| {
+            url.query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+                .unwrap()
+        };
+        assert_eq!(url.host_str(), Some("claude.ai"));
+        assert_eq!(q("client_id"), "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+        assert_eq!(q("code_challenge_method"), "S256");
+        assert_eq!(q("state"), login.state());
+        assert_eq!(
+            q("code_challenge"),
+            Pkce::from_verifier(login.state().to_owned()).challenge
+        );
+        let mismatch = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(login.finish_with_input("code#wrong", "http://127.0.0.1:1/t"));
+        assert_eq!(mismatch.err().as_deref(), Some("OAuth state mismatch"));
+    }
 
     #[test]
     fn pkce_challenge_is_the_s256_of_the_verifier() {

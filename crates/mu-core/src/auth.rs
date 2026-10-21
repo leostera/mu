@@ -88,6 +88,17 @@ pub fn set_api_key(path: &Path, provider: &str, key: &str) -> Result<(), AuthErr
     save(path, &credentials)
 }
 
+/// Store any credential (for example the result of an OAuth login) for `provider`.
+pub fn set_credential(
+    path: &Path,
+    provider: &str,
+    credential: Credential,
+) -> Result<(), AuthError> {
+    let mut credentials = load(path)?;
+    credentials.insert(provider.to_owned(), credential);
+    save(path, &credentials)
+}
+
 /// Remove a provider's credential; returns whether one existed.
 pub fn remove(path: &Path, provider: &str) -> Result<bool, AuthError> {
     let mut credentials = load(path)?;
