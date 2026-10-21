@@ -13,6 +13,7 @@ mod context_files;
 pub mod crash_log;
 pub mod image_process;
 mod mcp;
+pub(crate) mod mcp_oauth;
 pub mod nested_calls;
 pub mod oauth;
 pub mod path_utils;

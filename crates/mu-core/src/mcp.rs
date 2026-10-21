@@ -717,7 +717,14 @@ impl McpHttpClient {
             .map_err(|error| format!("MCP HTTP {method} failed: {error}"))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("MCP HTTP {method} returned {status}"));
+            return Err(unauthorized_or_status_message(
+                method,
+                status,
+                response
+                    .headers()
+                    .get(reqwest::header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok()),
+            ));
         }
         if let Some(session_id) = response.headers().get("mcp-session-id") {
             self.session_id = Some(
@@ -852,6 +859,31 @@ fn parse_rpc_response(message: Value, id: u64, method: &str) -> Result<Value, St
         .get("result")
         .cloned()
         .ok_or_else(|| format!("MCP {method} response has no result"))
+}
+
+/// `MCP HTTP <method> returned <status>`, and for a 401 with an OAuth challenge a hint that the
+/// server wants OAuth (which Mu cannot do yet) or why its token was refused.
+fn unauthorized_or_status_message(
+    method: &str,
+    status: reqwest::StatusCode,
+    www_authenticate: Option<&str>,
+) -> String {
+    let base = format!("MCP HTTP {method} returned {status}");
+    if status != reqwest::StatusCode::UNAUTHORIZED {
+        return base;
+    }
+    let challenge = crate::mcp_oauth::parse_www_authenticate(www_authenticate);
+    if challenge == crate::mcp_oauth::OAuthChallenge::default() {
+        return base;
+    }
+    let reason = challenge
+        .error_description
+        .or(challenge.error)
+        .map(|reason| format!(" ({reason})"))
+        .unwrap_or_default();
+    format!(
+        "{base}: the server requires OAuth{reason}. Mu cannot sign in to MCP servers yet; set an Authorization header in mcp.json instead"
+    )
 }
 
 fn parse_http_response(
@@ -1938,6 +1970,30 @@ mod tests {
             cursor.err().as_deref(),
             Some("cursor can only be used when a server is specified")
         );
+    }
+
+    #[test]
+    fn unauthorized_responses_explain_oauth_challenges() {
+        use reqwest::StatusCode;
+        assert_eq!(
+            unauthorized_or_status_message(
+                "initialize",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some("Bearer")
+            ),
+            "MCP HTTP initialize returned 500 Internal Server Error"
+        );
+        assert_eq!(
+            unauthorized_or_status_message("initialize", StatusCode::UNAUTHORIZED, None),
+            "MCP HTTP initialize returned 401 Unauthorized"
+        );
+        let message = unauthorized_or_status_message(
+            "tools/list",
+            StatusCode::UNAUTHORIZED,
+            Some(r#"Bearer error="invalid_token", error_description="expired""#),
+        );
+        assert!(message.contains("requires OAuth (expired)"), "{message}");
+        assert!(message.contains("Authorization header"));
     }
 
     #[test]
