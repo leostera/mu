@@ -80,6 +80,14 @@ struct Cli {
     #[arg(long, value_name = "SEARCH", num_args = 0..=1, default_missing_value = "")]
     list_models: Option<String>,
 
+    /// Load a prompt template file or directory (repeatable).
+    #[arg(long = "prompt-template", value_name = "PATH")]
+    prompt_templates: Vec<PathBuf>,
+
+    /// Do not load default prompt template directories.
+    #[arg(long)]
+    no_prompt_templates: bool,
+
     /// Do not connect MCP servers.
     #[arg(long)]
     no_mcp: bool,
@@ -255,6 +263,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         exclude_tools: cli.exclude_tools,
         provider: cli.provider,
         no_mcp: cli.no_mcp,
+        prompt_templates: cli.prompt_templates,
+        no_prompt_templates: cli.no_prompt_templates,
         model: cli.model,
         thinking: cli
             .thinking

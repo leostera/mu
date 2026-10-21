@@ -167,6 +167,10 @@ pub struct SessionOptions {
     pub model: Option<String>,
     /// `--no-mcp`: do not connect MCP servers.
     pub no_mcp: bool,
+    /// `--prompt-template`: extra template files or directories.
+    pub prompt_templates: Vec<PathBuf>,
+    /// `--no-prompt-templates`: skip default template directories.
+    pub no_prompt_templates: bool,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -2132,6 +2136,8 @@ fn resolve_session_options(
         provider: _,
         model: _,
         no_mcp: _,
+        prompt_templates: _,
+        no_prompt_templates: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2456,6 +2462,7 @@ struct Prepared {
     transcript: Vec<AgentMessage>,
     prompt: PromptOptions,
     excluded_tools: Vec<String>,
+    templates: Vec<crate::prompt_templates::PromptTemplate>,
 }
 
 impl Prepared {
@@ -2474,6 +2481,12 @@ impl Prepared {
         let no_tools = options.no_tools;
         let persist_session = !options.no_session;
         let excluded_tools = options.exclude_tools.clone();
+        let templates = crate::prompt_templates::load_prompt_templates(
+            &config.cwd,
+            &config.agent_dir,
+            &options.prompt_templates,
+            !options.no_prompt_templates,
+        );
         let prompt = PromptOptions::from_session_options(&options).with_context_files(
             &config.cwd,
             &config.agent_dir,
@@ -2497,6 +2510,7 @@ impl Prepared {
             transcript,
             prompt,
             excluded_tools,
+            templates,
         })
     }
 
@@ -2523,6 +2537,7 @@ impl Prepared {
             no_tools: self.no_tools,
             tool_selection: self.tool_selection,
             excluded_tools: self.excluded_tools,
+            templates: self.templates,
             thinking: self.prompt.thinking,
             no_mcp: false,
             mcp: crate::mcp::McpRegistry::default(),
@@ -2545,6 +2560,7 @@ pub struct MuAgent {
     agent_dir: PathBuf,
     cwd: PathBuf,
     skills: crate::skills::SkillCatalog,
+    templates: Vec<crate::prompt_templates::PromptTemplate>,
     hide_thinking_block: bool,
     retry: RetryPolicy,
     enabled_tools: Vec<String>,
@@ -2677,6 +2693,7 @@ impl MuAgent {
             no_tools: false,
             tool_selection: None,
             excluded_tools: Vec::new(),
+            templates: Vec::new(),
             thinking: ThinkingSetting::default(),
             no_mcp: false,
             mcp: crate::mcp::McpRegistry::default(),
@@ -3024,6 +3041,7 @@ impl MuAgent {
     }
 
     fn expand_prompt(&self, prompt: String, on_event: &mut impl FnMut(AgentEvent)) -> String {
+        let prompt = crate::prompt_templates::expand_prompt_template(&prompt, &self.templates);
         if !skill_commands_enabled(&self.agent_dir, &self.cwd) {
             return prompt;
         }
