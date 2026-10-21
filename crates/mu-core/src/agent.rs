@@ -782,6 +782,13 @@ fn config() -> Result<Config, AgentError> {
     config_for(false)
 }
 
+/// Pi's `formatNoApiKeyFoundMessage` (`core/auth-guidance.ts`).
+fn no_api_key_message(provider: &str) -> String {
+    format!(
+        "No API key found for {provider}.\n\nUse /login to log into a provider via OAuth or API key, or set apiKey for it in models.json (a literal, $ENV_VAR, or !command)."
+    )
+}
+
 /// Pi's `formatNoModelSelectedMessage` (`core/auth-guidance.ts`), with the cause first.
 fn no_model_selected_message(cause: &str) -> String {
     format!(
@@ -2245,7 +2252,12 @@ fn connect_custom_provider(
         .or_else(|| crate::auth::api_key(&config.agent_dir.join("auth.json"), &config.provider))
         .or_else(|| crate::config_value::resolve(key, &HashMap::new()))
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| key.to_owned());
+        .unwrap_or_default();
+    if token.is_empty() && !bedrock {
+        return Err(AgentError::Configuration(no_api_key_message(
+            &config.provider,
+        )));
+    }
     let bedrock_auth = if !bedrock {
         None
     } else if !token.is_empty() {
@@ -5983,6 +5995,13 @@ mod tests {
         assert!(html.contains("hello &lt;b&gt;there&lt;/b&gt;"));
         assert!(super::export_session_file(&dir.join("missing.jsonl"), None).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_api_keys_name_the_provider_and_how_to_fix_it() {
+        let message = super::no_api_key_message("acme");
+        assert!(message.starts_with("No API key found for acme."));
+        assert!(message.contains("/login") && message.contains("models.json"));
     }
 
     #[test]
