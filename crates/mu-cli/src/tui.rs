@@ -2277,9 +2277,27 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "trust" if argument.is_empty() => {
+            app.picker = Some(Picker {
+                command: "trust",
+                items: vec![
+                    chrome::SelectItem {
+                        label: "Trust this project".into(),
+                        description: Some("load project MCP servers and settings".into()),
+                    },
+                    chrome::SelectItem {
+                        label: "Do not trust".into(),
+                        description: Some("ignore project configuration".into()),
+                    },
+                ],
+                values: vec!["yes".into(), "no".into()],
+                selection: 0,
+            });
+            app.show_status("Trust this project? (applies to the next session)".to_owned());
+        }
         "trust" => {
             let decision = match argument {
-                "" | "yes" | "on" | "true" => Some(true),
+                "yes" | "on" | "true" => Some(true),
                 "no" | "off" | "false" => Some(false),
                 _ => None,
             };
@@ -3291,6 +3309,16 @@ mod tests {
                 .1
                 .starts_with("Usage: /login <provider> <api-key>")
         );
+    }
+
+    #[tokio::test]
+    async fn trust_without_an_argument_opens_a_yes_no_picker() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.composer.insert_text("/trust");
+        execute_command(&mut app, &agent);
+        let picker = app.picker.as_ref().expect("picker opens");
+        assert_eq!(picker.values, ["yes", "no"]);
     }
 
     #[test]
