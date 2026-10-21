@@ -2166,6 +2166,10 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             };
             app.show_status(status);
         }
+        "changelog" => app.show_status(format!(
+            "Mu {} has no bundled changelog; see the repository history for changes.",
+            env!("CARGO_PKG_VERSION")
+        )),
         "share" | "bug" => app.show_status(format!(
             "/{command} is not supported in Mu: it would upload session data to an external service."
         )),
