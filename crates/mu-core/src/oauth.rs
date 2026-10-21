@@ -437,6 +437,93 @@ pub mod openrouter {
     }
 }
 
+/// One poll of an RFC 8628 device-code flow.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DevicePoll<T> {
+    Pending,
+    /// Poll more slowly; the server may state the new interval in seconds.
+    SlowDown(Option<u64>),
+    Failed(String),
+    Complete(T),
+}
+
+/// Timing of a device-code poll loop; [`DevicePollTiming::pi`] has Pi's constants.
+#[derive(Debug, Clone, Copy)]
+pub struct DevicePollTiming {
+    pub interval: Duration,
+    pub expires_in: Option<Duration>,
+    pub wait_before_first_poll: bool,
+    pub minimum_interval: Duration,
+    pub slow_down_increment: Duration,
+}
+
+impl DevicePollTiming {
+    /// `interval_seconds` defaults to 5 (RFC 8628 §3.2); the minimum is 1s; slow_down adds 5s.
+    pub fn pi(
+        interval_seconds: Option<u64>,
+        expires_in_seconds: Option<u64>,
+        wait_before_first_poll: bool,
+    ) -> Self {
+        Self {
+            interval: Duration::from_secs(interval_seconds.unwrap_or(5)),
+            expires_in: expires_in_seconds.map(Duration::from_secs),
+            wait_before_first_poll,
+            minimum_interval: Duration::from_secs(1),
+            slow_down_increment: Duration::from_secs(5),
+        }
+    }
+}
+
+const DEVICE_TIMEOUT: &str = "Device flow timed out";
+const DEVICE_SLOW_DOWN_TIMEOUT: &str = "Device flow timed out after one or more slow_down responses. This is often caused by clock drift in WSL or VM environments. Please sync or restart the VM clock and try again.";
+
+/// Pi's `pollOAuthDeviceCodeFlow`: poll until complete, failed, or the deadline passes.
+pub async fn poll_device_code<T, F, Fut>(timing: DevicePollTiming, mut poll: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = DevicePoll<T>>,
+{
+    let deadline = timing
+        .expires_in
+        .map(|expires| std::time::Instant::now() + expires);
+    let remaining = |deadline: Option<std::time::Instant>| {
+        deadline.map_or(Duration::MAX, |at| {
+            at.saturating_duration_since(std::time::Instant::now())
+        })
+    };
+    let mut interval = timing.interval.max(timing.minimum_interval);
+    let mut slow_downs = 0u32;
+    if timing.wait_before_first_poll {
+        let wait = interval.min(remaining(deadline));
+        tokio::time::sleep(wait).await;
+    }
+    while !remaining(deadline).is_zero() {
+        match poll().await {
+            DevicePoll::Complete(value) => return Ok(value),
+            DevicePoll::Failed(message) => return Err(message),
+            DevicePoll::Pending => {}
+            DevicePoll::SlowDown(server_interval) => {
+                slow_downs += 1;
+                interval = match server_interval.filter(|seconds| *seconds > 0) {
+                    Some(seconds) => Duration::from_secs(seconds).max(timing.minimum_interval),
+                    None => (interval + timing.slow_down_increment).max(timing.minimum_interval),
+                };
+            }
+        }
+        let left = remaining(deadline);
+        if left.is_zero() {
+            break;
+        }
+        tokio::time::sleep(interval.min(left)).await;
+    }
+    Err(if slow_downs > 0 {
+        DEVICE_SLOW_DOWN_TIMEOUT
+    } else {
+        DEVICE_TIMEOUT
+    }
+    .to_owned())
+}
+
 /// Whether a stored OAuth credential needs refreshing.
 pub fn is_expired(expires_ms: f64) -> bool {
     now_ms() >= expires_ms
@@ -488,6 +575,60 @@ mod tests {
             matches!(credential, Credential::Oauth { ref access, ref refresh, .. } if access == "sk-or-1" && refresh.is_empty())
         );
         assert!(openrouter::credential_from_key_response(&json!({"key":""})).is_err());
+    }
+
+    fn fast(expires_ms: Option<u64>) -> DevicePollTiming {
+        DevicePollTiming {
+            interval: Duration::from_millis(5),
+            expires_in: expires_ms.map(Duration::from_millis),
+            wait_before_first_poll: false,
+            minimum_interval: Duration::from_millis(1),
+            slow_down_increment: Duration::from_millis(5),
+        }
+    }
+
+    #[tokio::test]
+    async fn device_polling_waits_through_pending_and_slow_down_until_complete() {
+        let mut script = vec![
+            DevicePoll::Pending,
+            DevicePoll::SlowDown(None),
+            DevicePoll::SlowDown(Some(1)),
+            DevicePoll::Complete("tok"),
+        ]
+        .into_iter();
+        let polls = std::sync::atomic::AtomicUsize::new(0);
+        let result = poll_device_code(fast(None), || {
+            polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let next = script.next().unwrap();
+            async move { next }
+        })
+        .await;
+        assert_eq!(result, Ok("tok"));
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn device_polling_reports_failures_and_both_timeout_messages() {
+        let failed = poll_device_code::<(), _, _>(fast(None), || async {
+            DevicePoll::Failed("denied".into())
+        })
+        .await;
+        assert_eq!(failed, Err("denied".into()));
+        let timed_out =
+            poll_device_code::<(), _, _>(fast(Some(30)), || async { DevicePoll::Pending }).await;
+        assert_eq!(timed_out, Err("Device flow timed out".into()));
+        let slowed =
+            poll_device_code::<(), _, _>(fast(Some(30)), || async { DevicePoll::SlowDown(None) })
+                .await;
+        assert!(
+            slowed
+                .unwrap_err()
+                .starts_with("Device flow timed out after one or more slow_down responses")
+        );
+        assert_eq!(
+            DevicePollTiming::pi(None, None, false).interval,
+            Duration::from_secs(5)
+        );
     }
 
     #[test]
