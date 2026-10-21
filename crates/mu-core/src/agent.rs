@@ -298,14 +298,6 @@ impl AgentPromptQueue {
         mode.drain(&mut pending.steering)
     }
 
-    fn take_steering(&self) -> Option<String> {
-        self.pending
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .steering
-            .pop_front()
-    }
-
     pub fn clear(&self) {
         let mut pending = self
             .pending
@@ -2692,11 +2684,11 @@ mod tests {
 
     use super::runtime::{responses_input, session_messages};
     use super::{
-        AgentPromptQueue, FunctionCall, PromptBehavior, Reply, TerminalResponse, configured_models,
-        find_session_id_path, latest_session_path, load_session, merge_final_response_text,
-        resolve_session_options, response_message_text, session_active_mcp_tools,
-        session_codemode_store, session_preview, session_transcript, trusted_url,
-        validate_session_id,
+        AgentPromptQueue, FunctionCall, PromptBehavior, QueueMode, Reply, TerminalResponse,
+        configured_models, find_session_id_path, latest_session_path, load_session,
+        merge_final_response_text, resolve_session_options, response_message_text,
+        session_active_mcp_tools, session_codemode_store, session_preview, session_transcript,
+        trusted_url, validate_session_id,
     };
     use super::{Config, SessionOptions};
     use mu_session::{
@@ -4359,9 +4351,15 @@ mod tests {
         queue.enqueue("steer one".into(), PromptBehavior::Steer);
         queue.enqueue("steer two".into(), PromptBehavior::Steer);
 
-        assert_eq!(queue.take_steering().as_deref(), Some("steer one"));
-        assert_eq!(queue.take_steering().as_deref(), Some("steer two"));
-        assert_eq!(queue.take_steering(), None);
+        assert_eq!(
+            queue.take_steering_batch(QueueMode::OneAtATime),
+            ["steer one"]
+        );
+        assert_eq!(
+            queue.take_steering_batch(QueueMode::OneAtATime),
+            ["steer two"]
+        );
+        assert!(queue.take_steering_batch(QueueMode::OneAtATime).is_empty());
         assert_eq!(
             queue.take_next(),
             Some(("later".into(), PromptBehavior::FollowUp))
