@@ -2504,6 +2504,23 @@ fn session_codemode_store(session: &SessionDocument) -> Value {
     Value::Object(store)
 }
 
+/// Pi's `formatMissingSessionCwdError`, when the cwd stored in the session file is gone.
+fn missing_session_cwd_error(
+    session: &SessionDocument,
+    file: &Path,
+    fallback: &Path,
+) -> Option<String> {
+    let stored = session.header().map(|header| header.cwd.clone())?;
+    if stored.is_empty() || Path::new(&stored).exists() {
+        return None;
+    }
+    Some(format!(
+        "Stored session working directory does not exist: {stored}\nSession file: {}\nCurrent working directory: {}",
+        file.display(),
+        fallback.display()
+    ))
+}
+
 fn load_session(path: &Path) -> Result<(SessionDocument, Vec<AgentMessage>), AgentError> {
     let contents =
         std::fs::read_to_string(path).map_err(|error| AgentError::Session(error.to_string()))?;
@@ -3050,6 +3067,9 @@ fn resolve_session_options(
     let (path, mut session, history) = match requested_path {
         Some(path) => {
             let (session, history) = load_session(&path)?;
+            if let Some(message) = missing_session_cwd_error(&session, &path, &config.cwd) {
+                return Err(AgentError::Session(message));
+            }
             (path, session, history)
         }
         None => {
@@ -6140,6 +6160,31 @@ mod tests {
         for name in ["grep", "find", "ls"] {
             assert!(super::tool_prompt_guidelines(name).is_empty(), "{name}");
         }
+    }
+
+    #[test]
+    fn sessions_with_a_vanished_cwd_are_refused_with_pis_message() {
+        let dir = std::env::temp_dir().join(format!("mu-cwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s.jsonl");
+        let gone = dir.join("deleted-project");
+        let existing = SessionDocument::new(dir.to_string_lossy().into_owned());
+        assert_eq!(
+            super::missing_session_cwd_error(&existing, &file, &dir),
+            None
+        );
+        let missing = SessionDocument::new(gone.to_string_lossy().into_owned());
+        let message = super::missing_session_cwd_error(&missing, &file, &dir).unwrap();
+        assert_eq!(
+            message,
+            format!(
+                "Stored session working directory does not exist: {}\nSession file: {}\nCurrent working directory: {}",
+                gone.display(),
+                file.display(),
+                dir.display()
+            )
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
