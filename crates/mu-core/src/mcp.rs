@@ -309,6 +309,7 @@ impl McpRegistry {
         // Pi: an error result without text still says which tool failed.
         if let Ok(outcome) = &mut result {
             name_empty_error(outcome, &tool.server_name, &tool.remote_name);
+            outcome.content = limit_mcp_text(&outcome.content, save_to_temp_file);
         }
         Some(result)
     }
@@ -318,6 +319,57 @@ fn name_empty_error(outcome: &mut McpToolResult, server: &str, tool: &str) {
     if outcome.is_error && outcome.content.trim().is_empty() {
         outcome.content = format!("MCP tool {server}/{tool} returned an error");
     }
+}
+
+const MCP_OUTPUT_MAX_BYTES: usize = 20 * 1024;
+
+/// Pi's `truncateMiddle`: keep the head and tail halves of `max_bytes`, on character boundaries.
+fn truncate_middle(content: &str, max_bytes: usize) -> Option<(String, usize)> {
+    if content.len() <= max_bytes {
+        return None;
+    }
+    let mut head_end = max_bytes / 2;
+    while !content.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = content.len() - (max_bytes - max_bytes / 2);
+    while !content.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let removed = content[head_end..tail_start].chars().count();
+    Some((
+        format!(
+            "{}…{removed} chars truncated…{}",
+            &content[..head_end],
+            &content[tail_start..]
+        ),
+        content.len(),
+    ))
+}
+
+/// Pi's `limitMcpContent` for text: over 20 KiB, keep head and tail and save the full output.
+fn limit_mcp_text(text: &str, save: impl FnOnce(&str) -> Result<String, String>) -> String {
+    let Some((truncated, total_bytes)) = truncate_middle(text, MCP_OUTPUT_MAX_BYTES) else {
+        return text.to_owned();
+    };
+    let where_ = match save(text) {
+        Ok(path) => format!("[Full output: {path} (read it with offset/limit)]"),
+        Err(error) => format!("[Could not save the full output: {error}]"),
+    };
+    let mut lines = text.split('\n').count();
+    if text.ends_with('\n') {
+        lines -= 1;
+    }
+    let tokens = total_bytes.div_ceil(4);
+    format!(
+        "Warning: truncated output (original token count: {tokens})\nTotal output lines: {lines}\n\n{truncated}\n\n{where_}"
+    )
+}
+
+fn save_to_temp_file(text: &str) -> Result<String, String> {
+    let path = std::env::temp_dir().join(format!("pi-mcp-{}.txt", uuid::Uuid::new_v4()));
+    std::fs::write(&path, text).map_err(|error| error.to_string())?;
+    Ok(path.display().to_string())
 }
 
 const LIST_RESOURCES_TOOL: &str = "list_mcp_resources";
@@ -1533,6 +1585,33 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn long_output_keeps_head_and_tail_and_reports_the_saved_file() {
+        let short = "x".repeat(MCP_OUTPUT_MAX_BYTES);
+        assert_eq!(limit_mcp_text(&short, |_| panic!("not saved")), short);
+        let long = format!("{}\n{}", "a".repeat(15_000), "b".repeat(15_000));
+        let out = limit_mcp_text(&long, |full| {
+            assert_eq!(full, long);
+            Ok("/tmp/full.txt".into())
+        });
+        assert!(out.starts_with(
+            "Warning: truncated output (original token count: 7501)\nTotal output lines: 2\n\n"
+        ));
+        assert!(out.contains("…9"), "removed-chars marker present: {out}");
+        assert!(out.contains("chars truncated…"));
+        assert!(out.ends_with("[Full output: /tmp/full.txt (read it with offset/limit)]"));
+        let failed = limit_mcp_text(&long, |_| Err("disk full".into()));
+        assert!(failed.ends_with("[Could not save the full output: disk full]"));
+    }
+
+    #[test]
+    fn truncation_respects_multibyte_boundaries() {
+        let text = "é".repeat(MCP_OUTPUT_MAX_BYTES);
+        let (truncated, total) = truncate_middle(&text, MCP_OUTPUT_MAX_BYTES).unwrap();
+        assert_eq!(total, text.len());
+        assert!(truncated.contains("chars truncated"));
+    }
 
     #[test]
     fn empty_error_results_name_the_failing_tool() {
