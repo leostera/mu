@@ -2384,7 +2384,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 Err(_) => "Mu is busy.".to_owned(),
                 Ok(mut agent) => {
                     match tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(agent.compact())
+                        tokio::runtime::Handle::current().block_on(agent.compact_with(Some(argument)))
                     }) {
                         Ok(Some(outcome)) => {
                             format!("Compacted context (was ~{} tokens)", outcome.tokens_before)

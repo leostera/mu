@@ -144,7 +144,10 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
                 Err(error) => Err(error.to_string()),
             },
         },
-        "compact" => match agent.compact().await {
+        "compact" => match agent
+            .compact_with(command["customInstructions"].as_str())
+            .await
+        {
             Ok(Some(outcome)) => Ok(Some(json!({
                 "summary": outcome.summary,
                 "tokensBefore": outcome.tokens_before,

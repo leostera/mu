@@ -23,6 +23,14 @@ impl Default for CompactionSettings {
 }
 
 /// Prompt appended to the serialized conversation when asking for a checkpoint summary.
+/// Pi's `generateSummary` prompt: the base prompt plus the user's focus, when given.
+pub fn summarization_prompt(custom_instructions: Option<&str>) -> String {
+    match custom_instructions.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(custom) => format!("{SUMMARIZATION_PROMPT}\n\nAdditional focus: {custom}"),
+        None => SUMMARIZATION_PROMPT.to_owned(),
+    }
+}
+
 pub const SUMMARIZATION_PROMPT: &str = "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
 Use this EXACT format:
@@ -250,6 +258,17 @@ pub fn find_cut_point(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_instructions_are_appended_as_additional_focus() {
+        use super::*;
+        assert_eq!(summarization_prompt(None), SUMMARIZATION_PROMPT);
+        assert_eq!(summarization_prompt(Some("  ")), SUMMARIZATION_PROMPT);
+        assert!(
+            summarization_prompt(Some("keep API names"))
+                .ends_with("\n\nAdditional focus: keep API names")
+        );
+    }
+
     use serde_json::json;
 
     use super::*;

@@ -3956,6 +3956,14 @@ impl MuAgent {
     ///
     /// Returns `Ok(None)` when there is nothing before the cut point to compact.
     pub async fn compact(&mut self) -> Result<Option<CompactionOutcome>, AgentError> {
+        self.compact_with(None).await
+    }
+
+    /// Compact with optional custom focus instructions (`/compact <instructions>`).
+    pub async fn compact_with(
+        &mut self,
+        custom_instructions: Option<&str>,
+    ) -> Result<Option<CompactionOutcome>, AgentError> {
         let settings = self.compaction_settings();
         let path = branch_entry_values(&self.session);
         let cut =
@@ -3983,7 +3991,7 @@ impl MuAgent {
             "role":"user",
             "content":[{"type":"input_text","text":format!(
                 "<conversation>\n{conversation}\n</conversation>\n\n{}",
-                crate::compaction::SUMMARIZATION_PROMPT
+                crate::compaction::summarization_prompt(custom_instructions)
             )}],
         })];
         let reply = self.provider.complete(&history, &[], &mut |_| {}).await?;

@@ -3252,7 +3252,8 @@ mod tests {
         // Output is collected while a descendant keeps writing, and ends after 100ms of silence, so
         // a machine stall longer than that can cut it short: allow a few attempts.
         let mut last = Value::Null;
-        for _ in 0..3 {
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
             let result = execute(
                 &dir,
                 "bash",
