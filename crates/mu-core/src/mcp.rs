@@ -991,12 +991,12 @@ fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
                 block.get("text").and_then(Value::as_str).map(str::to_owned)
             } else if block.get("type").and_then(Value::as_str) == Some("resource_link") {
                 Some(resource_link_text(block))
-            } else if let Some(text) = block
-                .pointer("/resource/text")
-                .filter(|_| block.get("type").and_then(Value::as_str) == Some("resource"))
-                .and_then(Value::as_str)
-            {
-                Some(text.to_owned())
+            } else if block.get("type").and_then(Value::as_str) == Some("resource") {
+                let resource = block.get("resource").unwrap_or(&Value::Null);
+                Some(match resource.get("text").and_then(Value::as_str) {
+                    Some(text) => text.to_owned(),
+                    None => blob_resource_text(resource),
+                })
             } else {
                 block
                     .get("type")
@@ -1728,6 +1728,16 @@ mod tests {
         );
         assert_eq!(format_size(10), "10B");
         assert_eq!(format_size(3 * 1024 * 1024), "3.0MB");
+    }
+
+    #[test]
+    fn embedded_blob_resources_in_tool_results_are_decoded() {
+        use base64::Engine;
+        let blob = base64::engine::general_purpose::STANDARD.encode("hello");
+        let result = parse_tool_result(json!({"content":[
+            {"type":"resource","resource":{"uri":"file:///a.txt","mimeType":"text/plain","blob":blob}}
+        ]})).unwrap();
+        assert_eq!(result.content, "hello");
     }
 
     #[test]
