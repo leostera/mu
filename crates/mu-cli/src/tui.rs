@@ -1885,6 +1885,9 @@ fn handle_command_menu(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>
 
 /// A list overlay whose chosen row re-runs a slash command with that row's value as its argument.
 struct Picker {
+    /// Sessions behind a `/resume` picker, so Ctrl+N can filter to named ones.
+    sessions: Vec<mu_core::SessionInfo>,
+    named_only: bool,
     command: &'static str,
     items: Vec<chrome::SelectItem>,
     values: Vec<String>,
@@ -1897,6 +1900,16 @@ fn handle_picker(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
     };
     match key.code {
         KeyCode::Esc => app.picker = None,
+        KeyCode::Char('n')
+            if key.modifiers.contains(KeyModifiers::CONTROL) && picker.command == "resume" =>
+        {
+            // Ctrl+N toggles the named-sessions filter (Pi's `app.session.toggleNamedFilter`).
+            let all = picker.sessions.clone();
+            let next = session_picker_filtered(&all, !picker.named_only);
+            if !next.items.is_empty() {
+                app.picker = Some(next);
+            }
+        }
         KeyCode::Up => picker.selection = picker.selection.saturating_sub(1),
         KeyCode::Down => picker.selection = (picker.selection + 1).min(picker.items.len() - 1),
         KeyCode::Enter => {
@@ -2030,6 +2043,8 @@ const TOGGLE_SETTINGS: &[(&str, &str)] = &[
 fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
     let state = |key: &str| settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
     Picker {
+        sessions: Vec::new(),
+        named_only: false,
         command: "settings",
         items: TOGGLE_SETTINGS
             .iter()
@@ -2047,7 +2062,18 @@ fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
 }
 
 fn session_picker(sessions: &[mu_core::SessionInfo]) -> Picker {
+    session_picker_filtered(sessions, false)
+}
+
+fn session_picker_filtered(all: &[mu_core::SessionInfo], named_only: bool) -> Picker {
+    let sessions = all
+        .iter()
+        .filter(|s| !named_only || s.name.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
     Picker {
+        sessions: all.to_vec(),
+        named_only,
         command: "resume",
         items: sessions
             .iter()
@@ -2353,6 +2379,8 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                     let levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
                     let current = agent.thinking().name();
                     app.picker = Some(Picker {
+ sessions: Vec::new(),
+ named_only: false,
                         command: "thinking",
                         items: levels
                             .iter()
@@ -2422,6 +2450,8 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         },
         "trust" if argument.is_empty() => {
             app.picker = Some(Picker {
+ sessions: Vec::new(),
+ named_only: false,
                 command: "trust",
                 items: vec![
                     chrome::SelectItem {
@@ -2517,6 +2547,8 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                                 "Session is empty.".to_owned()
                             } else {
                                 app.picker = Some(Picker {
+ sessions: Vec::new(),
+ named_only: false,
                                     command: "tree",
                                     items: rows
                                         .iter()
@@ -2569,6 +2601,8 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                                 "No messages to fork from.".to_owned()
                             } else {
                                 app.picker = Some(Picker {
+ sessions: Vec::new(),
+ named_only: false,
                                     command: "fork",
                                     items: messages
                                         .iter()
@@ -3571,6 +3605,27 @@ mod tests {
         assert!(
             loud.contains(env!("CARGO_PKG_VERSION")) && !quiet.contains(env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[tokio::test]
+    async fn ctrl_n_toggles_the_named_only_filter_in_the_resume_picker() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        let info = |id: &str, name: Option<&str>| mu_core::SessionInfo {
+            id: id.into(),
+            name: name.map(str::to_owned),
+            ..Default::default()
+        };
+        app.picker = Some(super::session_picker(&[
+            info("a", Some("work")),
+            info("b", None),
+        ]));
+        let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        handle_key(ctrl_n, &mut app, agent.clone(), tx.clone());
+        assert_eq!(app.picker.as_ref().unwrap().values, ["a"]);
+        handle_key(ctrl_n, &mut app, agent, tx);
+        assert_eq!(app.picker.as_ref().unwrap().values, ["a", "b"]);
     }
 
     #[test]
