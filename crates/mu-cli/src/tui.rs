@@ -2012,7 +2012,9 @@ const HOTKEYS: &str = "**Keyboard Shortcuts**
 | `Esc` | Interrupt / clear editor |
 | `Ctrl+C` | Clear editor (first) / exit (second) |
 | `Ctrl+D` | Exit (when editor is empty) |
-| `/` | Slash commands |";
+| `/` | Slash commands |
+| `Tab` | Complete file path |
+| `!command` / `!!command` | Run a shell command locally |";
 
 /// `/model <id>` or `/model <provider>/<id>`; a unique id substring also matches.
 fn resolve_model_argument(models: &[String], argument: &str) -> Option<String> {
