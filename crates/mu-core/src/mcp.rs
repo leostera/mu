@@ -85,6 +85,7 @@ enum McpClient {
 #[derive(Clone)]
 struct ExposedTool {
     server: Arc<ConnectedServer>,
+    server_name: String,
     remote_name: String,
     exposure: Exposure,
     definition: Value,
@@ -173,6 +174,7 @@ impl McpRegistry {
                             exposed_name.clone(),
                             ExposedTool {
                                 server: Arc::clone(&server),
+                                server_name: name.clone(),
                                 remote_name: tool.name,
                                 exposure,
                                 definition: json!({
@@ -297,14 +299,24 @@ impl McpRegistry {
             return Some(self.call_resource_tool(name, arguments).await);
         }
         let tool = self.tools.get(name)?;
-        Some(
-            tool.server
-                .client
-                .lock()
-                .await
-                .call_tool(&tool.remote_name, arguments)
-                .await,
-        )
+        let mut result = tool
+            .server
+            .client
+            .lock()
+            .await
+            .call_tool(&tool.remote_name, arguments)
+            .await;
+        // Pi: an error result without text still says which tool failed.
+        if let Ok(outcome) = &mut result
+            && outcome.is_error
+            && outcome.content.trim().is_empty()
+        {
+            outcome.content = format!(
+                "MCP tool {}/{} returned an error",
+                tool.server_name, tool.remote_name
+            );
+        }
+        Some(result)
     }
 }
 
@@ -1975,6 +1987,7 @@ done
             tool_name.into(),
             ExposedTool {
                 server,
+                server_name: "test".into(),
                 remote_name: "echo".into(),
                 exposure: Exposure::Codemode,
                 definition,
