@@ -3986,11 +3986,17 @@ impl MuAgent {
         else {
             return Ok(None);
         };
-        let summarized = &path[boundary_start..cut.first_kept_entry_index.max(boundary_start)];
-        if !summarized
-            .iter()
-            .any(|entry| entry.get("message").is_some())
-        {
+        // A cut inside a turn summarizes the earlier turns and the turn's prefix separately.
+        let (history_end, prefix) = match (cut.is_split_turn, cut.turn_start_index) {
+            (true, Some(turn_start)) => (
+                turn_start.max(boundary_start),
+                &path[turn_start.max(boundary_start)..cut.first_kept_entry_index],
+            ),
+            _ => (cut.first_kept_entry_index.max(boundary_start), &path[0..0]),
+        };
+        let summarized = &path[boundary_start..history_end];
+        let has_messages = |entries: &[Value]| entries.iter().any(|e| e.get("message").is_some());
+        if !has_messages(summarized) && !has_messages(prefix) {
             return Ok(None);
         }
         let tokens_before = path
@@ -3998,17 +4004,69 @@ impl MuAgent {
             .filter_map(|entry| entry.get("message"))
             .map(crate::compaction::estimate_tokens)
             .sum();
-        let conversation = conversation_text(summarized);
+        let summary = if has_messages(prefix) {
+            let history_text = if has_messages(summarized) {
+                self.summarize(
+                    &conversation_text(summarized),
+                    previous_summary.as_deref(),
+                    custom_instructions,
+                )
+                .await?
+            } else {
+                previous_summary
+                    .clone()
+                    .unwrap_or_else(|| "No prior history.".to_owned())
+            };
+            let prefix_text = self
+                .summarize_text(format!(
+                    "# Conversation\n{}\n\n# Instructions\n{}",
+                    conversation_text(prefix),
+                    crate::compaction::TURN_PREFIX_SUMMARIZATION_PROMPT
+                ))
+                .await?;
+            format!("{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix_text}")
+        } else {
+            self.summarize(
+                &conversation_text(summarized),
+                previous_summary.as_deref(),
+                custom_instructions,
+            )
+            .await?
+        };
+        self.session
+            .append_compaction(&summary, &first_kept_id, tokens_before);
+        self.save_session()?;
+        self.transcript = runtime::session_messages(&self.session);
+        Ok(Some(CompactionOutcome {
+            summary,
+            tokens_before,
+        }))
+    }
+
+    /// One summarization call over `conversation` (Pi's `generateSummary`).
+    async fn summarize(
+        &mut self,
+        conversation: &str,
+        previous_summary: Option<&str>,
+        custom_instructions: Option<&str>,
+    ) -> Result<String, AgentError> {
         let previous = previous_summary
-            .as_deref()
             .map(|summary| format!("<previous-summary>\n{summary}\n</previous-summary>\n\n"))
             .unwrap_or_default();
+        self.summarize_text(format!(
+            "<conversation>\n{conversation}\n</conversation>\n\n{previous}{}",
+            crate::compaction::summarization_prompt_for(
+                custom_instructions,
+                previous_summary.is_some()
+            )
+        ))
+        .await
+    }
+
+    async fn summarize_text(&mut self, prompt: String) -> Result<String, AgentError> {
         let history = vec![json!({
             "role":"user",
-            "content":[{"type":"input_text","text":format!(
-                "<conversation>\n{conversation}\n</conversation>\n\n{previous}{}",
-                crate::compaction::summarization_prompt_for(custom_instructions, previous_summary.is_some())
-            )}],
+            "content":[{"type":"input_text","text":prompt}],
         })];
         let reply = self.provider.complete(&history, &[], &mut |_| {}).await?;
         if reply.incomplete_reason.is_some() || reply.text.trim().is_empty() {
@@ -4016,14 +4074,7 @@ impl MuAgent {
                 "Summarization did not complete; the session was not changed".into(),
             ));
         }
-        self.session
-            .append_compaction(&reply.text, &first_kept_id, tokens_before);
-        self.save_session()?;
-        self.transcript = runtime::session_messages(&self.session);
-        Ok(Some(CompactionOutcome {
-            summary: reply.text,
-            tokens_before,
-        }))
+        Ok(reply.text)
     }
 
     pub fn session_path(&self) -> &Path {
