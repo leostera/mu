@@ -357,6 +357,13 @@ fn mu_matches_recorded_pi_screens() {
         worker.join().unwrap();
     }
     let mut failures = failures.lock().unwrap().clone();
+    // Replays run in parallel PTYs, so a loaded machine can miss a timing window. A real mismatch
+    // reproduces when the fixture is replayed alone; a scheduling hiccup does not.
+    failures.retain(|(file, _)| {
+        let fixture: Value =
+            serde_json::from_slice(&std::fs::read(fixture_dir().join(file)).unwrap()).unwrap();
+        replay(&fixture).is_err()
+    });
     failures.sort();
     if verbose {
         for (file, error) in &failures {

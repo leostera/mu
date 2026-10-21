@@ -1916,33 +1916,12 @@ async fn run_shell_process(
                 let _ = child.wait().await;
                 process_group.disarm();
                 finish_capture(capture, &mut updates_receiver).await;
-                let full_output =
-                    sanitize_shell_output(&String::from_utf8_lossy(&captured.lock().await));
-                let (mut message, truncation) = truncate_shell_output(
-                    &full_output,
-                    BASH_OUTPUT_MAX_LINES,
-                    TOOL_OUTPUT_MAX_BYTES,
-                );
-                if let Some(truncation) = truncation {
-                    let path = std::env::temp_dir()
-                        .join(format!("{temp_file_prefix}-{}.txt", uuid::Uuid::new_v4()));
-                    if std::fs::write(&path, &full_output).is_ok() {
-                        append_shell_truncation_notice(
-                            &mut message,
-                            &truncation,
-                            &full_output,
-                            &path.to_string_lossy(),
-                        );
-                    }
-                }
-                if message.is_empty() {
-                    message.push_str("(no output)");
-                }
-                message.push_str(&format!(
-                    "\n\nCommand timed out after {} seconds",
-                    timeout.as_secs_f64()
+                let captured = captured.lock().await.clone();
+                return Err(interrupted_error(
+                    &captured,
+                    temp_file_prefix,
+                    &format!("Command timed out after {} seconds", timeout.as_secs_f64()),
                 ));
-                return Err(ToolError::Command(message));
             }
         },
         None => child.wait().await.map_err(ToolError::Io)?,
@@ -1954,6 +1933,67 @@ async fn run_shell_process(
         stdout: captured.lock().await.clone(),
         stderr: Vec::new(),
     })
+}
+
+/// Pi's timeout/abort error: the (tail-truncated) output so far, a full-output path when it was
+/// truncated, then `reason` (`Command timed out after N seconds` or `Command aborted`).
+fn interrupted_error(captured: &[u8], temp_file_prefix: &str, reason: &str) -> ToolError {
+    let full_output = sanitize_shell_output(&String::from_utf8_lossy(captured));
+    let (mut message, truncation) =
+        truncate_shell_output(&full_output, BASH_OUTPUT_MAX_LINES, TOOL_OUTPUT_MAX_BYTES);
+    if let Some(truncation) = truncation {
+        let path =
+            std::env::temp_dir().join(format!("{temp_file_prefix}-{}.txt", uuid::Uuid::new_v4()));
+        if std::fs::write(&path, &full_output).is_ok() {
+            append_shell_truncation_notice(
+                &mut message,
+                &truncation,
+                &full_output,
+                &path.to_string_lossy(),
+            );
+        }
+    }
+    if message.is_empty() {
+        message.push_str("(no output)");
+    }
+    message.push_str(&format!("\n\n{reason}"));
+    ToolError::Command(message)
+}
+
+/// How a shell command ended, independent of how it was run (what Pi's injectable
+/// `BashOperations.exec` reports).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellEnd {
+    Exited(Option<i32>),
+    TimedOut(Duration),
+    Aborted,
+}
+
+/// Turn captured output and an ending into the tool result or error Pi's bash tool produces.
+pub fn shell_outcome(
+    output: &[u8],
+    end: &ShellEnd,
+    started_at: Instant,
+    temp_file_prefix: &str,
+) -> Result<ToolResult, ToolError> {
+    match end {
+        ShellEnd::Exited(code) => Ok(shell_result_from(
+            output,
+            *code,
+            started_at,
+            temp_file_prefix,
+        )),
+        ShellEnd::TimedOut(timeout) => Err(interrupted_error(
+            output,
+            temp_file_prefix,
+            &format!("Command timed out after {} seconds", timeout.as_secs_f64()),
+        )),
+        ShellEnd::Aborted => Err(interrupted_error(
+            output,
+            temp_file_prefix,
+            "Command aborted",
+        )),
+    }
 }
 
 fn shell_child_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
@@ -2216,11 +2256,19 @@ fn strip_string_sequence(
 }
 
 fn shell_result(output: Output, started_at: Instant, temp_file_prefix: &str) -> ToolResult {
+    let mut bytes = output.stdout;
+    bytes.extend_from_slice(&output.stderr);
+    shell_result_from(&bytes, output.status.code(), started_at, temp_file_prefix)
+}
+
+fn shell_result_from(
+    output: &[u8],
+    exit_code: Option<i32>,
+    started_at: Instant,
+    temp_file_prefix: &str,
+) -> ToolResult {
     const STRUCTURED_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
-    let mut full_output = String::from_utf8_lossy(&output.stdout).into_owned();
-    full_output.push_str(&String::from_utf8_lossy(&output.stderr));
-    let full_output = sanitize_shell_output(&full_output);
-    let exit_code = output.status.code();
+    let full_output = sanitize_shell_output(&String::from_utf8_lossy(output));
     let (structured_output, structured_truncated) =
         truncate_utf8(&full_output, STRUCTURED_OUTPUT_MAX_BYTES);
     let (mut content, truncation) =
@@ -3484,6 +3532,68 @@ mod tests {
 
     #[cfg(unix)]
     /// Ported from Pi's `tools.test.ts`: a trailing newline is not an extra truncated line.
+    /// Ported from Pi's `tools.test.ts` ("should include full output path for truncated timeout
+    /// and abort errors" and "should reject a null exit code from custom operations"), driven by
+    /// fake output instead of Pi's injected `BashOperations`.
+    #[test]
+    fn shell_outcome_formats_timeout_abort_and_null_exit_like_pi() {
+        let chatty = (1..=3000)
+            .map(|i| format!("{i}\n"))
+            .collect::<String>()
+            .into_bytes();
+        for (end, expected) in [
+            (
+                ShellEnd::TimedOut(Duration::from_secs(5)),
+                "Command timed out after 5 seconds",
+            ),
+            (ShellEnd::Aborted, "Command aborted"),
+        ] {
+            let error = shell_outcome(&chatty, &end, Instant::now(), "pi-bash")
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("Full output: undefined"));
+            let path = error
+                .split("Full output: ")
+                .nth(1)
+                .unwrap()
+                .split(']')
+                .next()
+                .unwrap();
+            let full = std::fs::read_to_string(path).unwrap();
+            assert!(full.contains("1\n2\n3") && full.contains("2998\n2999\n3000"));
+            assert!(error.contains("[Showing lines "));
+            std::fs::remove_file(path).unwrap();
+        }
+        let quiet = shell_outcome(b"", &ShellEnd::Aborted, Instant::now(), "pi-bash")
+            .err()
+            .unwrap();
+        assert!(
+            quiet
+                .to_string()
+                .starts_with("(no output)\n\nCommand aborted")
+        );
+        let null_exit = shell_outcome(
+            b"partial\n",
+            &ShellEnd::Exited(None),
+            Instant::now(),
+            "pi-bash",
+        )
+        .unwrap();
+        assert!(null_exit.is_error);
+        // Pi matches /partial\s+Command terminated without an exit code$/.
+        let body = null_exit
+            .content
+            .strip_suffix("Command terminated without an exit code")
+            .unwrap();
+        assert!(
+            body.starts_with("partial")
+                && body[7..].chars().all(char::is_whitespace)
+                && body.len() > 7
+        );
+    }
+
     #[tokio::test]
     async fn bash_trailing_newline_is_not_counted_as_an_extra_line() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
