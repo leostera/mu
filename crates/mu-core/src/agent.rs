@@ -1451,16 +1451,20 @@ async fn refresh_expired_oauth(config: &Config) -> Result<(), AgentError> {
     let Some((_, refresh, expires)) = crate::auth::oauth_access(&path, &config.provider) else {
         return Ok(());
     };
-    if config.provider != "anthropic" || !crate::oauth::is_expired(expires) {
+    if !crate::oauth::is_expired(expires) {
         return Ok(());
     }
-    let credential = crate::oauth::anthropic::refresh_token(&refresh)
-        .await
-        .map_err(|error| {
-            AgentError::Provider(format!(
-                "OAuth refresh failed ({error}); run `mu auth login --provider anthropic`"
-            ))
-        })?;
+    let refreshed = match config.provider.as_str() {
+        "anthropic" => crate::oauth::anthropic::refresh_token(&refresh).await,
+        "xai" => crate::oauth::xai::refresh_token(&refresh).await,
+        _ => return Ok(()),
+    };
+    let credential = refreshed.map_err(|error| {
+        AgentError::Provider(format!(
+            "OAuth refresh failed ({error}); run `mu auth login --provider {}`",
+            config.provider
+        ))
+    })?;
     crate::auth::set_credential(&path, &config.provider, credential)
         .map_err(|error| AgentError::Configuration(error.to_string()))
 }
