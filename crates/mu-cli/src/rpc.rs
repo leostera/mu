@@ -92,6 +92,21 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
                 Err(error) => Err(error.to_string()),
             },
         },
+        "compact" => match agent.compact().await {
+            Ok(Some(outcome)) => Ok(Some(json!({
+                "summary": outcome.summary,
+                "tokensBefore": outcome.tokens_before,
+            }))),
+            Ok(None) => Err("Nothing to compact".into()),
+            Err(error) => Err(error.to_string()),
+        },
+        "get_fork_messages" => Ok(Some(json!({
+            "messages": agent
+                .user_messages()
+                .into_iter()
+                .map(|(id, text)| json!({"entryId": id, "text": text}))
+                .collect::<Vec<_>>(),
+        }))),
         "get_session_stats" => Ok(Some(json!({"summary": agent.session_summary()}))),
         "get_last_assistant_text" => Ok(Some(json!({"text": agent.last_assistant_text()}))),
         other => Err(format!("Unknown command: {other}")),
@@ -186,6 +201,17 @@ mod tests {
         assert_eq!(done["type"], "prompt_done");
         let text = handle(&mut agent, &json!({"type":"get_last_assistant_text"})).await;
         assert_eq!(text["data"]["text"], "Demo backend received: hello");
+        let forks = handle(&mut agent, &json!({"type":"get_fork_messages"})).await;
+        let last = forks["data"]["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last["text"], "hello");
+        assert!(last["entryId"].as_str().is_some());
+        let nothing = handle(&mut agent, &json!({"type":"compact"})).await;
+        assert_eq!(nothing["error"], "Nothing to compact");
         let missing = handle(&mut agent, &json!({"type":"prompt"})).await;
         assert_eq!(missing["success"], false);
     }
