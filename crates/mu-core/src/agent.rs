@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::OnceCell;
 
+mod anthropic;
 mod runtime;
 
 use crate::agent_loop::AgentMessage;
@@ -307,6 +308,12 @@ enum ProviderTransport {
         endpoint: Url,
         token: String,
         gateway_headers: bool,
+    },
+    /// Anthropic Messages API (`api: "anthropic-messages"` in `models.json`).
+    Anthropic {
+        http: Client,
+        endpoint: Url,
+        key: String,
     },
     Demo,
     #[cfg(test)]
@@ -1323,6 +1330,80 @@ async fn connect(
 }
 
 impl Provider {
+    async fn complete_anthropic(
+        &self,
+        http: &Client,
+        endpoint: &Url,
+        key: &str,
+        history: &[Value],
+        tools: &[Value],
+        on_event: &mut impl FnMut(AgentEvent),
+    ) -> Result<Reply, AgentError> {
+        let mut system = if self.describes_tools {
+            instructions_for_tools(&self.instructions, tools)
+        } else {
+            self.instructions.clone()
+        };
+        if !self.appendix.is_empty() {
+            system = format!("{system}\n\n{}", self.appendix);
+        }
+        let budget = self
+            .reasoning_effort
+            .filter(|_| self.supports_reasoning)
+            .map(|effort| match effort {
+                "minimal" => 1_024,
+                "low" => 2_048,
+                "medium" => 8_192,
+                "high" => 16_384,
+                _ => 32_768,
+            });
+        let mut body = anthropic::request_body(&self.model, &system, history, tools, budget);
+        if let Some(budget) = budget {
+            body["max_tokens"] = json!(budget + 16_384);
+        }
+        let response = http
+            .post(endpoint.clone())
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header(header::ACCEPT, "text/event-stream")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
+        if !response.status().is_success() {
+            return Err(AgentError::Provider(format!(
+                "model request returned HTTP {}",
+                response.status()
+            )));
+        }
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        let mut decoder = anthropic::Decoder::default();
+        while let Some(chunk) = stream.next().await {
+            bytes.extend_from_slice(
+                &chunk.map_err(|e| AgentError::Provider(format!("model stream failed: {e}")))?,
+            );
+            while let Some(pos) = bytes.windows(2).position(|w| w == b"\n\n") {
+                let frame: Vec<_> = bytes.drain(..pos + 2).collect();
+                let frame = String::from_utf8_lossy(&frame);
+                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data:")) else {
+                    continue;
+                };
+                if let Ok(event) = serde_json::from_str::<Value>(data.trim()) {
+                    decoder
+                        .feed(&event, on_event)
+                        .map_err(AgentError::Provider)?;
+                }
+            }
+        }
+        if !decoder.finished() {
+            return Err(AgentError::Provider(
+                "Anthropic stream ended before message_stop".into(),
+            ));
+        }
+        Ok(decoder.into_reply())
+    }
+
     async fn complete(
         &self,
         history: &[Value],
@@ -1369,6 +1450,16 @@ impl Provider {
                 total_tokens: 0,
                 incomplete_reason: None,
             });
+        }
+        if let ProviderTransport::Anthropic {
+            http,
+            endpoint,
+            key,
+        } = &self.transport
+        {
+            return self
+                .complete_anthropic(http, endpoint, key, history, tools, on_event)
+                .await;
         }
         let ProviderTransport::OpenCode {
             http,
@@ -1675,10 +1766,10 @@ fn connect_custom_provider(
         .get(&config.provider)
         .ok_or_else(unsupported)?;
     match entry.get("api").and_then(Value::as_str) {
-        Some("openai-responses") => {}
+        Some("openai-responses" | "anthropic-messages") => {}
         other => {
             return Err(AgentError::Configuration(format!(
-                "Provider `{}` uses unsupported api `{}` (supported: openai-responses)",
+                "Provider `{}` uses unsupported api `{}` (supported: openai-responses, anthropic-messages)",
                 config.provider,
                 other.unwrap_or("none")
             )));
@@ -1690,8 +1781,10 @@ fn connect_custom_provider(
         .ok_or_else(unsupported)?;
     let mut endpoint = Url::parse(base)
         .map_err(|error| AgentError::Configuration(format!("invalid baseUrl: {error}")))?;
+    let anthropic = entry.get("api").and_then(Value::as_str) == Some("anthropic-messages");
+    let suffix = if anthropic { "messages" } else { "responses" };
     endpoint.set_path(&format!(
-        "{}/responses",
+        "{}/{suffix}",
         endpoint.path().trim_end_matches('/')
     ));
     let key = entry
@@ -1710,11 +1803,19 @@ fn connect_custom_provider(
             .and_then(Value::as_bool)
     };
     Ok(Provider {
-        transport: ProviderTransport::OpenCode {
-            http: Client::new(),
-            endpoint,
-            token,
-            gateway_headers: false,
+        transport: if anthropic {
+            ProviderTransport::Anthropic {
+                http: Client::new(),
+                endpoint,
+                key: token,
+            }
+        } else {
+            ProviderTransport::OpenCode {
+                http: Client::new(),
+                endpoint,
+                token,
+                gateway_headers: false,
+            }
         },
         model: config.model.clone(),
         instructions: match &prompt.system_prompt {
@@ -1734,6 +1835,8 @@ fn connect_custom_provider(
 fn api_name(transport: &ProviderTransport) -> &'static str {
     if matches!(transport, ProviderTransport::Demo) {
         "mu-demo"
+    } else if matches!(transport, ProviderTransport::Anthropic { .. }) {
+        "anthropic-messages"
     } else {
         "openai-responses"
     }
@@ -4983,7 +5086,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("models.json"),
-            r#"{"providers":{"acme":{"api":"openai-responses","baseUrl":"https://api.acme.test/v1","apiKey":"literal-key","models":[{"id":"m1","reasoning":true}]},"bad":{"api":"anthropic-messages","baseUrl":"x","apiKey":"k"}}}"#,
+            r#"{"providers":{"acme":{"api":"openai-responses","baseUrl":"https://api.acme.test/v1","apiKey":"literal-key","models":[{"id":"m1","reasoning":true}]},"bad":{"api":"google-genai","baseUrl":"x","apiKey":"k"}}}"#,
         )
         .unwrap();
         let config = |provider: &str| super::Config {
@@ -5014,11 +5117,7 @@ mod tests {
         let error = super::connect_custom_provider(&config("bad"), String::new(), &prompt)
             .err()
             .unwrap();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported api `anthropic-messages`")
-        );
+        assert!(error.to_string().contains("unsupported api `google-genai`"));
         assert!(super::connect_custom_provider(&config("nope"), String::new(), &prompt).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
