@@ -99,6 +99,83 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
+/// File paths touched by `read`, `write` and `edit` tool calls (Pi's `FileOperations`).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FileOperations {
+    pub read: std::collections::BTreeSet<String>,
+    pub written: std::collections::BTreeSet<String>,
+    pub edited: std::collections::BTreeSet<String>,
+}
+
+impl FileOperations {
+    /// Record the tool calls in assistant message entries (`type: "toolCall"` content blocks).
+    pub fn add_entries(&mut self, entries: &[Value]) {
+        for entry in entries {
+            let Some(message) = entry.get("message") else {
+                continue;
+            };
+            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
+            for block in message
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if block.get("type").and_then(Value::as_str) != Some("toolCall") {
+                    continue;
+                }
+                let Some(path) = block.pointer("/arguments/path").and_then(Value::as_str) else {
+                    continue;
+                };
+                let set = match block.get("name").and_then(Value::as_str) {
+                    Some("read") => &mut self.read,
+                    Some("write") => &mut self.written,
+                    Some("edit") => &mut self.edited,
+                    _ => continue,
+                };
+                set.insert(path.to_owned());
+            }
+        }
+    }
+
+    /// Pi's `computeFileLists` + `formatFileOperations`: files only read, then modified files,
+    /// as XML-ish sections appended to the summary (empty when nothing was touched).
+    pub fn format(&self) -> String {
+        let modified = self
+            .edited
+            .iter()
+            .chain(&self.written)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let read_only = self
+            .read
+            .iter()
+            .filter(|f| !modified.contains(*f))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut sections = Vec::new();
+        if !read_only.is_empty() {
+            sections.push(format!(
+                "<read-files>\n{}\n</read-files>",
+                read_only.join("\n")
+            ));
+        }
+        if !modified.is_empty() {
+            sections.push(format!(
+                "<modified-files>\n{}\n</modified-files>",
+                modified.into_iter().collect::<Vec<_>>().join("\n")
+            ));
+        }
+        if sections.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n{}", sections.join("\n\n"))
+        }
+    }
+}
+
 pub const SUMMARIZATION_PROMPT: &str = "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
 Use this EXACT format:
@@ -326,6 +403,22 @@ pub fn find_cut_point(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_operations_list_read_only_and_modified_files_sorted() {
+        let call = |name: &str, path: &str| json!({"type":"toolCall","id":"x","name":name,"arguments":{"path":path}});
+        let entries = vec![
+            json!({"message":{"role":"assistant","content":[call("read","b.rs"),call("read","a.rs"),call("edit","a.rs"),call("write","z.md"),call("bash","ignored")]}}),
+            json!({"message":{"role":"user","content":[call("read","user-not-counted")]}}),
+        ];
+        let mut ops = FileOperations::default();
+        ops.add_entries(&entries);
+        assert_eq!(
+            ops.format(),
+            "\n\n<read-files>\nb.rs\n</read-files>\n\n<modified-files>\na.rs\nz.md\n</modified-files>"
+        );
+        assert_eq!(FileOperations::default().format(), "");
+    }
+
     #[test]
     fn turn_prefix_prompt_is_pis_checkpoint_prompt() {
         assert!(

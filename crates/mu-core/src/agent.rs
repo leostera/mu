@@ -4033,6 +4033,10 @@ impl MuAgent {
             )
             .await?
         };
+        let mut file_ops = crate::compaction::FileOperations::default();
+        file_ops.add_entries(summarized);
+        file_ops.add_entries(prefix);
+        let summary = format!("{summary}{}", file_ops.format());
         self.session
             .append_compaction(&summary, &first_kept_id, tokens_before);
         self.save_session()?;
