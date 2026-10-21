@@ -72,6 +72,26 @@ pub fn defaults() -> Value {
     })
 }
 
+/// Pi's `applyHttpProxySettings`: the `httpProxy` setting fills `HTTP_PROXY` / `HTTPS_PROXY`
+/// only where they are not already set. Returns the variables to set.
+pub fn proxy_env_updates(
+    setting: Option<&str>,
+    http_proxy_set: bool,
+    https_proxy_set: bool,
+) -> Vec<(&'static str, String)> {
+    let Some(proxy) = setting.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Vec::new();
+    };
+    [
+        ("HTTP_PROXY", http_proxy_set),
+        ("HTTPS_PROXY", https_proxy_set),
+    ]
+    .into_iter()
+    .filter(|(_, already)| !already)
+    .map(|(name, _)| (name, proxy.to_owned()))
+    .collect()
+}
+
 fn is_tool_modifier(entry: &Value) -> bool {
     entry
         .as_str()
@@ -338,6 +358,23 @@ mod tests {
             Settings::load(&agent, &cwd, true).get("defaultTools"),
             Some(json!(["bash"]))
         );
+    }
+
+    #[test]
+    fn http_proxy_setting_fills_only_unset_variables() {
+        assert_eq!(
+            proxy_env_updates(Some(" http://p:1 "), false, false),
+            [
+                ("HTTP_PROXY", "http://p:1".to_owned()),
+                ("HTTPS_PROXY", "http://p:1".to_owned())
+            ]
+        );
+        assert_eq!(
+            proxy_env_updates(Some("http://p:1"), true, false),
+            [("HTTPS_PROXY", "http://p:1".to_owned())]
+        );
+        assert!(proxy_env_updates(Some("  "), false, false).is_empty());
+        assert!(proxy_env_updates(None, false, false).is_empty());
     }
 
     #[test]

@@ -266,6 +266,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(cwd) = std::env::current_dir() {
             // Unreadable settings files are reported once instead of being ignored silently.
             let mut settings = mu_core::settings::Settings::load(&agent_dir, &cwd, true);
+            let proxy = settings.get("httpProxy");
+            for (name, value) in mu_core::settings::proxy_env_updates(
+                proxy.as_ref().and_then(|v| v.as_str()),
+                std::env::var_os("HTTP_PROXY").is_some(),
+                std::env::var_os("HTTPS_PROXY").is_some(),
+            ) {
+                // SAFETY: runs first thing in `run`, before any task reads or writes the environment.
+                unsafe { std::env::set_var(name, value) };
+            }
             for error in settings.drain_errors() {
                 eprintln!("mu: settings: {}: {}", error.path.display(), error.message);
             }
