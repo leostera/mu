@@ -1861,6 +1861,25 @@ fn find_session<'a>(
         .or_else(|| sessions.iter().find(|s| s.id.starts_with(query)))
 }
 
+fn session_picker(sessions: &[mu_core::SessionInfo]) -> Picker {
+    Picker {
+        command: "resume",
+        items: sessions
+            .iter()
+            .map(|s| chrome::SelectItem {
+                label: s
+                    .name
+                    .clone()
+                    .or_else(|| s.preview.clone())
+                    .unwrap_or_else(|| "(unnamed)".into()),
+                description: Some(s.id.chars().take(8).collect()),
+            })
+            .collect(),
+        values: sessions.iter().map(|s| s.id.clone()).collect(),
+        selection: 0,
+    }
+}
+
 fn session_list_text(sessions: &[mu_core::SessionInfo]) -> String {
     if sessions.is_empty() {
         return "No sessions found for this directory.".into();
@@ -2315,7 +2334,12 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         "resume" => {
             let sessions = mu_core::list_sessions_for_current_cwd(None).unwrap_or_default();
             let text = if argument.is_empty() {
-                session_list_text(&sessions)
+                if sessions.is_empty() {
+                    session_list_text(&sessions)
+                } else {
+                    app.picker = Some(session_picker(&sessions));
+                    "Resume which session?".to_owned()
+                }
             } else {
                 match find_session(&sessions, argument) {
                     None => format!("No session matching \"{argument}\""),
@@ -3087,6 +3111,21 @@ mod tests {
         execute_command(&mut app, &agent);
         press(&mut app, KeyCode::Esc);
         assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn session_picker_lists_names_and_resumes_by_full_id() {
+        let info = |id: &str, name: Option<&str>| mu_core::SessionInfo {
+            id: id.into(),
+            name: name.map(str::to_owned),
+            ..Default::default()
+        };
+        let picker =
+            super::session_picker(&[info("abcdef0123456789", Some("work")), info("zzzz", None)]);
+        assert_eq!(picker.items[0].label, "work");
+        assert_eq!(picker.items[0].description.as_deref(), Some("abcdef01"));
+        assert_eq!(picker.items[1].label, "(unnamed)");
+        assert_eq!(picker.values[0], "abcdef0123456789");
     }
 
     #[test]
