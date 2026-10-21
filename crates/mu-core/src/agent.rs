@@ -612,6 +612,11 @@ pub enum AgentEvent {
     SkillCommandWarning(String),
     /// The context passed the compaction threshold; a summary is being generated.
     AutoCompactionStarted,
+    /// Automatic compaction finished: the summary now in the session and the tokens it replaced.
+    AutoCompactionFinished {
+        summary: String,
+        tokens_before: u64,
+    },
 }
 enum TerminalResponse {
     Completed,

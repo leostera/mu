@@ -1143,7 +1143,12 @@ impl MuAgent {
             if self.needs_auto_compaction() {
                 on_event(AgentEvent::AutoCompactionStarted);
                 // A failed summary leaves the session untouched; the turn itself succeeded.
-                let _ = self.compact().await;
+                if let Ok(Some(outcome)) = self.compact().await {
+                    on_event(AgentEvent::AutoCompactionFinished {
+                        summary: outcome.summary,
+                        tokens_before: outcome.tokens_before,
+                    });
+                }
             }
         }
         Ok(())

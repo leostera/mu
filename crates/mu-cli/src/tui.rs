@@ -1458,6 +1458,23 @@ impl App {
                     AgentEvent::AutoCompactionStarted => {
                         self.retry_status = Some("Context is full; compacting…".into());
                     }
+                    AgentEvent::AutoCompactionFinished {
+                        summary,
+                        tokens_before,
+                    } => {
+                        self.retry_status = None;
+                        // Compaction runs after the turn, so the box follows the reply.
+                        self.messages.push(Message {
+                            role: Role::Summary {
+                                label: "[compaction]",
+                                tokens: Some(tokens_before),
+                            },
+                            text: summary,
+                            thinking: String::new(),
+                            tools: Vec::new(),
+                            error: false,
+                        });
+                    }
                     AgentEvent::SkillCommandWarning(warning) => {
                         self.retry_status = Some(warning);
                     }
