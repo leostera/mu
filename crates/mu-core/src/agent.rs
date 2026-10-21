@@ -182,6 +182,8 @@ pub struct SessionOptions {
     pub theme: Option<String>,
     /// `--models`: comma-separated patterns scoping Ctrl+P cycling (overrides `enabledModels`).
     pub models: Vec<String>,
+    /// `--verbose`: print the resolved startup configuration to stderr (print mode only).
+    pub verbose: bool,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -2705,6 +2707,7 @@ fn resolve_session_options(
         project_trust: _,
         theme: _,
         models: _,
+        verbose: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -3462,6 +3465,25 @@ impl MuAgent {
         )
     }
 
+    /// Resolved startup configuration, one `key: value` per line (`--verbose`).
+    pub fn startup_summary(&self) -> String {
+        format!(
+            "provider: {}\nmodel: {}\nthinking: {}\nsession: {}\ncwd: {}\ntools: {}\nskills: {}\nprompt templates: {}",
+            self.provider_id,
+            self.provider.model,
+            format!("{:?}", self.thinking).to_lowercase(),
+            self.session_path.display(),
+            self.cwd.display(),
+            if self.no_tools {
+                "(none)".to_owned()
+            } else {
+                self.enabled_tools.join(", ")
+            },
+            self.skills.skills.len(),
+            self.templates.len(),
+        )
+    }
+
     /// Display name for a model id (`name` in `models.json`, else the id).
     pub fn model_display_name(&self, model: &str) -> String {
         configured_model_entry(&self.agent_dir, &self.provider_id, model)
@@ -3989,7 +4011,11 @@ pub async fn run_prompt_with_options(
     prompt: String,
     session_options: SessionOptions,
 ) -> Result<(), AgentError> {
+    let verbose = session_options.verbose;
     let mut agent = MuAgent::connect_with_options(session_options).await?;
+    if verbose {
+        eprintln!("{}", agent.startup_summary());
+    }
     agent
         .submit(prompt, &mut |event| {
             match event {
@@ -5893,6 +5919,18 @@ mod tests {
             crate::prompt_templates::expand_prompt_template("/hi bob", &agent.templates),
             "Hello bob"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_summary_lists_the_resolved_configuration() {
+        let root = std::env::temp_dir().join(format!("mu-verbose-{}", uuid::Uuid::new_v4()));
+        let agent = scripted_agent(&root, vec![]);
+        let summary = agent.startup_summary();
+        assert!(
+            summary.starts_with("provider: test-provider\nmodel: test-model\nthinking: medium")
+        );
+        assert!(summary.contains("tools: read, bash, edit, write"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

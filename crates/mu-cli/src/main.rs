@@ -108,6 +108,10 @@ struct Cli {
     #[arg(long, value_delimiter = ',', value_name = "PATTERNS")]
     models: Vec<String>,
 
+    /// Print the resolved startup configuration to stderr (print mode).
+    #[arg(long)]
+    verbose: bool,
+
     /// Theme name for this run (dark or light).
     #[arg(long, value_name = "NAME")]
     theme: Option<String>,
@@ -301,6 +305,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         api_key: cli.api_key,
         theme: cli.theme,
         models: cli.models,
+        verbose: cli.verbose,
         project_trust: match (cli.approve, cli.no_approve) {
             (true, _) => Some(true),
             (_, true) => Some(false),
