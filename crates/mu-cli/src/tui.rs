@@ -2090,8 +2090,16 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             });
         }
         "export" => match agent.try_lock() {
-            Ok(agent) if !argument.is_empty() => {
-                let path = std::path::Path::new(argument);
+            Ok(agent) => {
+                let default_path;
+                let path = if argument.is_empty() {
+                    // Pi's default: an HTML export named after the session, in the working directory.
+                    let id = agent.session_info().id;
+                    default_path = agent.cwd().join(format!("mu-session-{id}.html"));
+                    default_path.as_path()
+                } else {
+                    std::path::Path::new(argument)
+                };
                 let (text, error) = match agent.export_session(path) {
                     Ok(()) => (format!("Exported session to {}", path.display()), false),
                     Err(error) => (format!("Could not export session: {error}"), true),
@@ -2104,13 +2112,6 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                     error,
                 });
             }
-            Ok(_) => app.messages.push(Message {
-                role: Role::Assistant,
-                text: "Usage: /export <path.jsonl|path.html>".into(),
-                thinking: String::new(),
-                tools: Vec::new(),
-                error: true,
-            }),
             Err(_) => app.messages.push(Message {
                 role: Role::Assistant,
                 text: "Could not export session while Mu is busy.".into(),
