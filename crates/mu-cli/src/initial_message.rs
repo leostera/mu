@@ -83,18 +83,23 @@ fn is_image(bytes: &[u8]) -> bool {
         || (bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
 }
 
-/// Stdin, then `@file` text, then the messages, concatenated as Pi does (no separators).
-pub fn build(stdin: Option<&str>, file_text: &str, messages: &[String]) -> Option<String> {
+/// Pi's `buildInitialMessage`: stdin, then `@file` text, then only the *first* message, joined
+/// without separators. The remaining messages are returned for separate follow-up turns.
+pub fn build(
+    stdin: Option<&str>,
+    file_text: &str,
+    messages: &[String],
+) -> (Option<String>, Vec<String>) {
     let mut parts = Vec::new();
     parts.extend(stdin);
     if !file_text.is_empty() {
         parts.push(file_text);
     }
-    let joined = messages.join(" ");
-    if !joined.is_empty() {
-        parts.push(&joined);
-    }
-    (!parts.is_empty()).then(|| parts.concat())
+    let (first, rest) = messages
+        .split_first()
+        .map_or((None, &[][..]), |(f, r)| (Some(f.as_str()), r));
+    parts.extend(first);
+    ((!parts.is_empty()).then(|| parts.concat()), rest.to_vec())
 }
 
 #[cfg(test)]
@@ -148,9 +153,14 @@ mod tests {
     #[test]
     fn initial_message_orders_stdin_files_then_messages() {
         assert_eq!(
-            build(Some("in\n"), "<f/>\n", &args(&["go"])).as_deref(),
-            Some("in\n<f/>\ngo")
+            build(Some("in\n"), "<f/>\n", &args(&["go"])),
+            (Some("in\n<f/>\ngo".into()), vec![])
         );
-        assert_eq!(build(None, "", &[]), None);
+        assert_eq!(build(None, "", &[]), (None, vec![]));
+        // Only the first message joins the initial prompt; the rest become later turns.
+        assert_eq!(
+            build(None, "<f/>\n", &args(&["one", "two", "three"])),
+            (Some("<f/>\none".into()), args(&["two", "three"]))
+        );
     }
 }

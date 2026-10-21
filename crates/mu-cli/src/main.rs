@@ -414,21 +414,28 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let stdin = (!is_terminal)
             .then(|| read_stdin_prompt(is_terminal))
             .transpose()?;
-        let Some(prompt) = initial_prompt_from(&cli.prompt, stdin.as_deref())? else {
-            return Ok(());
-        };
-        if prompt.trim().is_empty() {
+        let (first, rest) = initial_prompt_from(&cli.prompt, stdin.as_deref())?;
+        // The first message carries stdin and `@file` text; each later message is its own turn.
+        let prompts = first
+            .into_iter()
+            .chain(rest)
+            .filter(|p| !p.trim().is_empty())
+            .collect::<Vec<_>>();
+        if prompts.is_empty() {
             return Ok(());
         }
         if cli.mode == OutputMode::Json {
-            mu_core::run_prompt_json(prompt, session_options).await?;
+            mu_core::run_prompt_json(prompts, session_options).await?;
         } else {
-            mu_core::run_prompt_with_options(prompt, session_options).await?;
+            mu_core::run_prompt_with_options(prompts, session_options).await?;
         }
         return Ok(());
     }
 
-    let initial_prompt = initial_prompt_from(&cli.prompt, None)?;
+    let (first, rest) = initial_prompt_from(&cli.prompt, None)?;
+    // The TUI sends one opening prompt; later messages are kept by joining them onto it.
+    let initial_prompt = (first.is_some() || !rest.is_empty())
+        .then(|| first.into_iter().chain(rest).collect::<Vec<_>>().join(" "));
     mu_core::timings::print();
     tui::run_starting(
         async move { mu_core::MuAgent::connect_with_options(session_options).await },
@@ -533,7 +540,7 @@ fn select_session(
 fn initial_prompt_from(
     arguments: &[String],
     stdin: Option<&str>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+) -> Result<(Option<String>, Vec<String>), Box<dyn std::error::Error>> {
     let parsed = initial_message::PromptArguments::parse(arguments);
     let files = initial_message::file_text(&parsed.files, &std::env::current_dir()?)?;
     Ok(initial_message::build(stdin, &files, &parsed.messages))

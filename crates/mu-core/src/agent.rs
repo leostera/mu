@@ -4576,7 +4576,7 @@ pub async fn run_prompt_with_session(
     session_file: Option<PathBuf>,
 ) -> Result<(), AgentError> {
     run_prompt_with_options(
-        prompt,
+        vec![prompt],
         SessionOptions {
             path: session_file,
             ..SessionOptions::default()
@@ -4587,18 +4587,21 @@ pub async fn run_prompt_with_session(
 
 /// Run one prompt and print every agent event as a JSON line (Pi's `--mode json`).
 pub async fn run_prompt_json(
-    prompt: String,
+    prompts: Vec<String>,
     session_options: SessionOptions,
 ) -> Result<(), AgentError> {
     let mut agent = MuAgent::connect_with_options(session_options).await?;
     agent.set_event_tap(Arc::new(|event| {
         println!("{}", crate::agent_loop::event_to_json(event));
     }));
-    agent.submit(prompt, &mut |_| {}).await
+    for prompt in prompts {
+        agent.submit(prompt, &mut |_| {}).await?;
+    }
+    Ok(())
 }
 
 pub async fn run_prompt_with_options(
-    prompt: String,
+    prompts: Vec<String>,
     session_options: SessionOptions,
 ) -> Result<(), AgentError> {
     let verbose = session_options.verbose;
@@ -4606,24 +4609,26 @@ pub async fn run_prompt_with_options(
     if verbose {
         eprintln!("{}", agent.startup_summary());
     }
-    agent
-        .submit(prompt, &mut |event| {
-            match event {
-                AgentEvent::TextDelta(text) => print!("{text}"),
-                AgentEvent::RetryScheduled {
-                    attempt,
-                    max_attempts,
-                    delay_ms,
-                    error,
-                } => eprintln!(
-                    "Retry {attempt}/{max_attempts} in {:.1}s: {error} (interrupt to cancel)",
-                    delay_ms as f64 / 1000.0
-                ),
-                _ => {}
-            }
-            let _ = io::stdout().flush();
-        })
-        .await?;
+    for prompt in prompts {
+        agent
+            .submit(prompt, &mut |event| {
+                match event {
+                    AgentEvent::TextDelta(text) => print!("{text}"),
+                    AgentEvent::RetryScheduled {
+                        attempt,
+                        max_attempts,
+                        delay_ms,
+                        error,
+                    } => eprintln!(
+                        "Retry {attempt}/{max_attempts} in {:.1}s: {error} (interrupt to cancel)",
+                        delay_ms as f64 / 1000.0
+                    ),
+                    _ => {}
+                }
+                let _ = io::stdout().flush();
+            })
+            .await?;
+    }
     println!();
     Ok(())
 }
