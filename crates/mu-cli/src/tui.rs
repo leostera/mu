@@ -1762,6 +1762,25 @@ fn filtered_commands(app: &App) -> Vec<chrome::SlashCommand> {
     chrome::matching_commands(query.split_whitespace().next().unwrap_or_default())
 }
 
+/// Shortcuts Mu implements today (Pi's table lists more; unimplemented keys are omitted).
+const HOTKEYS: &str = "**Keyboard Shortcuts**
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message (steer while generating) |
+| `Shift+Enter` / `Ctrl+J` | New line |
+| `Alt+Enter` | Queue follow-up while generating |
+| `Up` / `Down` | Move cursor / browse history |
+| `PageUp` / `PageDown` | Scroll by page |
+| `Ctrl+Home` / `Ctrl+End` | Scroll to start / end |
+| `Ctrl+P` | Cycle models |
+| `Ctrl+T` | Toggle thinking block visibility |
+| `Ctrl+O` | Toggle tool output expansion |
+| `Esc` | Interrupt / clear editor |
+| `Ctrl+C` | Clear editor (first) / exit (second) |
+| `Ctrl+D` | Exit (when editor is empty) |
+| `/` | Slash commands |";
+
 fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
     let input = app.input_text();
     let command_line = input.trim_start_matches('/');
@@ -1865,6 +1884,13 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "hotkeys" => app.messages.push(Message {
+            role: Role::Assistant,
+            text: HOTKEYS.into(),
+            thinking: String::new(),
+            tools: Vec::new(),
+            error: false,
+        }),
         "thinking" => {
             let reply = match agent.try_lock() {
                 Err(_) => "Mu is busy.".to_owned(),
@@ -2575,6 +2601,16 @@ mod tests {
         assert_eq!(app.queued_prompts.len(), 1);
         assert_eq!(app.messages[0].text, "add a test");
         assert!(matches!(app.messages[0].role, Role::User));
+    }
+
+    #[tokio::test]
+    async fn hotkeys_command_lists_implemented_shortcuts() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.input = "/hotkeys".chars().collect();
+        execute_command(&mut app, &agent);
+        let text = &app.messages.last().unwrap().text;
+        assert!(text.contains("`Ctrl+O` | Toggle tool output expansion"));
     }
 
     #[tokio::test]
