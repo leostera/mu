@@ -206,6 +206,9 @@ pub struct SessionOptions {
     pub models: Vec<String>,
     /// `--verbose`: print the resolved startup configuration to stderr (print mode only).
     pub verbose: bool,
+    /// Interactive runs continue in the current directory when the session's stored cwd is gone
+    /// (Pi asks first; print and RPC runs refuse).
+    pub continue_in_current_cwd: bool,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -2993,6 +2996,7 @@ fn resolve_session_options(
         theme: _,
         models: _,
         verbose: _,
+        continue_in_current_cwd,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -3068,7 +3072,11 @@ fn resolve_session_options(
         Some(path) => {
             let (session, history) = load_session(&path)?;
             if let Some(message) = missing_session_cwd_error(&session, &path, &config.cwd) {
-                return Err(AgentError::Session(message));
+                if continue_in_current_cwd {
+                    eprintln!("mu: {message}\nmu: continuing in the current working directory");
+                } else {
+                    return Err(AgentError::Session(message));
+                }
             }
             (path, session, history)
         }

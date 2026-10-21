@@ -392,6 +392,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         no_prompt_templates: cli.no_prompt_templates,
         model,
         thinking,
+        continue_in_current_cwd: is_terminal && !cli.print && cli.mode == OutputMode::Text,
     };
 
     mu_core::timings::time("session options");
