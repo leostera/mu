@@ -94,6 +94,24 @@ pub fn run(command: &AuthCommand, agent_dir: &Path) -> Result<String, AuthComman
     }
 }
 
+async fn login_xai(agent_dir: &Path) -> Result<String, AuthCommandError> {
+    use mu_core::oauth::xai;
+    let fail = AuthCommandError::Login;
+    let device = xai::request_device_code(xai::DEVICE_CODE_URL)
+        .await
+        .map_err(fail)?;
+    eprintln!(
+        "Open {} and enter the code {} (expires in {}s).",
+        device.verification_uri, device.user_code, device.expires_in_seconds
+    );
+    let credential = xai::poll_for_tokens(&device, xai::TOKEN_URL)
+        .await
+        .map_err(AuthCommandError::Login)?;
+    mu_core::auth::set_credential(&agent_dir.join("auth.json"), "xai", credential)
+        .map_err(|e| AuthCommandError::Login(e.to_string()))?;
+    Ok("Logged in to xai; credential saved to auth.json".to_owned())
+}
+
 async fn login_openrouter(agent_dir: &Path) -> Result<String, AuthCommandError> {
     use mu_core::oauth::{CallbackServer, Pkce, openrouter};
     let fail = |e: String| AuthCommandError::Login(e);
@@ -129,9 +147,12 @@ pub async fn login(
     if provider == "openrouter" {
         return login_openrouter(agent_dir).await;
     }
+    if provider == "xai" {
+        return login_xai(agent_dir).await;
+    }
     if provider != "anthropic" {
         return Err(AuthCommandError::Login(format!(
-            "OAuth login is only implemented for \"anthropic\" and \"openrouter\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
+            "OAuth login is only implemented for \"anthropic\", \"openrouter\" and \"xai\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
         )));
     }
     let fail = AuthCommandError::Login;
