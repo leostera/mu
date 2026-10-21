@@ -512,7 +512,7 @@ mod tests {
         let wide = scroll_border('↑', 12, 100);
         assert_eq!(wide.width(), 100);
         assert!(wide.contains(" ↑ 12 more "));
-        assert_eq!(wide.find('↑').unwrap() > 40, true);
+        assert!(wide.find('↑').unwrap() > 40);
         assert_eq!(scroll_border('↓', 3, 14), "── ↓ 3 more ──");
         assert_eq!(scroll_border('↓', 3, 6).width(), 6);
     }

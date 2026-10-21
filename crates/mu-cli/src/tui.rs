@@ -2052,6 +2052,22 @@ fn render(frame: &mut Frame, app: &mut App) {
     };
     render_transcript(frame, transcript, app);
 
+    // The row above the editor shows transient status (retries, startup) when there is any.
+    if spacer == 1 {
+        let status_row = Rect {
+            y: transcript.y + transcript.height,
+            height: 1,
+            ..area
+        };
+        let status = app.retry_status.clone().unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {status}").trim_end().to_owned(),
+                app.theme.fg("dim"),
+            ))),
+            status_row,
+        );
+    }
     let mut dock = editor.lines;
     let editor_top = transcript.y + transcript.height + spacer;
     dock.extend(menu);
@@ -2308,8 +2324,7 @@ fn user_message_lines(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static
 mod tests {
     use super::{
         AgentEvent, App, Composer, ComposerAction, Message, Role, ToolActivity, UiEvent,
-        execute_command, filtered_commands, handle_key, handle_mouse, handle_startup_key,
-        insert_char, render,
+        execute_command, handle_key, handle_mouse, handle_startup_key, insert_char, render,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use mu_core::{MuAgent, PromptBehavior};
@@ -2583,8 +2598,7 @@ mod tests {
             background,
             super::theme::Theme::dark().color("userMessageBg")
         );
-        assert!(screen.contains("Enter send"));
-        assert!(screen.contains("session mu-session.jsonl"));
+        assert!(screen.contains("0.0%/0 (auto)"));
     }
 
     fn tool_activity(name: &str, arguments: serde_json::Value, output: &str) -> ToolActivity {
@@ -2704,7 +2718,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("thinking"));
+        assert!(screen.contains("Inspecting the source"));
         assert!(screen.contains("read"));
         assert!(screen.contains("src/main.rs"));
         // Pi collapses read results to the call line until expanded.
@@ -2916,7 +2930,7 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render empty composer");
-        let empty_title_row = row_with_text(terminal.backend(), "message · Enter send");
+        let empty_title_row = border_rows(terminal.backend())[0];
 
         app.composer
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
@@ -2925,7 +2939,7 @@ mod tests {
             .draw(|frame| render(frame, &mut app))
             .expect("render trailing blank line");
 
-        let multiline_title_row = row_with_text(terminal.backend(), "message · Enter send");
+        let multiline_title_row = border_rows(terminal.backend())[0];
         assert_eq!(multiline_title_row + 1, empty_title_row);
         let cursor = terminal.get_cursor_position().unwrap();
         assert_eq!(usize::from(cursor.y), multiline_title_row + 2);
@@ -2938,7 +2952,7 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render empty composer");
-        let empty_title_row = row_with_text(terminal.backend(), "message · Enter send");
+        let empty_title_row = border_rows(terminal.backend())[0];
 
         for ch in "first row".chars() {
             insert_char(&mut app, ch);
@@ -2950,7 +2964,7 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("render multiline composer");
-        let multiline_title_row = row_with_text(terminal.backend(), "message · Enter send");
+        let multiline_title_row = border_rows(terminal.backend())[0];
         assert!(multiline_title_row < empty_title_row);
         let screen = terminal
             .backend()
@@ -2970,10 +2984,7 @@ mod tests {
             .draw(|frame| render(frame, &mut app))
             .expect("render shrunk composer");
         assert_eq!(app.input_text(), "first row");
-        assert_eq!(
-            row_with_text(terminal.backend(), "message · Enter send"),
-            empty_title_row
-        );
+        assert_eq!(border_rows(terminal.backend())[0], empty_title_row);
     }
 
     #[test]
@@ -3036,10 +3047,10 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            !screen.contains("▞ mu"),
+            !screen.contains("▙▟ ▐"),
             "header should scroll with the document"
         );
-        assert!(screen.contains("session session"), "footer remains docked");
+        assert!(screen.contains("0.0%/0 (auto)"), "footer remains docked");
 
         app.messages.scroll.scroll_to_start();
         terminal
@@ -3052,8 +3063,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("▞ mu"));
-        assert!(screen.contains("Enter send"));
+        assert!(screen.contains("▙▟ ▐"));
+        assert!(screen.contains("0.0%/0 (auto)"));
     }
 
     #[test]
@@ -3105,6 +3116,22 @@ mod tests {
         terminal
             .backend_mut()
             .assert_cursor_position(ratatui::layout::Position::new(1, 20));
+    }
+
+    /// Rows made only of `─` (the editor's borders and scroll labels).
+    fn border_rows(backend: &TestBackend) -> Vec<usize> {
+        let width = usize::from(backend.buffer().area.width);
+        backend
+            .buffer()
+            .content
+            .chunks(width)
+            .enumerate()
+            .filter(|(_, row)| {
+                let text = row.iter().map(|cell| cell.symbol()).collect::<String>();
+                text.trim().starts_with('─') && text.trim().ends_with('─')
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     fn row_with_text(backend: &TestBackend, needle: &str) -> usize {
