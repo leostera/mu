@@ -2,6 +2,7 @@ mod layout;
 mod markdown;
 mod terminal;
 mod theme;
+mod tool_view;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -36,6 +37,7 @@ use self::{
     layout::ChatViewport,
     markdown::{MarkdownOptions, MarkdownStyle, render_markdown},
     theme::Theme,
+    tool_view::{ToolView, tool_lines},
 };
 
 #[derive(Clone)]
@@ -54,6 +56,8 @@ struct ToolActivity {
     arguments: serde_json::Value,
     output: Option<String>,
     error: bool,
+    details: Option<serde_json::Value>,
+    duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -1028,6 +1032,7 @@ struct App {
     hide_thinking: bool,
     tools_expanded: bool,
     theme: Theme,
+    home: Option<String>,
 }
 
 impl Deref for App {
@@ -1084,6 +1089,8 @@ impl App {
                         arguments: tool.arguments,
                         output: tool.output,
                         error: tool.is_error,
+                        details: None,
+                        duration_ms: None,
                     })
                     .collect(),
                 error: false,
@@ -1131,6 +1138,7 @@ impl App {
             hide_thinking: false,
             tools_expanded: false,
             theme: Theme::dark(),
+            home: std::env::var("HOME").ok(),
         }
     }
 
@@ -1288,6 +1296,8 @@ impl App {
                             arguments,
                             output: None,
                             error: false,
+                            details: None,
+                            duration_ms: None,
                         });
                     }
                     AgentEvent::QueuedPromptStarted { .. } => unreachable!("handled above"),
@@ -1295,6 +1305,8 @@ impl App {
                         call_id,
                         output,
                         is_error,
+                        details,
+                        duration_ms,
                     } => {
                         self.retry_status = None;
                         if let Some(tool) = message
@@ -1304,6 +1316,8 @@ impl App {
                         {
                             tool.output = Some(output);
                             tool.error = is_error;
+                            tool.details = details;
+                            tool.duration_ms = duration_ms;
                         }
                     }
                 }
@@ -2099,66 +2113,20 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             ]));
         }
         for tool in &message.tools {
-            let status = if tool.error {
-                "failed"
-            } else if tool.output.is_some() {
-                "done"
-            } else {
-                "running"
-            };
-            let color = if tool.error {
-                Color::Red
-            } else if tool.output.is_some() {
-                Color::Green
-            } else {
-                Color::Yellow
-            };
-            let compact_skill = !app.tools_expanded && skill_name(tool).is_some();
-            let label = tool_label(tool, app.tools_expanded);
-            let description = if compact_skill {
-                format!(" · {status} (ctrl+o to expand)")
-            } else {
-                format!(" {} · {status}", tool_description(tool))
-            };
-            lines.push(Line::from(vec![
-                Span::styled("  ⚙ ", Style::default().fg(color)),
-                Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(description, Style::default().fg(Color::Gray)),
-            ]));
-            if let Some(output) = &tool.output
-                && tool_output_visible(tool, app.tools_expanded)
-            {
-                let visible_lines = if app.tools_expanded { usize::MAX } else { 4 };
-                for line in output.lines().take(visible_lines) {
-                    let shown = if line.chars().count() > 180 {
-                        format!("{}…", line.chars().take(180).collect::<String>())
-                    } else {
-                        line.to_owned()
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(
-                            shown,
-                            Style::default().fg(if tool.error {
-                                Color::Red
-                            } else {
-                                Color::DarkGray
-                            }),
-                        ),
-                    ]));
-                }
-                if !app.tools_expanded && output.lines().count() > 4 {
-                    lines.push(Line::from(Span::styled(
-                        "    … output truncated",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-            }
+            lines.extend(tool_lines(
+                &ToolView {
+                    name: &tool.name,
+                    arguments: &tool.arguments,
+                    output: tool.output.as_deref(),
+                    details: tool.details.as_ref(),
+                    is_error: tool.error,
+                    duration_ms: tool.duration_ms,
+                    expanded: app.tools_expanded,
+                    home: app.home.as_deref(),
+                },
+                usize::from(area.width),
+                &app.theme,
+            ));
         }
     }
     for (prompt, behavior) in &app.queued_prompts {
@@ -2221,55 +2189,6 @@ fn user_message_lines(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static
             preserve_list_markers: true,
         },
     )
-}
-
-fn skill_name(tool: &ToolActivity) -> Option<&str> {
-    if tool.name != "read" {
-        return None;
-    }
-    let path = tool
-        .arguments
-        .get("path")
-        .or_else(|| tool.arguments.get("file_path"))?
-        .as_str()?;
-    let path = std::path::Path::new(path);
-    if path.file_name()?.to_str()? != "SKILL.md" {
-        return None;
-    }
-    path.parent()?.file_name()?.to_str()
-}
-
-fn tool_label(tool: &ToolActivity, expanded: bool) -> String {
-    if !expanded {
-        if let Some(name) = skill_name(tool) {
-            return format!("[skill] {name}");
-        }
-    }
-    tool.name.clone()
-}
-
-fn tool_output_visible(tool: &ToolActivity, expanded: bool) -> bool {
-    expanded || tool.error || skill_name(tool).is_none()
-}
-
-fn tool_description(tool: &ToolActivity) -> String {
-    tool.arguments
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            tool.arguments
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-        })
-        .map(|value| {
-            let trimmed: String = value.chars().take(72).collect();
-            if value.chars().count() > 72 {
-                format!("{trimmed}…")
-            } else {
-                trimmed
-            }
-        })
-        .unwrap_or_default()
 }
 
 fn render_command_menu(frame: &mut Frame, area: Rect, app: &App) {
@@ -2460,7 +2379,7 @@ mod tests {
     use super::{
         AgentEvent, App, Composer, ComposerAction, Message, Role, ToolActivity, UiEvent,
         execute_command, filtered_commands, handle_key, handle_mouse, handle_startup_key,
-        insert_char, render, skill_name, tool_label, tool_output_visible,
+        insert_char, render,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
     use mu_core::{MuAgent, PromptBehavior};
@@ -2755,92 +2674,68 @@ mod tests {
         assert!(screen.contains("session mu-session.jsonl"));
     }
 
-    #[test]
-    fn skill_reads_use_compact_labels_and_hide_success_contents_until_expanded() {
-        let skill_read = ToolActivity {
-            call_id: "skill-read".into(),
-            name: "read".into(),
-            arguments: serde_json::json!({"path":"/home/user/.pi/skills/rust/SKILL.md"}),
-            output: Some("private skill instructions".into()),
+    fn tool_activity(name: &str, arguments: serde_json::Value, output: &str) -> ToolActivity {
+        ToolActivity {
+            call_id: format!("{name}-call"),
+            name: name.into(),
+            arguments,
+            output: Some(output.into()),
             error: false,
-        };
-        assert_eq!(skill_name(&skill_read), Some("rust"));
-        assert_eq!(tool_label(&skill_read, false), "[skill] rust");
-        assert_eq!(tool_label(&skill_read, true), "read");
-        assert!(!tool_output_visible(&skill_read, false));
-        assert!(tool_output_visible(&skill_read, true));
+            details: None,
+            duration_ms: None,
+        }
+    }
 
-        let ordinary_read = ToolActivity {
-            arguments: serde_json::json!({"path":"/project/README.md"}),
-            ..skill_read.clone()
-        };
-        assert_eq!(skill_name(&ordinary_read), None);
-        assert!(tool_output_visible(&ordinary_read, false));
-
-        let failed_skill_read = ToolActivity {
-            error: true,
-            ..skill_read
-        };
-        assert!(tool_output_visible(&failed_skill_read, false));
+    fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
     }
 
     #[test]
     fn renders_compact_tool_output_and_expands_with_ctrl_o() {
         let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
+        let long_output = (1..=9)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         app.messages.push(Message {
             role: Role::Assistant,
             text: String::new(),
             thinking: String::new(),
             tools: vec![
-                ToolActivity {
-                    call_id: "skill-read".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path":"/project/.pi/skills/rust/SKILL.md"}),
-                    output: Some("specialized instructions".into()),
-                    error: false,
-                },
-                ToolActivity {
-                    call_id: "regular-read".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path":"/project/README.md"}),
-                    output: Some("line one\nline two\nline three\nline four\nline five".into()),
-                    error: false,
-                },
+                tool_activity(
+                    "read",
+                    serde_json::json!({"path":"/project/.pi/skills/rust/SKILL.md"}),
+                    "specialized instructions",
+                ),
+                tool_activity("bash", serde_json::json!({"command":"seq 9"}), &long_output),
             ],
             error: false,
         });
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
 
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let compact = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
+        let compact = screen_text(&terminal);
         assert!(compact.contains("[skill] rust"));
         assert!(compact.contains("ctrl+o to expand"));
-        assert!(compact.contains("line one"));
-        assert!(compact.contains("line four"));
-        assert!(!compact.contains("line five"));
-        assert!(compact.contains("output truncated"));
+        assert!(compact.contains("$ seq 9"));
+        assert!(compact.contains("4 earlier lines"));
+        assert!(compact.contains("line 9"));
+        assert!(!compact.contains("line 1 "));
         assert!(!compact.contains("specialized instructions"));
 
         app.tools_expanded = true;
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let expanded = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(expanded.contains("read"));
+        let expanded = screen_text(&terminal);
         assert!(expanded.contains("SKILL.md"));
         assert!(expanded.contains("specialized instructions"));
-        assert!(expanded.contains("line five"));
-        assert!(!expanded.contains("output truncated"));
+        assert!(expanded.contains("line 1"));
+        assert!(!expanded.contains("earlier lines"));
     }
 
     #[test]
@@ -2866,6 +2761,8 @@ mod tests {
             call_id: "call-1".into(),
             output: "fn main() {}".into(),
             is_error: false,
+            details: None,
+            duration_ms: None,
         }));
         app.apply(UiEvent::Agent(AgentEvent::TextDelta("Done.".into())));
 
@@ -2897,7 +2794,8 @@ mod tests {
         assert!(screen.contains("thinking"));
         assert!(screen.contains("read"));
         assert!(screen.contains("src/main.rs"));
-        assert!(screen.contains("fn main()"));
+        // Pi collapses read results to the call line until expanded.
+        assert!(!screen.contains("fn main()"));
         assert!(screen.contains("Done."));
     }
 

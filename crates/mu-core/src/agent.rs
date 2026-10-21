@@ -329,6 +329,9 @@ pub enum AgentEvent {
         call_id: String,
         output: String,
         is_error: bool,
+        /// Structured tool details (truncation info, diffs) for renderers.
+        details: Option<Value>,
+        duration_ms: Option<u64>,
     },
     QueuedPromptStarted {
         prompt: String,
@@ -3732,11 +3735,24 @@ mod tests {
             name: "write".into(),
             arguments: serde_json::json!({"path":"result.txt","content":"saved"}),
         }));
-        assert!(events.contains(&super::AgentEvent::ToolFinished {
-            call_id: "call-write".into(),
-            output: "Successfully wrote to result.txt".into(),
-            is_error: false,
-        }));
+        assert!(
+            events.contains(&super::AgentEvent::ToolFinished {
+                call_id: "call-write".into(),
+                output: "Successfully wrote to result.txt".into(),
+                is_error: false,
+                details: events
+                    .iter()
+                    .find_map(|event| match event {
+                        super::AgentEvent::ToolFinished { details, .. } => Some(details.clone()),
+                        _ => None,
+                    })
+                    .flatten(),
+                duration_ms: events.iter().find_map(|event| match event {
+                    super::AgentEvent::ToolFinished { duration_ms, .. } => *duration_ms,
+                    _ => None,
+                }),
+            })
+        );
         assert!(events.contains(&super::AgentEvent::ThinkingDelta("v".into())));
         assert!(events.contains(&super::AgentEvent::TextDelta("s".into())));
         assert_eq!(
@@ -3834,6 +3850,8 @@ mod tests {
             call_id: "truncated-call".into(),
             output: "Tool call \"write\" was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.".into(),
             is_error: true,
+            details: None,
+            duration_ms: None,
         }));
         std::fs::remove_dir_all(root).unwrap();
     }

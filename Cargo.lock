@@ -1742,6 +1742,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "serde_json",
+ "similar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

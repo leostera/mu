@@ -969,11 +969,14 @@ impl MuAgent {
                 tool_call_id,
                 result,
                 is_error,
+                duration_ms,
                 ..
             } => on_event(AgentEvent::ToolFinished {
                 call_id: tool_call_id,
                 output: content_text(&result.content),
                 is_error,
+                details: details_option(&result.details),
+                duration_ms,
             }),
             agent_loop::AgentEvent::MessageEnd {
                 message: AgentMessage::User(user),
