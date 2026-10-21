@@ -2065,6 +2065,14 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             }),
         },
         "model" if !argument.is_empty() => {
+            // `<model>:<level>` also sets the thinking level, when the suffix is a valid level.
+            let (argument, level) = match argument.rsplit_once(':') {
+                Some((base, level)) if !base.is_empty() => match level.parse::<mu_core::ThinkingSetting>() {
+                    Ok(level) => (base, Some(level)),
+                    Err(_) => (argument, None),
+                },
+                _ => (argument, None),
+            };
             let status = match resolve_model_argument(&app.models, argument) {
                 None => format!("No unique model matches \"{argument}\""),
                 Some(model) => match agent.try_lock() {
@@ -2074,7 +2082,13 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                             app.model_selection =
                                 app.models.iter().position(|m| *m == model).unwrap_or(0);
                             app.model = model.clone();
-                            format!("Switched to {model}")
+                            match level {
+                                Some(level) => {
+                                    agent.set_thinking(level);
+                                    format!("Switched to {model} (thinking: {})", level.name())
+                                }
+                                None => format!("Switched to {model}"),
+                            }
                         }
                         _ => format!("Could not switch to {model}"),
                     },
