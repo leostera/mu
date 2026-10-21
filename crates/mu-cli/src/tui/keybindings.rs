@@ -9,6 +9,7 @@ use serde_json::Value;
 /// A parsed key id: `ctrl+shift+p`, `shift+tab`, `escape`, `alt+up`, `f5`, …
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyId {
+    label: String,
     code: KeyCode,
     modifiers: KeyModifiers,
 }
@@ -53,7 +54,11 @@ impl KeyId {
                 }
             },
         };
-        Some(Self { code, modifiers })
+        Some(Self {
+            label: display_label(&lower),
+            code,
+            modifiers,
+        })
     }
 
     /// Whether `event` is this key. Shift is implied by an uppercase letter, and Shift+Tab
@@ -73,6 +78,25 @@ impl KeyId {
         };
         code == self.code && modifiers == self.modifiers
     }
+}
+
+/// `ctrl+shift+p` → `Ctrl+Shift+P`, `escape` → `Esc` (how `/hotkeys` shows a key).
+fn display_label(lower: &str) -> String {
+    lower
+        .split('+')
+        .map(|part| match part {
+            "escape" | "esc" => "Esc".to_owned(),
+            "pageup" => "PageUp".to_owned(),
+            "pagedown" => "PageDown".to_owned(),
+            part => {
+                let mut chars = part.chars();
+                chars
+                    .next()
+                    .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 /// The app actions Mu implements, with Pi's default keys.
@@ -160,6 +184,18 @@ impl Keybindings {
         Self::from_config(&config)
     }
 
+    /// Keys bound to `action`, as `/hotkeys` shows them: `Ctrl+P` or `Ctrl+P` / `F2`; `None` when
+    /// the action is unbound.
+    pub fn display(&self, action: &str) -> Option<String> {
+        let keys = self.bindings.get(action).filter(|keys| !keys.is_empty())?;
+        Some(
+            keys.iter()
+                .map(|k| k.label.as_str())
+                .collect::<Vec<_>>()
+                .join("` / `"),
+        )
+    }
+
     pub fn matches(&self, action: &str, event: &KeyEvent) -> bool {
         self.bindings
             .get(action)
@@ -206,6 +242,34 @@ mod tests {
         assert_eq!(KeyId::parse("hyper+x"), None);
         assert_eq!(KeyId::parse("ctrl+"), None);
         assert_eq!(KeyId::parse("ctrl+ab"), None);
+    }
+
+    #[test]
+    fn display_labels_show_user_bindings() {
+        let bindings = Keybindings::from_config(
+            &json!({"app.model.select": ["ctrl+k", "f2"], "app.tools.expand": []}),
+        );
+        assert_eq!(
+            bindings.display("app.model.select").unwrap(),
+            "Ctrl+K` / `F2"
+        );
+        assert_eq!(
+            Keybindings::default()
+                .display("app.thinking.cycle")
+                .unwrap(),
+            "Shift+Tab"
+        );
+        assert_eq!(
+            Keybindings::default()
+                .display("app.model.cycleBackward")
+                .unwrap(),
+            "Shift+Ctrl+P"
+        );
+        assert_eq!(
+            bindings.display("app.tools.expand"),
+            None,
+            "an empty list unbinds the action"
+        );
     }
 
     #[test]

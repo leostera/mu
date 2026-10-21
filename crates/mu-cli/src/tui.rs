@@ -2167,30 +2167,47 @@ fn last_assistant_text(messages: &[Message]) -> Option<String> {
         .map(|message| message.text.trim().to_owned())
 }
 
-/// Shortcuts Mu implements today (Pi's table lists more; unimplemented keys are omitted).
-const HOTKEYS: &str = "**Keyboard Shortcuts**
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Send message (steer while generating) |
-| `Shift+Enter` / `Ctrl+J` | New line |
-| `Alt+Enter` | Queue follow-up while generating |
-| `Alt+Up` | Restore queued messages to the editor |
-| `Up` / `Down` | Move cursor / browse history |
-| `PageUp` / `PageDown` | Scroll by page |
-| `Ctrl+Home` / `Ctrl+End` | Scroll to start / end |
-| `Ctrl+P` / `Shift+Ctrl+P` | Cycle models forward / backward |
-| `Ctrl+L` | Open model selector |
-| `Shift+Tab` | Cycle thinking level |
-| `Ctrl+T` | Toggle thinking block visibility |
-| `Ctrl+O` | Toggle tool output expansion |
-| `Ctrl+X` | Copy last agent message |
-| `Esc` | Interrupt / clear editor |
-| `Ctrl+C` | Clear editor (first) / exit (second) |
-| `Ctrl+D` | Exit (when editor is empty) |
-| `/` | Slash commands |
-| `Tab` | Complete file path |
-| `!command` / `!!command` | Run a shell command locally |";
+/// `/hotkeys` text: fixed editor keys plus the configurable app actions with their current keys
+/// (Pi's table lists more; keys Mu doesn't implement are omitted).
+fn hotkeys_text(bindings: &keybindings::Keybindings) -> String {
+    let app_rows = [
+        ("app.model.cycleForward", "Cycle models forward"),
+        ("app.model.cycleBackward", "Cycle models backward"),
+        ("app.model.select", "Open model selector"),
+        ("app.thinking.cycle", "Cycle thinking level"),
+        ("app.thinking.toggle", "Toggle thinking block visibility"),
+        ("app.tools.expand", "Toggle tool output expansion"),
+        ("app.message.copy", "Copy last agent message"),
+        (
+            "app.message.dequeue",
+            "Restore queued messages to the editor",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(action, what)| {
+        bindings
+            .display(action)
+            .map(|keys| format!("| `{keys}` | {what} |"))
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    format!(
+        "**Keyboard Shortcuts**\n\n| Key | Action |\n|-----|--------|\n\
+| `Enter` | Send message (steer while generating) |\n\
+| `Shift+Enter` / `Ctrl+J` | New line |\n\
+| `Alt+Enter` | Queue follow-up while generating |\n\
+| `Up` / `Down` | Move cursor / browse history |\n\
+| `PageUp` / `PageDown` | Scroll by page |\n\
+| `Ctrl+Home` / `Ctrl+End` | Scroll to start / end |\n\
+{app_rows}\n\
+| `Esc` | Interrupt / clear editor |\n\
+| `Ctrl+C` | Clear editor (first) / exit (second) |\n\
+| `Ctrl+D` | Exit (when editor is empty) |\n\
+| `/` | Slash commands |\n\
+| `Tab` | Complete file path |\n\
+| `!command` / `!!command` | Run a shell command locally |"
+    )
+}
 
 /// `/model <id>` or `/model <provider>/<id>`; a unique id substring also matches.
 fn resolve_model_argument(models: &[String], argument: &str) -> Option<String> {
@@ -2397,7 +2414,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         "hotkeys" => app.messages.push(Message {
             role: Role::Assistant,
-            text: HOTKEYS.into(),
+            text: hotkeys_text(&app.keybindings),
             thinking: String::new(),
             tools: Vec::new(),
             error: false,
