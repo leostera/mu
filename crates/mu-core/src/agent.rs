@@ -306,6 +306,7 @@ enum ProviderTransport {
         http: Client,
         endpoint: Url,
         token: String,
+        gateway_headers: bool,
     },
     Demo,
     #[cfg(test)]
@@ -1215,10 +1216,7 @@ async fn connect(
     prompt: &PromptOptions,
 ) -> Result<Provider, AgentError> {
     if !config.provider.starts_with("opencode-cf") {
-        return Err(AgentError::Configuration(format!(
-            "Pi provider `{}` is unsupported (expected opencode-cf)",
-            config.provider
-        )));
+        return connect_custom_provider(config, skill_prompt, prompt);
     }
     let token = token(&config.provider).await?;
     let http = Client::builder()
@@ -1307,6 +1305,7 @@ async fn connect(
             http,
             endpoint,
             token,
+            gateway_headers: true,
         },
         model: config.model.clone(),
         instructions: match &prompt.system_prompt {
@@ -1375,6 +1374,7 @@ impl Provider {
             http,
             endpoint,
             token,
+            gateway_headers,
         } = &self.transport
         else {
             unreachable!("demo backend returned above")
@@ -1393,11 +1393,14 @@ impl Provider {
             request_body["reasoning"] = json!({"effort":effort,"summary":"auto"});
             request_body["include"] = json!(["reasoning.encrypted_content"]);
         }
-        let response = http
-            .post(endpoint.clone())
-            .bearer_auth(token)
-            .header("cf-access-token", token)
-            .header("x-requested-with", "xmlhttprequest")
+        let mut request = http.post(endpoint.clone()).bearer_auth(token);
+        if *gateway_headers {
+            // Cloudflare Access headers must never be sent to third-party providers.
+            request = request
+                .header("cf-access-token", token)
+                .header("x-requested-with", "xmlhttprequest");
+        }
+        let response = request
             .header(header::ACCEPT, "text/event-stream")
             .json(&request_body)
             .send()
@@ -1649,6 +1652,83 @@ fn response_reasoning(item: &Value) -> String {
     } else {
         summary
     }
+}
+
+/// A provider declared in `models.json` with `api: "openai-responses"`, `baseUrl` and `apiKey`
+/// (an environment variable name, else the literal key).
+fn connect_custom_provider(
+    config: &Config,
+    skill_prompt: String,
+    prompt: &PromptOptions,
+) -> Result<Provider, AgentError> {
+    let unsupported = || {
+        AgentError::Configuration(format!(
+            "Provider `{}` is not configured: add it to models.json with api \"openai-responses\", baseUrl and apiKey",
+            config.provider
+        ))
+    };
+    let models: Value = std::fs::read_to_string(config.agent_dir.join("models.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .ok_or_else(unsupported)?;
+    let entry = models["providers"]
+        .get(&config.provider)
+        .ok_or_else(unsupported)?;
+    match entry.get("api").and_then(Value::as_str) {
+        Some("openai-responses") => {}
+        other => {
+            return Err(AgentError::Configuration(format!(
+                "Provider `{}` uses unsupported api `{}` (supported: openai-responses)",
+                config.provider,
+                other.unwrap_or("none")
+            )));
+        }
+    }
+    let base = entry
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .ok_or_else(unsupported)?;
+    let mut endpoint = Url::parse(base)
+        .map_err(|error| AgentError::Configuration(format!("invalid baseUrl: {error}")))?;
+    endpoint.set_path(&format!(
+        "{}/responses",
+        endpoint.path().trim_end_matches('/')
+    ));
+    let key = entry
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .ok_or_else(unsupported)?;
+    let token = std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| key.to_owned());
+    let model = configured_model_entry(&config.agent_dir, &config.provider, &config.model);
+    let flag = |name: &str| {
+        model
+            .as_ref()
+            .and_then(|m| m.get(name))
+            .and_then(Value::as_bool)
+    };
+    Ok(Provider {
+        transport: ProviderTransport::OpenCode {
+            http: Client::new(),
+            endpoint,
+            token,
+            gateway_headers: false,
+        },
+        model: config.model.clone(),
+        instructions: match &prompt.system_prompt {
+            Some(custom) => format!("{custom}{skill_prompt}"),
+            None => format!(
+                "You are Mu, a helpful coding assistant. Be clear, practical, and concise.{skill_prompt}"
+            ),
+        },
+        describes_tools: prompt.system_prompt.is_none(),
+        appendix: prompt.appendix(),
+        supports_reasoning: flag("reasoning").unwrap_or(false),
+        reasoning_effort: prompt.thinking.effort(),
+        supports_strict_sampling: model.as_ref().is_some_and(model_supports_strict_sampling),
+    })
 }
 
 fn api_name(transport: &ProviderTransport) -> &'static str {
@@ -4894,6 +4974,52 @@ mod tests {
         let html = std::fs::read_to_string(out).unwrap();
         assert!(html.contains("hello &lt;b&gt;there&lt;/b&gt;"));
         assert!(super::export_session_file(&dir.join("missing.jsonl"), None).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn custom_providers_come_from_models_json_without_gateway_headers() {
+        let dir = std::env::temp_dir().join(format!("mu-custom-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"acme":{"api":"openai-responses","baseUrl":"https://api.acme.test/v1","apiKey":"literal-key","models":[{"id":"m1","reasoning":true}]},"bad":{"api":"anthropic-messages","baseUrl":"x","apiKey":"k"}}}"#,
+        )
+        .unwrap();
+        let config = |provider: &str| super::Config {
+            agent_dir: dir.clone(),
+            cwd: dir.clone(),
+            provider: provider.into(),
+            model: "m1".into(),
+            model_choices: vec![],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+            enabled_tools: vec![],
+        };
+        let prompt = super::PromptOptions::default();
+        let provider =
+            super::connect_custom_provider(&config("acme"), String::new(), &prompt).unwrap();
+        let super::ProviderTransport::OpenCode {
+            endpoint,
+            token,
+            gateway_headers,
+            ..
+        } = provider.transport
+        else {
+            panic!("expected an HTTP transport");
+        };
+        assert_eq!(endpoint.as_str(), "https://api.acme.test/v1/responses");
+        assert_eq!(token, "literal-key");
+        assert!(!gateway_headers && provider.supports_reasoning);
+        let error = super::connect_custom_provider(&config("bad"), String::new(), &prompt)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported api `anthropic-messages`")
+        );
+        assert!(super::connect_custom_provider(&config("nope"), String::new(), &prompt).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
