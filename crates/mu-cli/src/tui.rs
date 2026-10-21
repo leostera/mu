@@ -1500,6 +1500,35 @@ impl App {
         }
     }
 
+    /// Pi's `restoreQueuedMessagesToEditor`: move queued steering then follow-up prompts into the
+    /// editor (before its current text) and clear the queues. Returns how many were restored.
+    fn restore_queued_to_editor(&mut self) -> usize {
+        let queued = std::mem::take(&mut self.queued_prompts);
+        self.prompt_queue.clear();
+        let texts = queued
+            .iter()
+            .filter(|(_, behavior)| *behavior == PromptBehavior::Steer)
+            .chain(
+                queued
+                    .iter()
+                    .filter(|(_, behavior)| *behavior == PromptBehavior::FollowUp),
+            )
+            .map(|(text, _)| text.clone())
+            .collect::<Vec<_>>();
+        if texts.is_empty() {
+            return 0;
+        }
+        let current = self.input_text();
+        let combined = [texts.join("\n\n"), current]
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.composer.clear();
+        self.composer.insert_text(&combined);
+        texts.len()
+    }
+
     fn cancel(&mut self) {
         self.prompt_queue.clear();
         self.queued_prompts.clear();
@@ -1683,8 +1712,16 @@ fn handle_key(
         }
         return;
     }
+    if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::ALT) {
+        // Alt+Up (Pi's `app.message.dequeue`): pull queued messages back into the editor.
+        if app.restore_queued_to_editor() > 0 {
+            app.show_status("Restored queued messages to the editor".to_owned());
+        }
+        return;
+    }
     if app.loading {
         if key.code == KeyCode::Esc {
+            app.restore_queued_to_editor();
             app.cancel();
             return;
         }
@@ -2032,6 +2069,7 @@ const HOTKEYS: &str = "**Keyboard Shortcuts**
 | `Enter` | Send message (steer while generating) |
 | `Shift+Enter` / `Ctrl+J` | New line |
 | `Alt+Enter` | Queue follow-up while generating |
+| `Alt+Up` | Restore queued messages to the editor |
 | `Up` / `Down` | Move cursor / browse history |
 | `PageUp` / `PageDown` | Scroll by page |
 | `Ctrl+Home` / `Ctrl+End` | Scroll to start / end |
@@ -3399,6 +3437,25 @@ mod tests {
         assert!(
             app.last_escape.is_none(),
             "double Esc fired and reset the timer"
+        );
+    }
+
+    #[test]
+    fn restoring_queued_messages_puts_steering_then_follow_ups_before_editor_text() {
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.queued_prompts = std::collections::VecDeque::from([
+            ("later".to_owned(), PromptBehavior::FollowUp),
+            ("now".to_owned(), PromptBehavior::Steer),
+        ]);
+        app.composer.insert_text("draft");
+        assert_eq!(app.restore_queued_to_editor(), 2);
+        assert_eq!(app.input_text(), "now\n\nlater\n\ndraft");
+        assert!(app.queued_prompts.is_empty());
+        assert_eq!(app.restore_queued_to_editor(), 0);
+        assert_eq!(
+            app.input_text(),
+            "now\n\nlater\n\ndraft",
+            "nothing queued leaves the editor alone"
         );
     }
 
