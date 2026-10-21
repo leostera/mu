@@ -2131,6 +2131,7 @@ fn connect_custom_provider(
         .or_else(|| crate::config_value::resolve(key, &HashMap::new()))
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| key.to_owned());
+    let http = provider_http_client(entry.get("headers"))?;
     let model = configured_model_entry(&config.agent_dir, &config.provider, &config.model);
     let flag = |name: &str| {
         model
@@ -2141,25 +2142,25 @@ fn connect_custom_provider(
     Ok(Provider {
         transport: if anthropic {
             ProviderTransport::Anthropic {
-                http: Client::new(),
+                http: http.clone(),
                 endpoint,
                 key: token,
             }
         } else if google {
             ProviderTransport::Google {
-                http: Client::new(),
+                http: http.clone(),
                 endpoint,
                 key: token,
             }
         } else if completions {
             ProviderTransport::Completions {
-                http: Client::new(),
+                http: http.clone(),
                 endpoint,
                 key: token,
             }
         } else {
             ProviderTransport::OpenCode {
-                http: Client::new(),
+                http: http.clone(),
                 endpoint,
                 token,
                 gateway_headers: false,
@@ -2178,6 +2179,30 @@ fn connect_custom_provider(
         reasoning_effort: prompt.thinking.effort(),
         supports_strict_sampling: model.as_ref().is_some_and(model_supports_strict_sampling),
     })
+}
+
+/// An HTTP client sending the provider's `headers` from `models.json` on every request; values
+/// resolve like other config values (`$VAR`, `!command`) and unresolved ones are skipped.
+fn provider_http_client(headers: Option<&Value>) -> Result<Client, AgentError> {
+    let mut defaults = header::HeaderMap::new();
+    for (name, value) in headers.and_then(Value::as_object).into_iter().flatten() {
+        let Some(resolved) = value
+            .as_str()
+            .and_then(|v| crate::config_value::resolve(v, &HashMap::new()))
+        else {
+            continue;
+        };
+        let invalid =
+            |what: &str| AgentError::Configuration(format!("invalid header {what} `{name}`"));
+        defaults.insert(
+            header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| invalid("name"))?,
+            header::HeaderValue::from_str(&resolved).map_err(|_| invalid("value"))?,
+        );
+    }
+    Client::builder()
+        .default_headers(defaults)
+        .build()
+        .map_err(|error| AgentError::Configuration(format!("cannot build HTTP client: {error}")))
 }
 
 fn api_name(transport: &ProviderTransport) -> &'static str {
@@ -5771,6 +5796,35 @@ mod tests {
         assert!(html.contains("hello &lt;b&gt;there&lt;/b&gt;"));
         assert!(super::export_session_file(&dir.join("missing.jsonl"), None).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_headers_are_resolved_and_sent_on_every_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 4096];
+            let read = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&buffer[..read]).to_lowercase()
+        });
+        let headers = serde_json::json!({"X-Static":"one","X-Command":"!echo two","X-Unset":"$MU_SURELY_UNSET_VAR"});
+        let client = super::provider_http_client(Some(&headers)).unwrap();
+        client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert!(request.contains("x-static: one"), "{request}");
+        assert!(request.contains("x-command: two"), "{request}");
+        assert!(!request.contains("x-unset"), "{request}");
+        assert!(super::provider_http_client(Some(&serde_json::json!({"bad name":"x"}))).is_err());
     }
 
     #[test]
