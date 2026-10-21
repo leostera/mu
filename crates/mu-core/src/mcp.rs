@@ -307,16 +307,16 @@ impl McpRegistry {
             .call_tool(&tool.remote_name, arguments)
             .await;
         // Pi: an error result without text still says which tool failed.
-        if let Ok(outcome) = &mut result
-            && outcome.is_error
-            && outcome.content.trim().is_empty()
-        {
-            outcome.content = format!(
-                "MCP tool {}/{} returned an error",
-                tool.server_name, tool.remote_name
-            );
+        if let Ok(outcome) = &mut result {
+            name_empty_error(outcome, &tool.server_name, &tool.remote_name);
         }
         Some(result)
+    }
+}
+
+fn name_empty_error(outcome: &mut McpToolResult, server: &str, tool: &str) {
+    if outcome.is_error && outcome.content.trim().is_empty() {
+        outcome.content = format!("MCP tool {server}/{tool} returned an error");
     }
 }
 
@@ -1533,6 +1533,24 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn empty_error_results_name_the_failing_tool() {
+        let result = |content: &str, is_error| McpToolResult {
+            content: content.into(),
+            structured_content: None,
+            is_error,
+        };
+        let mut empty = result("  ", true);
+        name_empty_error(&mut empty, "s", "t");
+        assert_eq!(empty.content, "MCP tool s/t returned an error");
+        let mut kept = result("boom", true);
+        name_empty_error(&mut kept, "s", "t");
+        assert_eq!(kept.content, "boom");
+        let mut ok = result("", false);
+        name_empty_error(&mut ok, "s", "t");
+        assert_eq!(ok.content, "");
+    }
 
     #[test]
     fn resource_helpers_hide_app_uis_and_tag_servers() {
