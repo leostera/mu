@@ -598,14 +598,43 @@ fn parse_edits(args: &Value) -> Result<Vec<TextEdit>, ToolError> {
         .collect()
 }
 
+/// Injectable file access for the edit tool (Pi's `EditOperations`).
+pub trait FileOperations: Send + Sync {
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+    fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()>;
+}
+
+/// The real filesystem.
+pub struct LocalFiles;
+
+impl FileOperations for LocalFiles {
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+
+    fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        std::fs::write(path, contents)
+    }
+}
+
 async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
+    edit_file_with(&LocalFiles, cwd, args).await
+}
+
+/// The edit tool over any [`FileOperations`].
+pub async fn edit_file_with(
+    files: &dyn FileOperations,
+    cwd: &Path,
+    args: &Value,
+) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let display_path = Path::new(requested_path);
     let path = resolve(cwd, args)?;
     let edits = parse_edits(args)?;
     let lock = mutation_lock(&path);
     let _guard = lock.lock().await;
-    let original = std::fs::read(&path)
+    let original = files
+        .read(&path)
         .map_err(|error| ToolError::Command(edit_read_io_message(display_path, &path, error)))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
     let (bom, content) = original
@@ -632,7 +661,8 @@ async fn edit_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     } else {
         updated
     };
-    std::fs::write(&path, format!("{bom}{restored}"))
+    files
+        .write(&path, format!("{bom}{restored}").as_bytes())
         .map_err(|error| write_file_io_error(&path, "open", error))?;
     let mut result = ToolResult::text(format!(
         "Successfully replaced {} block(s) in {}.",
@@ -667,7 +697,7 @@ fn edit_file_io_message(path: &Path, error: std::io::Error) -> String {
         std::io::ErrorKind::NotFound => "ENOENT",
         std::io::ErrorKind::PermissionDenied => "EACCES",
         _ => {
-            return format!("Could not edit file: {}. {error}.", path.display());
+            return format!("Could not edit file: {}. Error: {error}.", path.display());
         }
     };
     format!(
@@ -3701,6 +3731,47 @@ mod tests {
         }
         let echoed = run_bash_with(&Echo, &cwd, &args, &prefixed).await.unwrap();
         assert_eq!(echoed.content, "set -e\nremote");
+    }
+
+    struct MemoryFiles(std::sync::Mutex<Vec<u8>>, bool);
+
+    impl FileOperations for MemoryFiles {
+        fn read(&self, _path: &Path) -> std::io::Result<Vec<u8>> {
+            if self.1 {
+                return Err(std::io::Error::other("disk offline"));
+            }
+            Ok(self.0.lock().unwrap().clone())
+        }
+
+        fn write(&self, _path: &Path, contents: &[u8]) -> std::io::Result<()> {
+            *self.0.lock().unwrap() = contents.to_vec();
+            Ok(())
+        }
+    }
+
+    /// Ported from Pi's `tools.test.ts` ("unknown edit access errors") and its in-memory edit
+    /// operations.
+    #[tokio::test]
+    async fn edit_tool_runs_over_injected_file_operations() {
+        let args = json!({"path":"broken.txt","edits":[{"oldText":"hello","newText":"world"}]});
+        let cwd = std::env::temp_dir();
+        let memory = MemoryFiles(std::sync::Mutex::new(b"hello\n".to_vec()), false);
+        let result = edit_file_with(&memory, &cwd, &args).await.unwrap();
+        assert!(
+            result
+                .content
+                .starts_with("Successfully replaced 1 block(s) in broken.txt")
+        );
+        assert_eq!(*memory.0.lock().unwrap(), b"world\n");
+        let offline = MemoryFiles(std::sync::Mutex::new(Vec::new()), true);
+        let error = edit_file_with(&offline, &cwd, &args)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "Could not edit file: broken.txt. Error: disk offline."
+        );
     }
 
     #[test]
