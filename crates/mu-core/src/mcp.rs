@@ -888,6 +888,38 @@ fn parse_http_response(
     ))
 }
 
+/// Pi's `formatSize`.
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// A `resource_link` block as Pi shows it to the model.
+fn resource_link_text(block: &Value) -> String {
+    let text = |key: &str| block.get(key).and_then(Value::as_str);
+    let mut details = Vec::new();
+    details.extend(text("mimeType").map(str::to_owned));
+    details.extend(block.get("size").and_then(Value::as_u64).map(format_size));
+    let label = text("title").or_else(|| text("name")).unwrap_or_default();
+    let details = if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join(", "))
+    };
+    let description = text("description")
+        .map(|d| format!(": {d}"))
+        .unwrap_or_default();
+    format!(
+        "[Resource {} \"{label}\"{details}{description}]",
+        text("uri").unwrap_or_default()
+    )
+}
+
 fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
     let blocks = result
         .get("content")
@@ -899,6 +931,14 @@ fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
         .filter_map(|block| {
             if block.get("type").and_then(Value::as_str) == Some("text") {
                 block.get("text").and_then(Value::as_str).map(str::to_owned)
+            } else if block.get("type").and_then(Value::as_str) == Some("resource_link") {
+                Some(resource_link_text(block))
+            } else if let Some(text) = block
+                .pointer("/resource/text")
+                .filter(|_| block.get("type").and_then(Value::as_str) == Some("resource"))
+                .and_then(Value::as_str)
+            {
+                Some(text.to_owned())
             } else {
                 block
                     .get("type")
@@ -1615,6 +1655,21 @@ mod tests {
         let (truncated, total) = truncate_middle(&text, MCP_OUTPUT_MAX_BYTES).unwrap();
         assert_eq!(total, text.len());
         assert!(truncated.contains("chars truncated"));
+    }
+
+    #[test]
+    fn resource_links_and_embedded_text_resources_become_model_text() {
+        let result = parse_tool_result(json!({"content":[
+            {"type":"resource_link","uri":"file:///a.txt","name":"a","title":"The A","mimeType":"text/plain","size":2048,"description":"notes"},
+            {"type":"resource_link","uri":"file:///b","name":"b"},
+            {"type":"resource","resource":{"uri":"file:///c","text":"embedded"}},
+        ]})).unwrap();
+        assert_eq!(
+            result.content,
+            "[Resource file:///a.txt \"The A\" (text/plain, 2.0KB): notes]\n[Resource file:///b \"b\"]\nembedded"
+        );
+        assert_eq!(format_size(10), "10B");
+        assert_eq!(format_size(3 * 1024 * 1024), "3.0MB");
     }
 
     #[test]
