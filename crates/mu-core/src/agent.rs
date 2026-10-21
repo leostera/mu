@@ -782,6 +782,13 @@ fn config() -> Result<Config, AgentError> {
     config_for(false)
 }
 
+/// Pi's `formatNoModelSelectedMessage` (`core/auth-guidance.ts`), with the cause first.
+fn no_model_selected_message(cause: &str) -> String {
+    format!(
+        "{cause}. No model selected.\n\nUse /login to log into a provider via OAuth or API key, or add one to models.json.\n\nThen use /model to select a model."
+    )
+}
+
 /// Read Pi settings; with `demo`, a missing provider or model falls back to the demo backend.
 fn config_for(demo: bool) -> Result<Config, AgentError> {
     let cwd = std::env::current_dir()?;
@@ -824,18 +831,18 @@ fn config_for(demo: bool) -> Result<Config, AgentError> {
         Some(provider) => provider,
         None if demo => "mu-demo".to_owned(),
         None => {
-            return Err(AgentError::Configuration(
-                "Pi settings have no defaultProvider".into(),
-            ));
+            return Err(AgentError::Configuration(no_model_selected_message(
+                "Pi settings have no defaultProvider",
+            )));
         }
     };
     let model = match model {
         Some(model) => model,
         None if demo => "mu-demo".to_owned(),
         None => {
-            return Err(AgentError::Configuration(
-                "Pi settings have no defaultModel".into(),
-            ));
+            return Err(AgentError::Configuration(no_model_selected_message(
+                "Pi settings have no defaultModel",
+            )));
         }
     };
     let mut model_choices = configured_models(&agent_dir, &provider, &model)?;
@@ -5966,6 +5973,13 @@ mod tests {
         assert!(html.contains("hello &lt;b&gt;there&lt;/b&gt;"));
         assert!(super::export_session_file(&dir.join("missing.jsonl"), None).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_model_settings_explain_how_to_log_in_and_pick_a_model() {
+        let message = super::no_model_selected_message("Pi settings have no defaultModel");
+        assert!(message.starts_with("Pi settings have no defaultModel. No model selected."));
+        assert!(message.contains("/login") && message.ends_with("select a model."));
     }
 
     #[test]
