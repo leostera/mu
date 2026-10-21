@@ -2576,6 +2576,12 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 Ok(mut agent) => {
                     let resources = agent.reload_resources();
                     app.keybindings = keybindings::Keybindings::load(agent.agent_dir());
+                    if let Some(theme) = agent
+                        .theme_name()
+                        .and_then(|name| Theme::resolve(&name, agent.agent_dir()).ok())
+                    {
+                        app.theme = theme;
+                    }
                     app.extra_commands = agent
                         .dynamic_slash_commands()
                         .into_iter()
@@ -2583,7 +2589,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                             chrome::SlashCommand::dynamic(name, description, hint)
                         })
                         .collect();
-                    format!("{resources}, keybindings")
+                    format!("{resources}, keybindings, theme")
                 }
                 Err(_) => "Mu is busy.".to_owned(),
             };
