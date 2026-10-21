@@ -2171,8 +2171,11 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         "login" => {
             let status = match (agent.try_lock(), argument.split_once(' ')) {
                 (Err(_), _) => "Mu is busy.".to_owned(),
+                (Ok(_), None) if argument == "anthropic" => {
+                    "Anthropic OAuth runs outside the TUI: quit and run `mu auth login --provider anthropic`, or use /login anthropic <api-key>".to_owned()
+                }
                 (Ok(_), None) => {
-                    "Usage: /login <provider> <api-key> (OAuth login is not supported yet)".to_owned()
+                    "Usage: /login <provider> <api-key> (OAuth: `mu auth login --provider anthropic`)".to_owned()
                 }
                 (Ok(agent), Some((provider, key))) => match agent.login_api_key(provider, key) {
                     // The key is never echoed back into the transcript.
