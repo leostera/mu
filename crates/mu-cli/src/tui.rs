@@ -1621,6 +1621,15 @@ fn handle_key(
         app.hide_thinking = !app.hide_thinking;
         return;
     }
+    if key.code == KeyCode::BackTab && !app.loading {
+        // Shift+Tab cycles the thinking level (Pi's `app.thinking.cycle`).
+        if let Ok(mut agent) = agent.try_lock() {
+            let level = agent.thinking().next();
+            agent.set_thinking(level);
+            app.show_status(format!("Thinking level: {}", level.name()));
+        }
+        return;
+    }
     if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.tools_expanded = !app.tools_expanded;
         return;
@@ -1865,6 +1874,7 @@ const HOTKEYS: &str = "**Keyboard Shortcuts**
 | `PageUp` / `PageDown` | Scroll by page |
 | `Ctrl+Home` / `Ctrl+End` | Scroll to start / end |
 | `Ctrl+P` | Cycle models |
+| `Shift+Tab` | Cycle thinking level |
 | `Ctrl+T` | Toggle thinking block visibility |
 | `Ctrl+O` | Toggle tool output expansion |
 | `Esc` | Interrupt / clear editor |
@@ -2966,6 +2976,24 @@ mod tests {
         assert_eq!(find("alt").as_deref(), Some("mu-demo-alt"));
         assert_eq!(find("mu"), None, "ambiguous");
         assert_eq!(find("zzz"), None);
+    }
+
+    #[tokio::test]
+    async fn shift_tab_cycles_the_thinking_level() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        handle_key(
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            &mut app,
+            agent.clone(),
+            tx,
+        );
+        assert_eq!(
+            agent.lock().await.thinking(),
+            mu_core::ThinkingSetting::High
+        );
+        assert_eq!(app.statuses.last().unwrap().1, "Thinking level: high");
     }
 
     #[test]

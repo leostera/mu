@@ -221,6 +221,31 @@ impl std::str::FromStr for ThinkingSetting {
 }
 
 impl ThinkingSetting {
+    /// The next level in Pi's cycle (`off → minimal → … → max → off`).
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Minimal,
+            Self::Minimal => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Xhigh,
+            Self::Xhigh => Self::Max,
+            Self::Max => Self::Off,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
     /// OpenAI Responses `reasoning.effort`, or `None` when thinking is off.
     fn effort(self) -> Option<&'static str> {
         match self {
@@ -5650,6 +5675,8 @@ mod tests {
 
     #[test]
     fn thinking_levels_parse_like_pi_and_map_to_effort() {
+        assert_eq!(ThinkingSetting::Max.next(), ThinkingSetting::Off);
+        assert_eq!(ThinkingSetting::Medium.next().name(), "high");
         assert_eq!("high".parse::<ThinkingSetting>(), Ok(ThinkingSetting::High));
         assert_eq!(ThinkingSetting::Off.effort(), None);
         assert_eq!(ThinkingSetting::Max.effort(), Some("xhigh"));
