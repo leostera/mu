@@ -1065,6 +1065,8 @@ struct App {
     command_menu_open: bool,
     command_selection: usize,
     model_selector_open: bool,
+    /// Generic selector overlay (thinking level, fork point); Enter runs `command <value>`.
+    picker: Option<Picker>,
     model_selection: usize,
     loading: bool,
     quit: bool,
@@ -1184,6 +1186,7 @@ impl App {
             command_menu_open: false,
             command_selection: 0,
             model_selector_open: false,
+            picker: None,
             model_selection: 0,
             loading: false,
             quit: false,
@@ -1654,6 +1657,10 @@ fn handle_key(
         }
         return;
     }
+    if app.picker.is_some() {
+        handle_picker(key, app, &agent);
+        return;
+    }
     if app.model_selector_open {
         handle_model_selector(key, app, &agent);
         return;
@@ -1753,6 +1760,32 @@ fn handle_command_menu(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>
         {
             insert_char(app, ch);
             app.command_selection = 0;
+        }
+        _ => {}
+    }
+}
+
+/// A list overlay whose chosen row re-runs a slash command with that row's value as its argument.
+struct Picker {
+    command: &'static str,
+    items: Vec<chrome::SelectItem>,
+    values: Vec<String>,
+    selection: usize,
+}
+
+fn handle_picker(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
+    let Some(picker) = app.picker.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => app.picker = None,
+        KeyCode::Up => picker.selection = picker.selection.saturating_sub(1),
+        KeyCode::Down => picker.selection = (picker.selection + 1).min(picker.items.len() - 1),
+        KeyCode::Enter => {
+            let line = format!("/{} {}", picker.command, picker.values[picker.selection]);
+            app.picker = None;
+            app.composer.insert_text(&line);
+            execute_command(app, agent);
         }
         _ => {}
     }
@@ -2074,7 +2107,21 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             let reply = match agent.try_lock() {
                 Err(_) => "Mu is busy.".to_owned(),
                 Ok(agent) if argument.is_empty() => {
-                    format!("Thinking level: {}", format!("{:?}", agent.thinking()).to_lowercase())
+                    let levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+                    let current = agent.thinking().name();
+                    app.picker = Some(Picker {
+                        command: "thinking",
+                        items: levels
+                            .iter()
+                            .map(|level| chrome::SelectItem {
+                                label: level.to_string(),
+                                description: (*level == current).then(|| "current".to_owned()),
+                            })
+                            .collect(),
+                        values: levels.iter().map(|l| l.to_string()).collect(),
+                        selection: levels.iter().position(|l| *l == current).unwrap_or(0),
+                    });
+                    format!("Thinking level: {current}")
                 }
                 Ok(mut agent) => match argument.parse::<mu_core::ThinkingSetting>() {
                     Ok(level) => {
@@ -2233,7 +2280,19 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                             if rows.is_empty() {
                                 "No messages to fork from.".to_owned()
                             } else {
-                                format!("Fork from which message? /fork <number>\n{}", rows.join("\n"))
+                                app.picker = Some(Picker {
+                                    command: "fork",
+                                    items: messages
+                                        .iter()
+                                        .map(|(_, text)| chrome::SelectItem {
+                                            label: text.lines().next().unwrap_or_default().chars().take(80).collect(),
+                                            description: None,
+                                        })
+                                        .collect(),
+                                    values: (1..=messages.len()).map(|n| n.to_string()).collect(),
+                                    selection: messages.len() - 1,
+                                });
+                                "Fork from which message?".to_owned()
                             }
                         }
                         Ok(number) if (1..=messages.len()).contains(&number) => {
@@ -2453,6 +2512,9 @@ fn render(frame: &mut Frame, app: &mut App) {
 
 /// Rows of the slash-command list shown under the editor.
 fn command_menu_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    if let Some(picker) = &app.picker {
+        return chrome::select_list_lines(&picker.items, picker.selection, width, &app.theme);
+    }
     if app.model_selector_open {
         let items = app
             .models
@@ -2998,6 +3060,33 @@ mod tests {
             mu_core::ThinkingSetting::High
         );
         assert_eq!(app.statuses.last().unwrap().1, "Thinking level: high");
+    }
+
+    #[tokio::test]
+    async fn thinking_picker_opens_navigates_and_applies_the_chosen_level() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        app.composer.insert_text("/thinking");
+        execute_command(&mut app, &agent);
+        assert!(app.picker.is_some());
+        let press = |app: &mut App, code| {
+            handle_key(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                app,
+                agent.clone(),
+                tx.clone(),
+            )
+        };
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.picker.is_none());
+        assert_eq!(agent.lock().await.thinking().name(), "minimal");
+        app.composer.insert_text("/thinking");
+        execute_command(&mut app, &agent);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.picker.is_none());
     }
 
     #[test]
