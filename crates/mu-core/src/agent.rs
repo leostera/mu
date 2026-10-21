@@ -1479,12 +1479,36 @@ async fn refresh_expired_oauth(config: &Config) -> Result<(), AgentError> {
     let Some((_, refresh, expires)) = crate::auth::oauth_access(&path, &config.provider) else {
         return Ok(());
     };
+    let client_id = crate::auth::load(&path)
+        .ok()
+        .and_then(|mut all| all.remove(&config.provider))
+        .and_then(|credential| match credential {
+            crate::auth::Credential::Oauth { extra, .. } => extra
+                .get("clientId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            crate::auth::Credential::ApiKey { .. } => None,
+        });
     if !crate::oauth::is_expired(expires) {
         return Ok(());
     }
     let refreshed = match config.provider.as_str() {
         "anthropic" => crate::oauth::anthropic::refresh_token(&refresh).await,
         "xai" => crate::oauth::xai::refresh_token(&refresh).await,
+        "openai-chatgpt" => match client_id {
+            Some(client_id) => {
+                crate::oauth::openai_chatgpt::refresh_token(
+                    &refresh,
+                    &client_id,
+                    crate::oauth::openai_chatgpt::TOKEN_URL,
+                )
+                .await
+            }
+            None => Err(
+                "Stored OpenAI OAuth credential does not contain an issued client ID; reconnect ChatGPT"
+                    .to_owned(),
+            ),
+        },
         "kimi-coding" => {
             let host = std::env::var("KIMI_CODE_OAUTH_HOST")
                 .or_else(|_| std::env::var("KIMI_OAUTH_HOST"))

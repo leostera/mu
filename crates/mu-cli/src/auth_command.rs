@@ -103,6 +103,51 @@ pub fn check(provider: &str, json: bool, agent_dir: &Path) -> (String, i32) {
     (output, i32::from(status != "ready"))
 }
 
+async fn login_openai_chatgpt(agent_dir: &Path) -> Result<String, AuthCommandError> {
+    use mu_core::oauth::{CallbackServer, openai_chatgpt as chatgpt};
+    let fail = AuthCommandError::Login;
+    let cwd = std::env::current_dir().map_err(|e| fail(e.to_string()))?;
+    let device_id = mu_core::settings::Settings::load(agent_dir, &cwd, false)
+        .get("deviceId")
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| {
+            // A stable per-installation id, created on first use (Pi's `getOrCreateDeviceId`).
+            let id = uuid::Uuid::new_v4().to_string();
+            let mut settings = mu_core::settings::Settings::load(agent_dir, &cwd, false);
+            let _ = settings.set(
+                mu_core::settings::Scope::Global,
+                "deviceId",
+                serde_json::json!(id),
+            );
+            id
+        });
+    let login = chatgpt::Login::start(&device_id, "Mu").map_err(fail)?;
+    let server = CallbackServer::bind("127.0.0.1", chatgpt::CALLBACK_PORT, chatgpt::CALLBACK_PATH, "127.0.0.1")
+        .await
+        .map_err(|e| {
+            AuthCommandError::Login(format!(
+                "Port {} is in use ({e}), probably by an unfinished login or the Codex CLI. Cancel it and try again.",
+                chatgpt::CALLBACK_PORT
+            ))
+        })?;
+    eprintln!("Open this URL to sign in with ChatGPT:\n\n{}\n", login.url);
+    let params = server
+        .wait_for_params(
+            "ChatGPT",
+            Some(&login.state),
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .map_err(AuthCommandError::Login)?;
+    let credential = login
+        .finish(&params, chatgpt::TOKEN_URL)
+        .await
+        .map_err(AuthCommandError::Login)?;
+    mu_core::auth::set_credential(&agent_dir.join("auth.json"), "openai-chatgpt", credential)
+        .map_err(|e| AuthCommandError::Login(e.to_string()))?;
+    Ok("Logged in to openai-chatgpt; credential saved to auth.json".to_owned())
+}
+
 async fn login_kimi(agent_dir: &Path) -> Result<String, AuthCommandError> {
     use mu_core::oauth::kimi;
     let fail = AuthCommandError::Login;
@@ -182,9 +227,12 @@ pub async fn login(
     if provider == "kimi-coding" {
         return login_kimi(agent_dir).await;
     }
+    if provider == "openai-chatgpt" {
+        return login_openai_chatgpt(agent_dir).await;
+    }
     if provider != "anthropic" {
         return Err(AuthCommandError::Login(format!(
-            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\" and \"kimi-coding\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
+            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\", \"kimi-coding\" and \"openai-chatgpt\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
         )));
     }
     let fail = AuthCommandError::Login;

@@ -123,12 +123,30 @@ impl CallbackServer {
         expected_state: Option<&str>,
         timeout: Duration,
     ) -> Result<String, String> {
+        let mut params = self
+            .wait_for_params(provider, expected_state, timeout)
+            .await?;
+        Ok(params.remove("code").unwrap_or_default())
+    }
+
+    /// Like [`Self::wait_for_code`], returning every query parameter of the accepted redirect
+    /// (OpenAI's dynamic registration returns the issued `client_id` there).
+    pub async fn wait_for_params(
+        &self,
+        provider: &str,
+        expected_state: Option<&str>,
+        timeout: Duration,
+    ) -> Result<std::collections::HashMap<String, String>, String> {
         tokio::time::timeout(timeout, self.serve(provider, expected_state))
             .await
             .map_err(|_| format!("{provider} sign-in timed out"))?
     }
 
-    async fn serve(&self, provider: &str, expected_state: Option<&str>) -> Result<String, String> {
+    async fn serve(
+        &self,
+        provider: &str,
+        expected_state: Option<&str>,
+    ) -> Result<std::collections::HashMap<String, String>, String> {
         loop {
             let (mut socket, _) = self.listener.accept().await.map_err(|e| e.to_string())?;
             let mut buffer = vec![0u8; 8192];
@@ -197,7 +215,11 @@ impl CallbackServer {
             let _ = socket
                 .write_all(respond("200 OK", page(&message)).as_bytes())
                 .await;
-            return Ok(code);
+            let _ = code;
+            return Ok(url
+                .query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect());
         }
     }
 }
@@ -951,6 +973,192 @@ pub mod kimi {
     }
 }
 
+/// OpenAI "Sign in with ChatGPT" (Pi's `openai-chatgpt.ts`): a public-client PKCE flow whose
+/// client id is issued per login through dynamic registration and returned in the redirect.
+pub mod openai_chatgpt {
+    use super::*;
+
+    pub const AUTHORIZE_URL: &str = "https://auth.openai.com/api/accounts/authorize";
+    pub const TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
+    pub const CALLBACK_PORT: u16 = 1455;
+    pub const CALLBACK_PATH: &str = "/auth/callback";
+    pub const REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
+    const RESOURCE: &str = "https://api.openai.com/v1";
+    const DIRECT_TOKEN_SCOPE: &str = "chatgpt.tokens.use.direct";
+    const SCOPE: &str =
+        "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+    /// Tokens are refreshed this long before they expire.
+    const EXPIRY_MARGIN_MS: f64 = 3.0 * 60.0 * 1000.0;
+
+    /// `urn:uuid:<uuid>` identifying this installation.
+    pub fn agent_host_id(device_id: &str) -> Result<String, String> {
+        let valid = device_id.len() == 36
+            && device_id.char_indices().all(|(i, c)| match i {
+                8 | 13 | 18 | 23 => c == '-',
+                _ => c.is_ascii_hexdigit(),
+            });
+        valid
+            .then(|| format!("urn:uuid:{}", device_id.to_lowercase()))
+            .ok_or_else(|| {
+                "Sign in with ChatGPT requires a device ID (UUID) for this installation".to_owned()
+            })
+    }
+
+    /// A started login: open `url`, then finish with the redirect's code and issued client id.
+    pub struct Login {
+        pub url: String,
+        pub state: String,
+        pkce: Pkce,
+    }
+
+    impl Login {
+        pub fn start(device_id: &str, agent_name: &str) -> Result<Self, String> {
+            let host = agent_host_id(device_id)?;
+            let pkce = Pkce::generate();
+            let state = Pkce::generate().verifier;
+            let nonce = Pkce::generate().verifier;
+            let url = authorize_url(
+                AUTHORIZE_URL,
+                &[
+                    ("client_id", "dynamic_agent_client"),
+                    ("agent_name_hint", agent_name),
+                    ("ext_agent_host_id", &host),
+                    ("response_type", "code"),
+                    ("redirect_uri", REDIRECT_URI),
+                    ("resource", RESOURCE),
+                    ("scope", SCOPE),
+                    ("state", &state),
+                    ("code_challenge", &pkce.challenge),
+                    ("code_challenge_method", "S256"),
+                    ("nonce", &nonce),
+                ],
+            )?;
+            Ok(Self { url, state, pkce })
+        }
+
+        /// Exchange the redirect's parameters (`code`, `client_id`) for a credential.
+        pub async fn finish(
+            &self,
+            params: &std::collections::HashMap<String, String>,
+            token_url: &str,
+        ) -> Result<Credential, String> {
+            let code = params
+                .get("code")
+                .filter(|c| !c.is_empty())
+                .ok_or("Missing authorization code")?;
+            let client_id = params
+                .get("client_id")
+                .map(|c| c.trim())
+                .filter(|c| !c.is_empty())
+                .ok_or("OpenAI OAuth registration callback did not contain an issued client ID")?;
+            let body = post_form(
+                token_url,
+                &[
+                    ("grant_type", "authorization_code"),
+                    ("client_id", client_id),
+                    ("code", code),
+                    ("code_verifier", &self.pkce.verifier),
+                    ("redirect_uri", REDIRECT_URI),
+                    ("resource", RESOURCE),
+                ],
+            )
+            .await?;
+            if body
+                .get("id_token")
+                .and_then(Value::as_str)
+                .is_none_or(|t| t.trim().is_empty())
+            {
+                return Err("OpenAI OAuth token response did not contain an ID token".into());
+            }
+            credential_from_token_response(&body, client_id, now_ms())
+        }
+    }
+
+    /// The credential keeps the issued `clientId` and granted `scopes` as extra fields.
+    pub fn credential_from_token_response(
+        body: &Value,
+        client_id: &str,
+        now_ms: f64,
+    ) -> Result<Credential, String> {
+        let text = |key: &str| {
+            body.get(key)
+                .and_then(Value::as_str)
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| format!("OpenAI OAuth token response has invalid {key}"))
+        };
+        let (access, refresh, scope) = (
+            text("access_token")?,
+            text("refresh_token")?,
+            text("scope")?,
+        );
+        let expires_in = body
+            .get("expires_in")
+            .and_then(Value::as_f64)
+            .filter(|v| *v > 0.0)
+            .ok_or("OpenAI OAuth token response has invalid expires_in")?;
+        let scopes = scope
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !scopes.iter().any(|s| s == DIRECT_TOKEN_SCOPE) {
+            return Err(format!(
+                "OpenAI OAuth grant did not include {DIRECT_TOKEN_SCOPE}"
+            ));
+        }
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("clientId".to_owned(), json!(client_id));
+        extra.insert("scopes".to_owned(), json!(scopes));
+        Ok(Credential::Oauth {
+            access: access.to_owned(),
+            refresh: refresh.to_owned(),
+            expires: now_ms + expires_in * 1000.0 - EXPIRY_MARGIN_MS,
+            extra,
+        })
+    }
+
+    async fn post_form(url: &str, fields: &[(&str, &str)]) -> Result<Value, String> {
+        let response = reqwest::Client::new()
+            .post(url)
+            .timeout(Duration::from_secs(30))
+            .header("accept", "application/json")
+            .form(fields)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = response.status();
+        let text = response.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!(
+                "OpenAI OAuth token request failed ({}): {text}",
+                status.as_u16()
+            ));
+        }
+        serde_json::from_str::<Value>(&text)
+            .ok()
+            .filter(Value::is_object)
+            .ok_or_else(|| "OpenAI OAuth token response must be an object".to_owned())
+    }
+
+    /// Refresh with the `clientId` stored in the credential.
+    pub async fn refresh_token(
+        refresh: &str,
+        client_id: &str,
+        token_url: &str,
+    ) -> Result<Credential, String> {
+        let body = post_form(
+            token_url,
+            &[
+                ("grant_type", "refresh_token"),
+                ("client_id", client_id),
+                ("refresh_token", refresh),
+                ("resource", RESOURCE),
+            ],
+        )
+        .await?;
+        credential_from_token_response(&body, client_id, now_ms())
+    }
+}
+
 /// Whether a stored OAuth credential needs refreshing.
 pub fn is_expired(expires_ms: f64) -> bool {
     now_ms() >= expires_ms
@@ -1172,6 +1380,47 @@ mod tests {
         );
         assert!(
             matches!(kimi::poll_result(503, &json!({})), DevicePoll::Failed(m) if m.contains("status 503"))
+        );
+    }
+
+    #[test]
+    fn openai_chatgpt_login_url_token_checks_and_credential_extras() {
+        assert_eq!(
+            openai_chatgpt::agent_host_id("123E4567-E89B-12D3-A456-426614174000").unwrap(),
+            "urn:uuid:123e4567-e89b-12d3-a456-426614174000"
+        );
+        assert!(openai_chatgpt::agent_host_id("not-a-uuid").is_err());
+        let login =
+            openai_chatgpt::Login::start("123e4567-e89b-12d3-a456-426614174000", "Mu").unwrap();
+        let url = url::Url::parse(&login.url).unwrap();
+        let q = |k: &str| {
+            url.query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+                .unwrap()
+        };
+        assert_eq!(q("client_id"), "dynamic_agent_client");
+        assert_eq!(q("state"), login.state);
+        assert_eq!(q("redirect_uri"), "http://127.0.0.1:1455/auth/callback");
+        assert!(q("scope").contains("chatgpt.tokens.use.direct"));
+        let body = json!({"access_token":"a","refresh_token":"r","expires_in":3600,"scope":"openid chatgpt.tokens.use.direct"});
+        let Credential::Oauth { expires, extra, .. } =
+            openai_chatgpt::credential_from_token_response(&body, "cid-1", 0.0).unwrap()
+        else {
+            panic!("oauth")
+        };
+        assert_eq!(expires, 3_600_000.0 - 180_000.0);
+        assert_eq!(extra["clientId"], "cid-1");
+        assert_eq!(
+            extra["scopes"],
+            json!(["openid", "chatgpt.tokens.use.direct"])
+        );
+        let missing_scope =
+            json!({"access_token":"a","refresh_token":"r","expires_in":1,"scope":"openid"});
+        assert!(
+            openai_chatgpt::credential_from_token_response(&missing_scope, "c", 0.0)
+                .unwrap_err()
+                .contains("did not include")
         );
     }
 
