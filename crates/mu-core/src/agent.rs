@@ -2799,9 +2799,37 @@ fn session_preview(session: &SessionDocument) -> Option<String> {
     })
 }
 
+/// `~` and `~/…` expand to the home directory (Pi's `expandTildePath`).
+fn expand_tilde(path: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (path, home) {
+        ("~", Some(home)) => home,
+        (rest, Some(home)) if rest.starts_with("~/") => home.join(&rest[2..]),
+        _ => PathBuf::from(path),
+    }
+}
+
+/// Pi's session-directory precedence: `--session-dir`, then `PI_CODING_AGENT_SESSION_DIR`, then
+/// the `sessionDir` setting.
+fn configured_session_dir(
+    flag: Option<&Path>,
+    env: Option<&str>,
+    setting: Option<&str>,
+) -> Option<PathBuf> {
+    flag.map(Path::to_owned)
+        .or_else(|| env.filter(|v| !v.is_empty()).map(expand_tilde))
+        .or_else(|| setting.filter(|v| !v.is_empty()).map(expand_tilde))
+}
+
 fn session_directory(agent_dir: &Path, cwd: &Path, override_dir: Option<&Path>) -> PathBuf {
-    if let Some(directory) = override_dir {
-        return directory.to_owned();
+    let setting = crate::settings::Settings::load(agent_dir, cwd, true).get("sessionDir");
+    let env = std::env::var("PI_CODING_AGENT_SESSION_DIR").ok();
+    if let Some(directory) = configured_session_dir(
+        override_dir,
+        env.as_deref(),
+        setting.as_ref().and_then(Value::as_str),
+    ) {
+        return directory;
     }
     let cwd = cwd
         .to_string_lossy()
@@ -6214,6 +6242,34 @@ mod tests {
         );
         assert_eq!(agent.session_path(), before);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn session_dir_precedence_is_flag_then_env_then_setting() {
+        let flag = Path::new("/flag");
+        assert_eq!(
+            super::configured_session_dir(Some(flag), Some("/env"), Some("/set")),
+            Some(std::path::PathBuf::from("/flag"))
+        );
+        assert_eq!(
+            super::configured_session_dir(None, Some("/env"), Some("/set")),
+            Some(std::path::PathBuf::from("/env"))
+        );
+        assert_eq!(
+            super::configured_session_dir(None, Some(""), Some("/set")),
+            Some(std::path::PathBuf::from("/set"))
+        );
+        assert_eq!(super::configured_session_dir(None, None, None), None);
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_eq!(
+                super::expand_tilde("~/x"),
+                std::path::PathBuf::from(home).join("x")
+            );
+        }
+        assert_eq!(
+            super::expand_tilde("/abs"),
+            std::path::PathBuf::from("/abs")
+        );
     }
 
     #[test]
