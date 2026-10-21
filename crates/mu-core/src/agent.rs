@@ -1562,10 +1562,7 @@ impl Provider {
             .await
             .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
         if !response.status().is_success() {
-            return Err(AgentError::Provider(format!(
-                "model request returned HTTP {}",
-                response.status()
-            )));
+            return Err(http_failure(response).await);
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -1623,10 +1620,7 @@ impl Provider {
             .await
             .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
         if !response.status().is_success() {
-            return Err(AgentError::Provider(format!(
-                "model request returned HTTP {}",
-                response.status()
-            )));
+            return Err(http_failure(response).await);
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -1777,10 +1771,7 @@ impl Provider {
             .await
             .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
         if !response.status().is_success() {
-            return Err(AgentError::Provider(format!(
-                "model request returned HTTP {}",
-                response.status()
-            )));
+            return Err(http_failure(response).await);
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -1934,10 +1925,7 @@ impl Provider {
             .await
             .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
         if !response.status().is_success() {
-            return Err(AgentError::Provider(format!(
-                "model request returned HTTP {}",
-                response.status()
-            )));
+            return Err(http_failure(response).await);
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
@@ -2999,6 +2987,28 @@ fn resolve_session_options(
         }
     }
     Ok((path, session, history))
+}
+
+/// `model request returned HTTP <status>` plus the start of the provider's error body, which
+/// carries quota and billing reasons the retry policy needs to see.
+async fn http_failure(response: reqwest::Response) -> AgentError {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    AgentError::Provider(http_failure_message(status, &body))
+}
+
+fn http_failure_message(status: reqwest::StatusCode, body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return format!("model request returned HTTP {status}");
+    }
+    let shown = body.chars().take(500).collect::<String>();
+    let ellipsis = if body.chars().count() > 500 {
+        "…"
+    } else {
+        ""
+    };
+    format!("model request returned HTTP {status}: {shown}{ellipsis}")
 }
 
 fn retryable_provider_error(error: &AgentError) -> bool {
@@ -5980,6 +5990,22 @@ mod tests {
         let message = super::no_model_selected_message("Pi settings have no defaultModel");
         assert!(message.starts_with("Pi settings have no defaultModel. No model selected."));
         assert!(message.contains("/login") && message.ends_with("select a model."));
+    }
+
+    #[test]
+    fn http_failures_include_a_bounded_error_body_so_quota_errors_are_not_retried() {
+        let status = reqwest::StatusCode::TOO_MANY_REQUESTS;
+        assert_eq!(
+            super::http_failure_message(status, ""),
+            "model request returned HTTP 429 Too Many Requests"
+        );
+        let quota = super::http_failure_message(status, r#"{"error":"insufficient_quota"}"#);
+        assert!(quota.ends_with(r#"{"error":"insufficient_quota"}"#));
+        assert!(!super::retryable_provider_error(
+            &crate::AgentError::Provider(quota)
+        ));
+        let long = super::http_failure_message(status, &"x".repeat(900));
+        assert!(long.ends_with('…') && long.len() < 600);
     }
 
     #[test]
