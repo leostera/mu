@@ -151,6 +151,45 @@ pub struct SessionOptions {
     pub no_skills: bool,
     /// Use the deterministic offline backend instead of the configured provider.
     pub demo: bool,
+    /// `--system-prompt`: replaces the default prompt.
+    pub system_prompt: Option<String>,
+    /// `--append-system-prompt`: each entry is literal text or a file path whose contents are used.
+    pub append_system_prompt: Vec<String>,
+}
+
+/// Resolved prompt customizations.
+#[derive(Clone, Debug, Default)]
+struct PromptOptions {
+    system_prompt: Option<String>,
+    appended: Vec<String>,
+}
+
+impl PromptOptions {
+    fn from_session_options(options: &SessionOptions) -> Self {
+        Self {
+            system_prompt: options.system_prompt.as_deref().map(read_prompt_input),
+            appended: options
+                .append_system_prompt
+                .iter()
+                .map(|text| read_prompt_input(text))
+                .collect(),
+        }
+    }
+
+    fn appendix(&self) -> String {
+        self.appended.join("\n\n")
+    }
+}
+
+/// Pi accepts either literal text or a path to a file whose contents are the prompt.
+fn read_prompt_input(input: &str) -> String {
+    let path = Path::new(input);
+    if path.is_file() {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            return contents;
+        }
+    }
+    input.to_owned()
 }
 
 struct Config {
@@ -168,6 +207,10 @@ struct Provider {
     transport: ProviderTransport,
     model: String,
     instructions: String,
+    /// A custom `--system-prompt` replaces the default prompt, including the tool section.
+    describes_tools: bool,
+    /// `--append-system-prompt` text placed after everything else.
+    appendix: String,
     supports_reasoning: bool,
     supports_strict_sampling: bool,
 }
@@ -1045,7 +1088,11 @@ fn trusted_url(value: &str) -> Result<Url, AgentError> {
     Ok(url)
 }
 
-async fn connect(config: &Config, skill_prompt: String) -> Result<Provider, AgentError> {
+async fn connect(
+    config: &Config,
+    skill_prompt: String,
+    prompt: &PromptOptions,
+) -> Result<Provider, AgentError> {
     if !config.provider.starts_with("opencode-cf") {
         return Err(AgentError::Configuration(format!(
             "Pi provider `{}` is unsupported (expected opencode-cf)",
@@ -1141,9 +1188,14 @@ async fn connect(config: &Config, skill_prompt: String) -> Result<Provider, Agen
             token,
         },
         model: config.model.clone(),
-        instructions: format!(
-            "You are Mu, a helpful coding assistant. Be clear, practical, and concise.{skill_prompt}"
-        ),
+        instructions: match &prompt.system_prompt {
+            Some(custom) => format!("{custom}{skill_prompt}"),
+            None => format!(
+                "You are Mu, a helpful coding assistant. Be clear, practical, and concise.{skill_prompt}"
+            ),
+        },
+        describes_tools: prompt.system_prompt.is_none(),
+        appendix: prompt.appendix(),
         supports_reasoning,
         supports_strict_sampling,
     })
@@ -1206,7 +1258,14 @@ impl Provider {
             unreachable!("demo backend returned above")
         };
         let input = history;
-        let instructions = instructions_for_tools(&self.instructions, tools);
+        let mut instructions = if self.describes_tools {
+            instructions_for_tools(&self.instructions, tools)
+        } else {
+            self.instructions.clone()
+        };
+        if !self.appendix.is_empty() {
+            instructions = format!("{instructions}\n\n{}", self.appendix);
+        }
         let mut request_body = json!({"model":self.model,"instructions":instructions,"input":input,"tools":tools,"stream":true,"store":false});
         if self.supports_reasoning {
             request_body["reasoning"] = json!({"effort":"medium","summary":"auto"});
@@ -1925,6 +1984,8 @@ fn resolve_session_options(
         skill_paths: _,
         no_skills: _,
         demo: _,
+        system_prompt: _,
+        append_system_prompt: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2214,6 +2275,7 @@ struct Prepared {
     session_path: PathBuf,
     session: SessionDocument,
     transcript: Vec<AgentMessage>,
+    prompt: PromptOptions,
 }
 
 impl Prepared {
@@ -2231,6 +2293,7 @@ impl Prepared {
         }
         let no_tools = options.no_tools;
         let persist_session = !options.no_session;
+        let prompt = PromptOptions::from_session_options(&options);
         let skills = crate::skills::SkillCatalog::discover_with_paths(
             &config.cwd,
             &config.agent_dir,
@@ -2247,6 +2310,7 @@ impl Prepared {
             session_path,
             session,
             transcript,
+            prompt,
         })
     }
 
@@ -2337,7 +2401,13 @@ impl MuAgent {
                 })
                 .await;
         });
-        let provider = match connect(&prepared.config, prepared.skills.system_prompt()).await {
+        let provider = match connect(
+            &prepared.config,
+            prepared.skills.system_prompt(),
+            &prepared.prompt,
+        )
+        .await
+        {
             Ok(provider) => provider,
             Err(error) => {
                 mcp_startup_task.abort();
@@ -2363,6 +2433,8 @@ impl MuAgent {
             transport: ProviderTransport::Demo,
             model: prepared.config.model.clone(),
             instructions: "You are Mu, a deterministic demo assistant.".into(),
+            describes_tools: true,
+            appendix: String::new(),
             supports_reasoning: false,
             supports_strict_sampling: true,
         };
@@ -2379,6 +2451,8 @@ impl MuAgent {
                 transport: ProviderTransport::Demo,
                 model: config.model.clone(),
                 instructions: "You are Mu, a deterministic demo assistant.".into(),
+                describes_tools: true,
+                appendix: String::new(),
                 supports_reasoning: false,
                 supports_strict_sampling: true,
             },
@@ -4380,6 +4454,22 @@ mod tests {
             std::sync::Mutex::new(replies.into()),
         ));
         agent
+    }
+
+    #[test]
+    fn prompt_inputs_read_files_or_fall_back_to_literal_text() {
+        let dir = std::env::temp_dir().join(format!("mu-prompt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("extra.md");
+        std::fs::write(&file, "from file").unwrap();
+        let options = super::PromptOptions::from_session_options(&SessionOptions {
+            system_prompt: Some("literal prompt".into()),
+            append_system_prompt: vec![file.to_string_lossy().into_owned(), "inline".into()],
+            ..SessionOptions::default()
+        });
+        assert_eq!(options.system_prompt.as_deref(), Some("literal prompt"));
+        assert_eq!(options.appendix(), "from file\n\ninline");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

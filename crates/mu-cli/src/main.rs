@@ -91,6 +91,14 @@ struct Cli {
     #[arg(long)]
     no_skills: bool,
 
+    /// Replace the default system prompt (text or a file path).
+    #[arg(long, value_name = "TEXT")]
+    system_prompt: Option<String>,
+
+    /// Append text or file contents to the system prompt (repeatable).
+    #[arg(long, value_name = "TEXT")]
+    append_system_prompt: Vec<String>,
+
     /// Do not make startup network requests (Pi's `--offline`).
     #[arg(long)]
     offline: bool,
@@ -192,6 +200,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         skill_paths: cli.skill_paths,
         no_skills: cli.no_skills,
         demo: cli.demo,
+        system_prompt: cli.system_prompt,
+        append_system_prompt: cli.append_system_prompt,
     };
 
     if cli.print || !is_terminal {
