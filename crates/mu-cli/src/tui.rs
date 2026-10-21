@@ -2246,24 +2246,26 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                     let rows = agent.tree_rows();
                     match argument.parse::<usize>() {
                         _ if argument.is_empty() => {
-                            let lines = rows
-                                .iter()
-                                .enumerate()
-                                .map(|(i, row)| {
-                                    format!(
-                                        "{}{}. {}{}{}",
-                                        "  ".repeat(row.depth.min(8)),
-                                        i + 1,
-                                        row.label,
-                                        if row.is_leaf { "  ← current" } else { "" },
-                                        if row.on_branch { "" } else { "  (other branch)" },
-                                    )
-                                })
-                                .collect::<Vec<_>>();
-                            if lines.is_empty() {
+                            if rows.is_empty() {
                                 "Session is empty.".to_owned()
                             } else {
-                                format!("Session tree (use /tree <number> to switch):\n{}", lines.join("\n"))
+                                app.picker = Some(Picker {
+                                    command: "tree",
+                                    items: rows
+                                        .iter()
+                                        .map(|row| chrome::SelectItem {
+                                            label: format!("{}{}", "  ".repeat(row.depth.min(8)), row.label),
+                                            description: match (row.is_leaf, row.on_branch) {
+                                                (true, _) => Some("current".to_owned()),
+                                                (false, false) => Some("other branch".to_owned()),
+                                                _ => None,
+                                            },
+                                        })
+                                        .collect(),
+                                    values: (1..=rows.len()).map(|n| n.to_string()).collect(),
+                                    selection: rows.iter().position(|r| r.is_leaf).unwrap_or(0),
+                                });
+                                "Session tree: choose an entry to continue from.".to_owned()
                             }
                         }
                         Ok(number) if (1..=rows.len()).contains(&number) => {
