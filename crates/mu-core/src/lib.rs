@@ -12,6 +12,7 @@ pub mod config_value;
 mod context_files;
 pub mod image_process;
 mod mcp;
+pub mod nested_calls;
 pub mod oauth;
 pub mod path_utils;
 pub mod prompt_templates;
