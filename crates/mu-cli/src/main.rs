@@ -1,3 +1,4 @@
+mod initial_message;
 mod list_models;
 mod rpc;
 mod tui;
@@ -333,10 +334,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cli.print || !is_terminal {
-        let prompt = if cli.prompt.is_empty() {
-            read_stdin_prompt(is_terminal)?
-        } else {
-            cli.prompt.join(" ")
+        let stdin = (!is_terminal)
+            .then(|| read_stdin_prompt(is_terminal))
+            .transpose()?;
+        let Some(prompt) = initial_prompt_from(&cli.prompt, stdin.as_deref())? else {
+            return Ok(());
         };
         if prompt.trim().is_empty() {
             return Ok(());
@@ -349,7 +351,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let initial_prompt = (!cli.prompt.is_empty()).then(|| cli.prompt.join(" "));
+    let initial_prompt = initial_prompt_from(&cli.prompt, None)?;
     tui::run_starting(
         async move { mu_core::MuAgent::connect_with_options(session_options).await },
         initial_prompt,
@@ -447,6 +449,16 @@ fn select_session(
             )?;
         }
     }
+}
+
+/// Combine stdin, `@file` arguments and message arguments into the first prompt.
+fn initial_prompt_from(
+    arguments: &[String],
+    stdin: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let parsed = initial_message::PromptArguments::parse(arguments);
+    let files = initial_message::file_text(&parsed.files, &std::env::current_dir()?)?;
+    Ok(initial_message::build(stdin, &files, &parsed.messages))
 }
 
 fn read_stdin_prompt(is_terminal: bool) -> Result<String, std::io::Error> {
