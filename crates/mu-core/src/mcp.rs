@@ -1008,12 +1008,11 @@ fn parse_tool_result(result: Value) -> Result<McpToolResult, String> {
                 block.get("text").and_then(Value::as_str).map(str::to_owned)
             } else if block.get("type").and_then(Value::as_str) == Some("resource_link") {
                 Some(resource_link_text(block))
-            } else if block.get("type").and_then(Value::as_str) == Some("image")
-                && block.get("data").and_then(Value::as_str).is_some()
-                && block.get("mimeType").and_then(Value::as_str).is_some()
+            } else if embedded_image(block).is_some()
+                || (block.get("type").and_then(Value::as_str) == Some("image")
+                    && block.get("data").and_then(Value::as_str).is_some()
+                    && block.get("mimeType").and_then(Value::as_str).is_some())
             {
-                None
-            } else if embedded_image(block).is_some() {
                 None
             } else if block.get("type").and_then(Value::as_str) == Some("resource") {
                 let resource = block.get("resource").unwrap_or(&Value::Null);
