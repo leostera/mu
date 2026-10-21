@@ -6101,6 +6101,47 @@ mod tests {
         assert!(long.ends_with('…') && long.len() < 600);
     }
 
+    /// Ported from Pi's `tool-system-prompt-contributions.test.ts`: the snippets and guidelines
+    /// are exactly the ones in each tool's `*ToolSystemPromptContribution`.
+    #[test]
+    fn builtin_tool_prompt_contributions_match_pi() {
+        let snippets = [
+            ("read", "Read file contents"),
+            ("bash", "Execute bash commands (ls, grep, find, etc.)"),
+            ("powershell", "Execute PowerShell commands"),
+            (
+                "edit",
+                "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+            ),
+            ("write", "Create or overwrite files"),
+            (
+                "grep",
+                "Search file contents for patterns (respects .gitignore)",
+            ),
+            ("find", "Find files by glob pattern (respects .gitignore)"),
+            ("ls", "List directory contents"),
+        ];
+        for (name, snippet) in snippets {
+            assert_eq!(super::tool_prompt_snippet(name), Some(snippet), "{name}");
+        }
+        let env =
+            ["You can inspect PI_* environment variables for current model and session details."];
+        assert_eq!(super::tool_prompt_guidelines("bash"), env);
+        assert_eq!(super::tool_prompt_guidelines("powershell"), env);
+        assert_eq!(
+            super::tool_prompt_guidelines("read"),
+            ["Use read to examine files instead of cat or sed."]
+        );
+        assert_eq!(
+            super::tool_prompt_guidelines("write"),
+            ["Use write only for new files or complete rewrites."]
+        );
+        assert_eq!(super::tool_prompt_guidelines("edit").len(), 4);
+        for name in ["grep", "find", "ls"] {
+            assert!(super::tool_prompt_guidelines(name).is_empty(), "{name}");
+        }
+    }
+
     #[test]
     fn bedrock_region_comes_from_the_runtime_host() {
         assert_eq!(
