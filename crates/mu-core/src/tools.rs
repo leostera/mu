@@ -3483,6 +3483,34 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// Ported from Pi's `tools.test.ts`: a trailing newline is not an extra truncated line.
+    #[tokio::test]
+    async fn bash_trailing_newline_is_not_counted_as_an_extra_line() {
+        let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = execute(
+            &dir,
+            "bash",
+            &json!({"command":"i=1; while [ $i -le 4000 ]; do printf 'line-%04d\\n' $i; i=$((i + 1)); done"}),
+        )
+        .await
+        .unwrap();
+        let details = result.details.unwrap();
+        assert_eq!(details["truncation"]["totalLines"], 4000);
+        assert_eq!(details["truncation"]["outputLines"], 2000);
+        assert!(result.content.contains("line-2001") && result.content.contains("line-4000"));
+        assert!(
+            result
+                .content
+                .contains("[Showing lines 2001-4000 of 4000. Full output: "),
+            "{}",
+            &result.content[result.content.len().saturating_sub(200)..]
+        );
+        assert!(!result.content.contains("4001"));
+        let _ = std::fs::remove_file(details["fullOutputPath"].as_str().unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn bash_tail_truncation_persists_full_output_for_retrieval() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
