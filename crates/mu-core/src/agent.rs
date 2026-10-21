@@ -1787,24 +1787,27 @@ impl Provider {
             .await
             .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
         let status = response.status();
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|e| AgentError::Provider(format!("invalid Bedrock response: {e}")))?;
         if !status.is_success() {
+            let body: Value = response.json().await.unwrap_or(Value::Null);
             let detail = body["message"].as_str().unwrap_or("no details");
             return Err(AgentError::Provider(format!(
                 "model request returned HTTP {status}: {detail}"
             )));
         }
-        let reply = bedrock::parse_response(&body).map_err(AgentError::Provider)?;
-        if !reply.text.is_empty() {
-            on_event(AgentEvent::TextDelta(reply.text.clone()));
+        // `converse-stream` answers with AWS's binary event stream, decoded as it arrives.
+        let mut stream = response.bytes_stream();
+        let mut decoder = bedrock::EventStreamDecoder::default();
+        let mut accumulator = bedrock::StreamAccumulator::default();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|e| AgentError::Provider(format!("model stream failed: {e}")))?;
+            for message in decoder.push(&chunk).map_err(AgentError::Provider)? {
+                accumulator
+                    .feed(&message, on_event)
+                    .map_err(AgentError::Provider)?;
+            }
         }
-        if !reply.thinking.is_empty() {
-            on_event(AgentEvent::ThinkingDelta(reply.thinking.clone()));
-        }
-        Ok(reply)
+        Ok(accumulator.into_reply())
     }
 
     async fn complete_anthropic(
@@ -2317,7 +2320,7 @@ fn connect_custom_provider(
     let google = entry.get("api").and_then(Value::as_str) == Some("google-generative-ai");
     let bedrock = entry.get("api").and_then(Value::as_str) == Some("bedrock-converse-stream");
     let suffix = if bedrock {
-        format!("model/{}/converse", config.model)
+        format!("model/{}/converse-stream", config.model)
     } else if anthropic {
         "messages".to_owned()
     } else if completions {

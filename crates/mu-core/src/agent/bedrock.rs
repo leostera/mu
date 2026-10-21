@@ -143,57 +143,6 @@ pub(super) fn request_body(system: &str, history: &[Value], definitions: &[Value
     body
 }
 
-/// Decode a Converse response body into a [`Reply`].
-pub(super) fn parse_response(response: &Value) -> Result<Reply, String> {
-    if let Some(message) = response.get("message").and_then(Value::as_str)
-        && response.get("output").is_none()
-    {
-        return Err(message.to_owned());
-    }
-    let (mut text, mut thinking, mut tool_calls) = (String::new(), String::new(), Vec::new());
-    for block in response["output"]["message"]["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
-        if let Some(t) = block.get("text").and_then(Value::as_str) {
-            text.push_str(t);
-        } else if let Some(t) = block["reasoningContent"]["reasoningText"]["text"].as_str() {
-            thinking.push_str(t);
-        } else if let Some(call) = block.get("toolUse") {
-            tool_calls.push(FunctionCall {
-                call_id: call["toolUseId"].as_str().unwrap_or_default().to_owned(),
-                name: call["name"].as_str().unwrap_or_default().to_owned(),
-                arguments: call.get("input").cloned().unwrap_or_else(|| json!({})),
-            });
-        }
-    }
-    let usage = &response["usage"];
-    let count = |key: &str| usage[key].as_u64().unwrap_or(0);
-    let (input, output) = (count("inputTokens"), count("outputTokens"));
-    let (cache_read, cache_write) = (
-        count("cacheReadInputTokens"),
-        count("cacheWriteInputTokens"),
-    );
-    let truncated = response["stopReason"] == "max_tokens";
-    Ok(Reply {
-        text,
-        thinking,
-        thinking_signature: None,
-        output_items: Vec::new(),
-        tool_calls,
-        input,
-        output,
-        cache_read,
-        cache_write,
-        reasoning: None,
-        total_tokens: usage["totalTokens"]
-            .as_u64()
-            .unwrap_or(input + output + cache_read + cache_write),
-        incomplete_reason: truncated.then(|| "max_output_tokens".to_owned()),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,51 +219,369 @@ mod tests {
             json!({"type":"object"})
         );
     }
+}
 
-    #[test]
-    fn response_yields_text_thinking_tool_calls_and_usage() {
-        let reply = parse_response(&json!({
-            "output":{"message":{"role":"assistant","content":[
-                {"reasoningContent":{"reasoningText":{"text":"hmm"}}},
-                {"text":"ok"},
-                {"toolUse":{"toolUseId":"t1","name":"bash","input":{"command":"ls"}}}
-            ]}},
-            "stopReason":"tool_use",
-            "usage":{"inputTokens":10,"outputTokens":5,"totalTokens":15,"cacheReadInputTokens":2}
-        }))
-        .unwrap();
-        assert_eq!(
-            (reply.text.as_str(), reply.thinking.as_str()),
-            ("ok", "hmm")
+/// One decoded AWS event-stream message (`application/vnd.amazon.eventstream`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct StreamMessage {
+    /// `:event-type` (or `:exception-type`) header.
+    pub kind: String,
+    pub is_exception: bool,
+    pub payload: Vec<u8>,
+}
+
+/// Incremental decoder for the binary framing Bedrock's `converse-stream` uses: a 12-byte prelude
+/// (total length, headers length, CRC32), headers, payload, and a trailing message CRC32.
+#[derive(Default)]
+pub(super) struct EventStreamDecoder {
+    buffer: Vec<u8>,
+}
+
+impl EventStreamDecoder {
+    pub(super) fn push(&mut self, bytes: &[u8]) -> Result<Vec<StreamMessage>, String> {
+        self.buffer.extend_from_slice(bytes);
+        let mut messages = Vec::new();
+        loop {
+            if self.buffer.len() < 12 {
+                return Ok(messages);
+            }
+            let be = |at: usize| {
+                u32::from_be_bytes(self.buffer[at..at + 4].try_into().expect("4 bytes"))
+            };
+            let (total, headers_len) = (be(0) as usize, be(4) as usize);
+            if crc32fast::hash(&self.buffer[..8]) != be(8) {
+                return Err("event stream prelude checksum mismatch".into());
+            }
+            if total < 16 + headers_len {
+                return Err("event stream message length is inconsistent".into());
+            }
+            if self.buffer.len() < total {
+                return Ok(messages);
+            }
+            if crc32fast::hash(&self.buffer[..total - 4]) != be(total - 4) {
+                return Err("event stream message checksum mismatch".into());
+            }
+            let headers = parse_headers(&self.buffer[12..12 + headers_len])?;
+            let payload = self.buffer[12 + headers_len..total - 4].to_vec();
+            self.buffer.drain(..total);
+            let header = |name: &str| {
+                headers
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, v)| v.clone())
+            };
+            let message_type = header(":message-type").unwrap_or_default();
+            let is_exception = message_type == "exception";
+            let kind = header(if is_exception {
+                ":exception-type"
+            } else {
+                ":event-type"
+            })
+            .unwrap_or_default();
+            messages.push(StreamMessage {
+                kind,
+                is_exception,
+                payload,
+            });
+        }
+    }
+}
+
+/// String-typed headers only; other value types are skipped by their fixed or prefixed size.
+fn parse_headers(mut bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
+    let bad = || "event stream header is truncated".to_owned();
+    let mut headers = Vec::new();
+    while !bytes.is_empty() {
+        let name_len = *bytes.first().ok_or_else(bad)? as usize;
+        let name = bytes.get(1..1 + name_len).ok_or_else(bad)?;
+        let name = String::from_utf8_lossy(name).into_owned();
+        let kind = *bytes.get(1 + name_len).ok_or_else(bad)?;
+        let rest = &bytes[2 + name_len..];
+        let (value, used) = match kind {
+            0 | 1 => (String::new(), 0),
+            2 => (String::new(), 1),
+            3 => (String::new(), 2),
+            4 => (String::new(), 4),
+            5 | 8 => (String::new(), 8),
+            9 => (String::new(), 16),
+            6 | 7 => {
+                let len =
+                    u16::from_be_bytes(rest.get(..2).ok_or_else(bad)?.try_into().expect("2 bytes"))
+                        as usize;
+                let value = rest.get(2..2 + len).ok_or_else(bad)?;
+                (String::from_utf8_lossy(value).into_owned(), 2 + len)
+            }
+            other => return Err(format!("unknown event stream header type {other}")),
+        };
+        bytes = rest.get(used..).ok_or_else(bad)?;
+        headers.push((name, value));
+    }
+    Ok(headers)
+}
+
+/// Accumulates `converse-stream` events into a [`Reply`], forwarding text and reasoning deltas.
+#[derive(Default)]
+pub(super) struct StreamAccumulator {
+    text: String,
+    thinking: String,
+    calls: Vec<(String, String, String)>,
+    stop_reason: Option<String>,
+    usage: Value,
+}
+
+impl StreamAccumulator {
+    pub(super) fn feed(
+        &mut self,
+        message: &StreamMessage,
+        on_event: &mut impl FnMut(super::AgentEvent),
+    ) -> Result<(), String> {
+        let payload: Value = serde_json::from_slice(&message.payload).unwrap_or(Value::Null);
+        if message.is_exception {
+            let detail = payload["message"].as_str().unwrap_or("no details");
+            return Err(format!("{}: {detail}", message.kind));
+        }
+        match message.kind.as_str() {
+            "contentBlockStart" => {
+                if let Some(tool) = payload["start"].get("toolUse") {
+                    self.calls.push((
+                        tool["toolUseId"].as_str().unwrap_or_default().to_owned(),
+                        tool["name"].as_str().unwrap_or_default().to_owned(),
+                        String::new(),
+                    ));
+                }
+            }
+            "contentBlockDelta" => {
+                let delta = &payload["delta"];
+                if let Some(text) = delta["text"].as_str() {
+                    self.text.push_str(text);
+                    on_event(super::AgentEvent::TextDelta(text.to_owned()));
+                } else if let Some(text) = delta["reasoningContent"]["text"].as_str() {
+                    self.thinking.push_str(text);
+                    on_event(super::AgentEvent::ThinkingDelta(text.to_owned()));
+                } else if let Some(input) = delta["toolUse"]["input"].as_str()
+                    && let Some(call) = self.calls.last_mut()
+                {
+                    call.2.push_str(input);
+                }
+            }
+            "messageStop" => self.stop_reason = payload["stopReason"].as_str().map(str::to_owned),
+            "metadata" => self.usage = payload["usage"].clone(),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(super) fn into_reply(self) -> Reply {
+        let count = |key: &str| self.usage[key].as_u64().unwrap_or(0);
+        let (input, output) = (count("inputTokens"), count("outputTokens"));
+        let (cache_read, cache_write) = (
+            count("cacheReadInputTokens"),
+            count("cacheWriteInputTokens"),
         );
-        assert_eq!(reply.tool_calls[0].arguments, json!({"command":"ls"}));
-        assert_eq!(
-            (
-                reply.input,
-                reply.output,
-                reply.cache_read,
-                reply.total_tokens
-            ),
-            (10, 5, 2, 15)
-        );
-        assert_eq!(reply.incomplete_reason, None);
+        Reply {
+            text: self.text,
+            thinking: self.thinking,
+            thinking_signature: None,
+            output_items: Vec::new(),
+            tool_calls: self
+                .calls
+                .into_iter()
+                .map(|(call_id, name, raw)| FunctionCall {
+                    call_id,
+                    name,
+                    arguments: if raw.is_empty() {
+                        json!({})
+                    } else {
+                        serde_json::from_str(&raw).unwrap_or(Value::String(raw))
+                    },
+                })
+                .collect(),
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning: None,
+            total_tokens: self.usage["totalTokens"]
+                .as_u64()
+                .unwrap_or(input + output + cache_read + cache_write),
+            incomplete_reason: (self.stop_reason.as_deref() == Some("max_tokens"))
+                .then(|| "max_output_tokens".to_owned()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    /// Build one event-stream message the way AWS frames it.
+    fn frame(kind: &str, message_type: &str, payload: &Value) -> Vec<u8> {
+        let mut headers = Vec::new();
+        let kind_header = if message_type == "exception" {
+            ":exception-type"
+        } else {
+            ":event-type"
+        };
+        for (name, value) in [
+            (kind_header, kind),
+            (":message-type", message_type),
+            (":content-type", "application/json"),
+        ] {
+            headers.push(name.len() as u8);
+            headers.extend(name.as_bytes());
+            headers.push(7);
+            headers.extend((value.len() as u16).to_be_bytes());
+            headers.extend(value.as_bytes());
+        }
+        let payload = serde_json::to_vec(payload).unwrap();
+        let total = 12 + headers.len() + payload.len() + 4;
+        let mut out = Vec::new();
+        out.extend((total as u32).to_be_bytes());
+        out.extend((headers.len() as u32).to_be_bytes());
+        out.extend(crc32fast::hash(&out).to_be_bytes());
+        out.extend(&headers);
+        out.extend(&payload);
+        out.extend(crc32fast::hash(&out).to_be_bytes());
+        out
     }
 
     #[test]
-    fn max_tokens_is_truncation_and_error_bodies_surface() {
-        let reply = parse_response(
-            &json!({"output":{"message":{"content":[{"text":"x"}]}},"stopReason":"max_tokens"}),
-        )
-        .unwrap();
+    fn decoder_reassembles_messages_split_across_chunks() {
+        let mut bytes = frame(
+            "contentBlockDelta",
+            "event",
+            &json!({"delta":{"text":"hi"}}),
+        );
+        bytes.extend(frame(
+            "messageStop",
+            "event",
+            &json!({"stopReason":"end_turn"}),
+        ));
+        let mut decoder = EventStreamDecoder::default();
+        let mut messages = Vec::new();
+        for chunk in bytes.chunks(7) {
+            messages.extend(decoder.push(chunk).unwrap());
+        }
         assert_eq!(
-            reply.incomplete_reason.as_deref(),
+            messages.iter().map(|m| m.kind.as_str()).collect::<Vec<_>>(),
+            ["contentBlockDelta", "messageStop"]
+        );
+        assert!(!messages[0].is_exception);
+    }
+
+    #[test]
+    fn corrupted_frames_are_rejected() {
+        let mut bytes = frame("messageStop", "event", &json!({}));
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        assert!(
+            EventStreamDecoder::default()
+                .push(&bytes)
+                .unwrap_err()
+                .contains("message checksum")
+        );
+        let mut bytes = frame("messageStop", "event", &json!({}));
+        bytes[9] ^= 0xff;
+        assert!(
+            EventStreamDecoder::default()
+                .push(&bytes)
+                .unwrap_err()
+                .contains("prelude checksum")
+        );
+    }
+
+    #[test]
+    fn stream_events_accumulate_text_reasoning_tool_calls_and_usage() {
+        let events = [
+            frame(
+                "contentBlockDelta",
+                "event",
+                &json!({"delta":{"reasoningContent":{"text":"hmm"}}}),
+            ),
+            frame(
+                "contentBlockDelta",
+                "event",
+                &json!({"delta":{"text":"he"}}),
+            ),
+            frame(
+                "contentBlockDelta",
+                "event",
+                &json!({"delta":{"text":"llo"}}),
+            ),
+            frame(
+                "contentBlockStart",
+                "event",
+                &json!({"start":{"toolUse":{"toolUseId":"t1","name":"bash"}}}),
+            ),
+            frame(
+                "contentBlockDelta",
+                "event",
+                &json!({"delta":{"toolUse":{"input":"{\"command\":"}}}),
+            ),
+            frame(
+                "contentBlockDelta",
+                "event",
+                &json!({"delta":{"toolUse":{"input":"\"ls\"}"}}}),
+            ),
+            frame("messageStop", "event", &json!({"stopReason":"tool_use"})),
+            frame(
+                "metadata",
+                "event",
+                &json!({"usage":{"inputTokens":4,"outputTokens":2,"totalTokens":6}}),
+            ),
+        ]
+        .concat();
+        let mut decoder = EventStreamDecoder::default();
+        let mut accumulator = StreamAccumulator::default();
+        let mut deltas = Vec::new();
+        for message in decoder.push(&events).unwrap() {
+            accumulator
+                .feed(&message, &mut |event| deltas.push(format!("{event:?}")))
+                .unwrap();
+        }
+        let reply = accumulator.into_reply();
+        assert_eq!(
+            (reply.text.as_str(), reply.thinking.as_str()),
+            ("hello", "hmm")
+        );
+        assert_eq!(reply.tool_calls[0].arguments, json!({"command":"ls"}));
+        assert_eq!((reply.input, reply.output, reply.total_tokens), (4, 2, 6));
+        assert_eq!(
+            deltas.len(),
+            3,
+            "reasoning and two text deltas stream out: {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn max_tokens_stop_is_reported_as_truncation() {
+        let mut accumulator = StreamAccumulator::default();
+        let stop = StreamMessage {
+            kind: "messageStop".into(),
+            is_exception: false,
+            payload: br#"{"stopReason":"max_tokens"}"#.to_vec(),
+        };
+        accumulator.feed(&stop, &mut |_| {}).unwrap();
+        assert_eq!(
+            accumulator.into_reply().incomplete_reason.as_deref(),
             Some("max_output_tokens")
         );
-        assert_eq!(
-            parse_response(&json!({"message":"Access denied"}))
-                .err()
-                .unwrap(),
-            "Access denied"
+    }
+
+    #[test]
+    fn exception_messages_become_errors() {
+        let frame = frame(
+            "throttlingException",
+            "exception",
+            &json!({"message":"slow down"}),
         );
+        let message = EventStreamDecoder::default()
+            .push(&frame)
+            .unwrap()
+            .remove(0);
+        let error = StreamAccumulator::default()
+            .feed(&message, &mut |_| {})
+            .unwrap_err();
+        assert_eq!(error, "throttlingException: slow down");
     }
 }

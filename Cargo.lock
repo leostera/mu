@@ -1970,6 +1970,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "codemode",
+ "crc32fast",
  "futures-util",
  "globset",
  "hmac",
