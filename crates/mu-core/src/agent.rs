@@ -172,6 +172,8 @@ pub struct SessionOptions {
     pub prompt_templates: Vec<PathBuf>,
     /// `--no-prompt-templates`: skip default template directories.
     pub no_prompt_templates: bool,
+    /// `--api-key`: runtime API key for the selected provider (never persisted).
+    pub api_key: Option<String>,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -229,6 +231,7 @@ struct PromptOptions {
     appended: Vec<String>,
     context: String,
     thinking: ThinkingSetting,
+    api_key: Option<String>,
 }
 
 impl PromptOptions {
@@ -242,6 +245,7 @@ impl PromptOptions {
                 .collect(),
             context: String::new(),
             thinking: options.thinking,
+            api_key: options.api_key.clone().filter(|key| !key.is_empty()),
         }
     }
 
@@ -1225,7 +1229,10 @@ async fn connect(
     if !config.provider.starts_with("opencode-cf") {
         return connect_custom_provider(config, skill_prompt, prompt);
     }
-    let token = token(&config.provider).await?;
+    let token = match &prompt.api_key {
+        Some(key) => key.clone(),
+        None => token(&config.provider).await?,
+    };
     let http = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -1791,8 +1798,10 @@ fn connect_custom_provider(
         .get("apiKey")
         .and_then(Value::as_str)
         .ok_or_else(unsupported)?;
-    let token = std::env::var(key)
-        .ok()
+    let token = prompt
+        .api_key
+        .clone()
+        .or_else(|| std::env::var(key).ok())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| key.to_owned());
     let model = configured_model_entry(&config.agent_dir, &config.provider, &config.model);
@@ -2362,6 +2371,7 @@ fn resolve_session_options(
         no_mcp: _,
         prompt_templates: _,
         no_prompt_templates: _,
+        api_key: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -5119,6 +5129,37 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains("unsupported api `google-genai`"));
         assert!(super::connect_custom_provider(&config("nope"), String::new(), &prompt).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn api_key_flag_overrides_the_models_json_key() {
+        let dir = std::env::temp_dir().join(format!("mu-apikey-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"acme":{"api":"openai-responses","baseUrl":"https://a.test/v1","apiKey":"from-file","models":[{"id":"m"}]}}}"#,
+        )
+        .unwrap();
+        let config = super::Config {
+            agent_dir: dir.clone(),
+            cwd: dir.clone(),
+            provider: "acme".into(),
+            model: "m".into(),
+            model_choices: vec![],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+            enabled_tools: vec![],
+        };
+        let prompt = super::PromptOptions::from_session_options(&SessionOptions {
+            api_key: Some("runtime".into()),
+            ..SessionOptions::default()
+        });
+        let provider = super::connect_custom_provider(&config, String::new(), &prompt).unwrap();
+        let super::ProviderTransport::OpenCode { token, .. } = provider.transport else {
+            panic!()
+        };
+        assert_eq!(token, "runtime");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

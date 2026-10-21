@@ -92,6 +92,10 @@ struct Cli {
     #[arg(long, value_name = "SESSION")]
     export: Option<PathBuf>,
 
+    /// API key for this run (overrides stored and environment keys).
+    #[arg(long, value_name = "KEY")]
+    api_key: Option<String>,
+
     /// Do not connect MCP servers.
     #[arg(long)]
     no_mcp: bool,
@@ -278,6 +282,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         exclude_tools: cli.exclude_tools,
         provider: cli.provider,
         no_mcp: cli.no_mcp,
+        api_key: cli.api_key,
         prompt_templates: cli.prompt_templates,
         no_prompt_templates: cli.no_prompt_templates,
         model: cli.model,
