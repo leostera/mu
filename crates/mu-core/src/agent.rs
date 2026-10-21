@@ -4029,6 +4029,9 @@ impl MuAgent {
 
     pub fn import_session(&mut self, path: &Path) -> Result<(), AgentError> {
         let (session, history) = load_session(path)?;
+        if let Some(message) = missing_session_cwd_error(&session, path, &self.cwd) {
+            return Err(AgentError::Session(message));
+        }
         self.session = session;
         self.transcript = history;
         self.session_path = path.to_owned();
@@ -6192,6 +6195,24 @@ mod tests {
                 dir.display()
             )
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn importing_a_session_with_a_vanished_cwd_leaves_the_current_session_untouched() {
+        let dir = std::env::temp_dir().join(format!("mu-import-cwd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s.jsonl");
+        let doc = SessionDocument::new(dir.join("gone").to_string_lossy().into_owned());
+        std::fs::write(&file, doc.to_jsonl().unwrap()).unwrap();
+        let mut agent = super::MuAgent::demo().unwrap();
+        let before = agent.session_path().to_owned();
+        let error = agent.import_session(&file).unwrap_err().to_string();
+        assert!(
+            error.contains("Stored session working directory does not exist"),
+            "{error}"
+        );
+        assert_eq!(agent.session_path(), before);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
