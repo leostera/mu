@@ -1,4 +1,5 @@
 mod list_models;
+mod rpc;
 mod tui;
 
 use std::{
@@ -249,9 +250,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    if cli.mode == OutputMode::Rpc {
-        return Err(format!("--mode {:?} is not implemented yet", cli.mode).into());
-    }
     if cli.resume && !is_terminal {
         return Err("--resume requires an interactive terminal".into());
     }
@@ -328,6 +326,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .transpose()?
             .unwrap_or_default(),
     };
+
+    if cli.mode == OutputMode::Rpc {
+        let agent = mu_core::MuAgent::connect_with_options(session_options).await?;
+        return rpc::run(agent).await;
+    }
 
     if cli.print || !is_terminal {
         let prompt = if cli.prompt.is_empty() {

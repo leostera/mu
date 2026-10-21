@@ -3455,6 +3455,24 @@ impl MuAgent {
         Ok(true)
     }
 
+    /// Text of the newest assistant message on the active branch (empty when none).
+    pub fn last_assistant_text(&self) -> String {
+        branch_entry_values(&self.session)
+            .iter()
+            .rev()
+            .filter_map(|entry| entry.get("message")?.as_object().cloned())
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .map(|message| {
+                message_blocks(&message)
+                    .iter()
+                    .filter_map(|block| block.get("text")?.as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .find(|text| !text.trim().is_empty())
+            .unwrap_or_default()
+    }
+
     /// Text block for `/session`: identity plus message counts and token/cost totals.
     pub fn session_summary(&self) -> String {
         let info = self.session_info();
