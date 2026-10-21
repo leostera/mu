@@ -279,6 +279,11 @@ fn compare(index: usize, label: &str, actual: &str, expected: &str) -> Result<()
     }
     let (a, e): (Vec<_>, Vec<_>) = (actual.lines().collect(), expected.lines().collect());
     let mut report = format!("checkpoint {index} ({label}): first differing rows\n");
+    if std::env::var("PI_PARITY_DUMP").is_ok() {
+        report.push_str(&format!(
+            "--- mu screen\n{actual}\n--- pi screen\n{expected}\n---\n"
+        ));
+    }
     let mut shown = 0;
     for row in 0..a.len().max(e.len()) {
         let (left, right) = (

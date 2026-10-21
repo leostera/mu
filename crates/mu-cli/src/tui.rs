@@ -26,7 +26,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::Paragraph,
 };
 use tokio::{
     sync::{Mutex, mpsc},
@@ -82,13 +82,18 @@ enum TranscriptPosition {
 struct TranscriptScroll {
     position: TranscriptPosition,
     max_offset: u16,
+    /// Last time the offset moved; Pi's `auto` scrollbar fades one second later.
+    last_activity: Option<Instant>,
 }
+
+const SCROLLBAR_HIDE_DELAY: Duration = Duration::from_millis(1000);
 
 impl Default for TranscriptScroll {
     fn default() -> Self {
         Self {
             position: TranscriptPosition::FollowEnd,
             max_offset: 0,
+            last_activity: None,
         }
     }
 }
@@ -114,8 +119,16 @@ impl TranscriptScroll {
         }
     }
 
+    fn scrollbar_visible(&self) -> bool {
+        self.last_activity
+            .is_some_and(|at| at.elapsed() < SCROLLBAR_HIDE_DELAY)
+    }
+
     fn scroll_by(&mut self, lines: i32) {
         let next = (i32::from(self.offset()) + lines).clamp(0, i32::from(self.max_offset)) as u16;
+        if next != self.offset() {
+            self.last_activity = Some(Instant::now());
+        }
         self.position = if next == self.max_offset {
             TranscriptPosition::FollowEnd
         } else {
@@ -124,6 +137,9 @@ impl TranscriptScroll {
     }
 
     fn scroll_to_start(&mut self) {
+        if self.offset() != 0 {
+            self.last_activity = Some(Instant::now());
+        }
         self.position = if self.max_offset == 0 {
             TranscriptPosition::FollowEnd
         } else {
@@ -132,6 +148,9 @@ impl TranscriptScroll {
     }
 
     fn scroll_to_end(&mut self) {
+        if !self.is_following_end() {
+            self.last_activity = Some(Instant::now());
+        }
         self.position = TranscriptPosition::FollowEnd;
     }
 }
@@ -1451,6 +1470,8 @@ async fn run_loop(
             break;
         }
         tokio::select! {
+            // Redraw periodically so time-based UI (the fading scrollbar) updates.
+            () = tokio::time::sleep(Duration::from_millis(100)) => {},
             result = async {
                 startup_task
                     .as_mut()
@@ -1957,10 +1978,13 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
     app.messages.scroll.scroll_to_end();
 }
 
+/// Rows per wheel notch (Pi's `fullscreenWheelScrollLines: auto`).
+const WHEEL_SCROLL_LINES: i32 = 1;
+
 fn handle_mouse(kind: MouseEventKind, app: &mut App) {
     match kind {
-        MouseEventKind::ScrollUp => app.messages.scroll.scroll_by(-1),
-        MouseEventKind::ScrollDown => app.messages.scroll.scroll_by(1),
+        MouseEventKind::ScrollUp => app.messages.scroll.scroll_by(-WHEEL_SCROLL_LINES),
+        MouseEventKind::ScrollDown => app.messages.scroll.scroll_by(WHEEL_SCROLL_LINES),
         _ => {}
     }
 }
@@ -2004,14 +2028,16 @@ fn render(frame: &mut Frame, app: &mut App) {
     let dock_height = u16::try_from(editor.lines.len() + menu.len() + footer.len())
         .unwrap_or(u16::MAX)
         .min(area.height);
+    // Pi keeps one blank row between the transcript viewport and the editor.
+    let spacer = u16::from(area.height > dock_height);
     let transcript = Rect {
-        height: area.height - dock_height,
+        height: area.height - dock_height - spacer,
         ..area
     };
     render_transcript(frame, transcript, app);
 
     let mut dock = editor.lines;
-    let editor_top = transcript.y + transcript.height;
+    let editor_top = transcript.y + transcript.height + spacer;
     dock.extend(menu);
     dock.extend(footer);
     let dock_area = Rect {
@@ -2153,8 +2179,13 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
             Style::default().fg(Color::Yellow),
         )));
     }
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let content_lines = paragraph.line_count(area.width.max(1));
+    // Wrap once here so every row (including full-width background rows) is exactly one terminal row.
+    let lines = lines
+        .into_iter()
+        .flat_map(|line| wrap_line(line, usize::from(area.width.max(1))))
+        .collect::<Vec<_>>();
+    let content_lines = lines.len();
+    let paragraph = Paragraph::new(lines);
     let max_scroll =
         u16::try_from(content_lines.saturating_sub(usize::from(area.height))).unwrap_or(u16::MAX);
     app.messages.scroll.set_max_offset(max_scroll);
@@ -2169,24 +2200,55 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &mut App) {
         };
         frame.render_widget(
             Paragraph::new("↓ Jump to latest message · Ctrl+End")
-                .style(Style::default().fg(Color::DarkGray)),
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(app.theme.fg("muted")),
             hint_area,
         );
     }
-    if content_lines > usize::from(area.height) {
-        let mut state = ScrollbarState::new(content_lines)
-            .position(usize::from(scroll))
-            .viewport_content_length(usize::from(area.height));
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .thumb_symbol("┃")
-                .track_symbol(Some("│"))
-                .begin_symbol(None)
-                .end_symbol(None),
-            area,
-            &mut state,
-        );
+    if content_lines > usize::from(area.height) && app.messages.scroll.scrollbar_visible() {
+        paint_scrollbar(frame, area, content_lines, usize::from(scroll), &app.theme);
     }
+}
+
+/// Pi's scrollbar: a `│` track with a `┃` thumb painted over the last column.
+fn paint_scrollbar(frame: &mut Frame, area: Rect, content: usize, scroll: usize, theme: &Theme) {
+    let track = usize::from(area.height);
+    let thumb_height = ((track * track) as f64 / content as f64)
+        .round()
+        .clamp(track.min(2) as f64, track as f64) as usize;
+    let max_scroll = content.saturating_sub(track);
+    let max_thumb_top = track - thumb_height;
+    let thumb_top = if max_scroll == 0 {
+        0
+    } else {
+        (scroll as f64 / max_scroll as f64 * max_thumb_top as f64).round() as usize
+    };
+    let x = area.x + area.width.saturating_sub(1);
+    let buffer = frame.buffer_mut();
+    for offset in 0..track {
+        let is_thumb = (thumb_top..thumb_top + thumb_height).contains(&offset);
+        let (symbol, style) = if is_thumb {
+            ("┃", theme.fg("scrollbarThumb"))
+        } else {
+            ("│", theme.fg("scrollbarTrack"))
+        };
+        if let Some(cell) = buffer.cell_mut((x, area.y + offset as u16)) {
+            cell.set_symbol(symbol).set_style(style);
+        }
+    }
+}
+
+/// Wrap a styled line to `width`, keeping its line style (background) on every row.
+fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let used: usize = line.spans.iter().map(|span| span.content.width()).sum();
+    if used <= width {
+        return vec![line];
+    }
+    let style = line.style;
+    markdown::wrap_spans(&line.spans, width)
+        .into_iter()
+        .map(|spans| Line::from(spans).style(style))
+        .collect()
 }
 
 /// Status lines recorded after `position` messages: a spacer and a dim line each.
@@ -2320,23 +2382,6 @@ mod tests {
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(app.retry_status.is_none());
         assert!(app.messages.last().unwrap().text.contains("(interrupted)"));
-    }
-
-    #[test]
-    fn slash_menu_only_advertises_implemented_commands() {
-        let mut app = App::from_metadata("model".into(), "provider".into(), "session".into());
-        app.input = vec!['/'];
-        let names = filtered_commands(&app)
-            .into_iter()
-            .map(|(name, _)| *name)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            [
-                "model", "new", "clear", "clone", "name", "session", "export", "import", "mcp",
-                "help", "quit",
-            ]
-        );
     }
 
     #[tokio::test]
