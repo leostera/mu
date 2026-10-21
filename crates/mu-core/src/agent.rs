@@ -14,6 +14,7 @@ use thiserror::Error;
 use tokio::sync::OnceCell;
 
 mod anthropic;
+mod bedrock;
 mod completions;
 mod google;
 mod runtime;
@@ -351,6 +352,12 @@ enum ProviderTransport {
         endpoint: Url,
         token: String,
         gateway_headers: bool,
+    },
+    /// Bedrock Converse (`api: "bedrock-converse-stream"`), bearer-token auth only.
+    Bedrock {
+        http: Client,
+        endpoint: Url,
+        key: String,
     },
     /// Anthropic Messages API (`api: "anthropic-messages"` in `models.json`).
     Anthropic {
@@ -1625,6 +1632,51 @@ impl Provider {
         Ok(decoder.into_reply())
     }
 
+    async fn complete_bedrock(
+        &self,
+        http: &Client,
+        endpoint: &Url,
+        key: &str,
+        history: &[Value],
+        tools: &[Value],
+        on_event: &mut impl FnMut(AgentEvent),
+    ) -> Result<Reply, AgentError> {
+        let mut system = if self.describes_tools {
+            instructions_for_tools(&self.instructions, tools)
+        } else {
+            self.instructions.clone()
+        };
+        if !self.appendix.is_empty() {
+            system = format!("{system}\n\n{}", self.appendix);
+        }
+        let response = http
+            .post(endpoint.clone())
+            .bearer_auth(key)
+            .json(&bedrock::request_body(&system, history, tools))
+            .send()
+            .await
+            .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;
+        let status = response.status();
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| AgentError::Provider(format!("invalid Bedrock response: {e}")))?;
+        if !status.is_success() {
+            let detail = body["message"].as_str().unwrap_or("no details");
+            return Err(AgentError::Provider(format!(
+                "model request returned HTTP {status}: {detail}"
+            )));
+        }
+        let reply = bedrock::parse_response(&body).map_err(AgentError::Provider)?;
+        if !reply.text.is_empty() {
+            on_event(AgentEvent::TextDelta(reply.text.clone()));
+        }
+        if !reply.thinking.is_empty() {
+            on_event(AgentEvent::ThinkingDelta(reply.thinking.clone()));
+        }
+        Ok(reply)
+    }
+
     async fn complete_anthropic(
         &self,
         http: &Client,
@@ -1764,6 +1816,16 @@ impl Provider {
         {
             return self
                 .complete_completions(http, endpoint, key, history, tools, on_event)
+                .await;
+        }
+        if let ProviderTransport::Bedrock {
+            http,
+            endpoint,
+            key,
+        } = &self.transport
+        {
+            return self
+                .complete_bedrock(http, endpoint, key, history, tools, on_event)
                 .await;
         }
         if let ProviderTransport::Anthropic {
@@ -2085,11 +2147,12 @@ fn connect_custom_provider(
             "openai-responses"
             | "anthropic-messages"
             | "openai-completions"
-            | "google-generative-ai",
+            | "google-generative-ai"
+            | "bedrock-converse-stream",
         ) => {}
         other => {
             return Err(AgentError::Configuration(format!(
-                "Provider `{}` uses unsupported api `{}` (supported: openai-responses, openai-completions, anthropic-messages, google-generative-ai)",
+                "Provider `{}` uses unsupported api `{}` (supported: openai-responses, openai-completions, anthropic-messages, google-generative-ai, bedrock-converse-stream)",
                 config.provider,
                 other.unwrap_or("none")
             )));
@@ -2104,7 +2167,10 @@ fn connect_custom_provider(
     let anthropic = entry.get("api").and_then(Value::as_str) == Some("anthropic-messages");
     let completions = entry.get("api").and_then(Value::as_str) == Some("openai-completions");
     let google = entry.get("api").and_then(Value::as_str) == Some("google-generative-ai");
-    let suffix = if anthropic {
+    let bedrock = entry.get("api").and_then(Value::as_str) == Some("bedrock-converse-stream");
+    let suffix = if bedrock {
+        format!("model/{}/converse", config.model)
+    } else if anthropic {
         "messages".to_owned()
     } else if completions {
         "chat/completions".to_owned()
@@ -2140,7 +2206,13 @@ fn connect_custom_provider(
             .and_then(Value::as_bool)
     };
     Ok(Provider {
-        transport: if anthropic {
+        transport: if bedrock {
+            ProviderTransport::Bedrock {
+                http: http.clone(),
+                endpoint,
+                key: token,
+            }
+        } else if anthropic {
             ProviderTransport::Anthropic {
                 http: http.clone(),
                 endpoint,
@@ -2212,6 +2284,8 @@ fn api_name(transport: &ProviderTransport) -> &'static str {
         "google-generative-ai"
     } else if matches!(transport, ProviderTransport::Completions { .. }) {
         "openai-completions"
+    } else if matches!(transport, ProviderTransport::Bedrock { .. }) {
+        "bedrock-converse-stream"
     } else if matches!(transport, ProviderTransport::Anthropic { .. }) {
         "anthropic-messages"
     } else {
