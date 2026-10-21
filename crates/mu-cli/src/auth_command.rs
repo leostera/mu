@@ -74,24 +74,33 @@ pub fn run(command: &AuthCommand, agent_dir: &Path) -> Result<String, AuthComman
             CredentialSource::OAuth => Err(AuthCommandError::OAuthNotKey(provider.clone())),
             CredentialSource::None => Err(AuthCommandError::NoKey(provider.clone())),
         },
-        AuthCommand::Check { provider, json } => {
-            let (configured, source) = match credential_source(agent_dir, provider) {
-                CredentialSource::AuthJson(_) => (true, "auth.json"),
-                CredentialSource::OAuth => (true, "oauth"),
-                CredentialSource::ModelsJson(_) => (true, "models.json"),
-                CredentialSource::None => (false, "none"),
-            };
-            if !configured {
-                return Err(AuthCommandError::NoKey(provider.clone()));
-            }
-            Ok(if *json {
-                serde_json::json!({"provider": provider, "configured": true, "source": source})
-                    .to_string()
-            } else {
-                format!("{provider}: configured ({source})")
-            })
-        }
+        AuthCommand::Check { provider, json } => Ok(check(provider, *json, agent_dir).0),
     }
+}
+
+/// Pi's `auth check` contract: prints `ready`/`not_ready` (or JSON with `status`, `provider`,
+/// `reason`, `authType`) and exits 0 when ready, 1 when not ready.
+pub fn check(provider: &str, json: bool, agent_dir: &Path) -> (String, i32) {
+    let (status, reason, auth_type) = match credential_source(agent_dir, provider) {
+        CredentialSource::AuthJson(_) | CredentialSource::ModelsJson(_) => {
+            ("ready", None, Some("api_key"))
+        }
+        CredentialSource::OAuth => ("ready", None, Some("oauth")),
+        CredentialSource::None => ("not_ready", Some("credentials_not_configured"), None),
+    };
+    let output = if json {
+        let mut value = serde_json::json!({"status": status, "provider": provider});
+        if let Some(reason) = reason {
+            value["reason"] = reason.into();
+        }
+        if let Some(auth_type) = auth_type {
+            value["authType"] = auth_type.into();
+        }
+        value.to_string()
+    } else {
+        status.to_owned()
+    };
+    (output, i32::from(status != "ready"))
 }
 
 async fn login_kimi(agent_dir: &Path) -> Result<String, AuthCommandError> {
@@ -322,19 +331,20 @@ mod tests {
             print("none").unwrap_err(),
             AuthCommandError::NoKey("none".into())
         );
-        let check = run(
-            &AuthCommand::Check {
-                provider: "acme".into(),
-                json: true,
-            },
-            &dir,
-        )
-        .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&check).unwrap();
+        let (output, code) = check("acme", true, &dir);
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(
             parsed,
-            serde_json::json!({"provider":"acme","configured":true,"source":"models.json"})
+            serde_json::json!({"status":"ready","provider":"acme","authType":"api_key"})
         );
+        assert_eq!(code, 0);
+        assert_eq!(check("acme", false, &dir), ("ready".to_owned(), 0));
+        let (missing, code) = check("none", true, &dir);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&missing).unwrap(),
+            serde_json::json!({"status":"not_ready","provider":"none","reason":"credentials_not_configured"})
+        );
+        assert_eq!(code, 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
