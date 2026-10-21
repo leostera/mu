@@ -10,6 +10,7 @@ mod codemode;
 pub mod compaction;
 pub mod config_value;
 mod context_files;
+pub mod crash_log;
 pub mod image_process;
 mod mcp;
 pub mod nested_calls;

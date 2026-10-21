@@ -248,6 +248,24 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(agent_dir) = std::env::var_os("PI_CODING_AGENT_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
+    {
+        let crashes = mu_core::crash_log::crash_log_path(&agent_dir);
+        // Mention a crash from a previous run once (to stderr, before the TUI takes the screen).
+        if let Some(crash) = mu_core::crash_log::take_unnotified(&crashes, chrono::Utc::now()) {
+            eprintln!(
+                "mu: the previous run crashed ({}): {}",
+                crash.timestamp,
+                crash.message.lines().next().unwrap_or_default()
+            );
+            eprintln!("mu: details are in {}", crashes.display());
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            mu_core::crash_log::install_panic_hook(agent_dir, cwd);
+        }
+    }
     let is_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     if cli.tui_mode.as_deref() == Some("regular") {
         return Err("--tui-mode regular (main-screen mode) is not implemented yet; Mu always uses the fullscreen alternate screen".into());
