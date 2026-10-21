@@ -3965,16 +3965,28 @@ impl MuAgent {
         custom_instructions: Option<&str>,
     ) -> Result<Option<CompactionOutcome>, AgentError> {
         let settings = self.compaction_settings();
-        let path = branch_entry_values(&self.session);
-        let cut =
-            crate::compaction::find_cut_point(&path, 0, path.len(), settings.keep_recent_tokens);
+        let branch = branch_entry_values(&self.session);
+        // Pi summarizes the projected context: a previous compaction's summary is updated with
+        // the entries that followed it rather than re-summarizing from the start.
+        let path = crate::compaction::build_context_entries(&branch);
+        let previous_summary = path
+            .first()
+            .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("compaction"))
+            .and_then(|entry| entry.get("summary")?.as_str().map(str::to_owned));
+        let boundary_start = usize::from(previous_summary.is_some());
+        let cut = crate::compaction::find_cut_point(
+            &path,
+            boundary_start,
+            path.len(),
+            settings.keep_recent_tokens,
+        );
         let Some(first_kept_id) = path
             .get(cut.first_kept_entry_index)
             .and_then(|entry| entry.get("id")?.as_str().map(str::to_owned))
         else {
             return Ok(None);
         };
-        let summarized = &path[..cut.first_kept_entry_index];
+        let summarized = &path[boundary_start..cut.first_kept_entry_index.max(boundary_start)];
         if !summarized
             .iter()
             .any(|entry| entry.get("message").is_some())
@@ -3987,11 +3999,15 @@ impl MuAgent {
             .map(crate::compaction::estimate_tokens)
             .sum();
         let conversation = conversation_text(summarized);
+        let previous = previous_summary
+            .as_deref()
+            .map(|summary| format!("<previous-summary>\n{summary}\n</previous-summary>\n\n"))
+            .unwrap_or_default();
         let history = vec![json!({
             "role":"user",
             "content":[{"type":"input_text","text":format!(
-                "<conversation>\n{conversation}\n</conversation>\n\n{}",
-                crate::compaction::summarization_prompt(custom_instructions)
+                "<conversation>\n{conversation}\n</conversation>\n\n{previous}{}",
+                crate::compaction::summarization_prompt_for(custom_instructions, previous_summary.is_some())
             )}],
         })];
         let reply = self.provider.complete(&history, &[], &mut |_| {}).await?;

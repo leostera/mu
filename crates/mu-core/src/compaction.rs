@@ -25,11 +25,63 @@ impl Default for CompactionSettings {
 /// Prompt appended to the serialized conversation when asking for a checkpoint summary.
 /// Pi's `generateSummary` prompt: the base prompt plus the user's focus, when given.
 pub fn summarization_prompt(custom_instructions: Option<&str>) -> String {
+    summarization_prompt_for(custom_instructions, false)
+}
+
+/// With `has_previous_summary`, Pi's update prompt that folds new messages into the old summary.
+pub fn summarization_prompt_for(
+    custom_instructions: Option<&str>,
+    has_previous_summary: bool,
+) -> String {
+    let base = if has_previous_summary {
+        UPDATE_SUMMARIZATION_PROMPT
+    } else {
+        SUMMARIZATION_PROMPT
+    };
     match custom_instructions.map(str::trim).filter(|c| !c.is_empty()) {
-        Some(custom) => format!("{SUMMARIZATION_PROMPT}\n\nAdditional focus: {custom}"),
-        None => SUMMARIZATION_PROMPT.to_owned(),
+        Some(custom) => format!("{base}\n\nAdditional focus: {custom}"),
+        None => base.to_owned(),
     }
 }
+
+pub const UPDATE_SUMMARIZATION_PROMPT: &str = "The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
+
+Update the existing structured summary with new information. RULES:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- UPDATE the Progress section: move items from \"In Progress\" to \"Done\" when completed
+- UPDATE \"Next Steps\" based on what was accomplished
+- PRESERVE exact file paths, function names, and error messages
+- If something is no longer relevant, you may remove it
+
+Use this EXACT format:
+
+## Goal
+[Preserve existing goals, add new ones if the task expanded]
+
+## Constraints & Preferences
+- [Preserve existing, add new ones discovered]
+
+## Progress
+### Done
+- [x] [Include previously done items AND newly completed items]
+
+### In Progress
+- [ ] [Current work - update based on progress]
+
+### Blocked
+- [Current blockers - remove if resolved]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Next Steps
+1. [Update based on current state]
+
+## Critical Context
+- [Preserve important context, add new if needed]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
 pub const SUMMARIZATION_PROMPT: &str = "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
