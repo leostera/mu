@@ -164,21 +164,16 @@ pub struct SessionOptions {
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ThinkingSetting {
     Off,
     Minimal,
     Low,
+    #[default]
     Medium,
     High,
     Xhigh,
     Max,
-}
-
-impl Default for ThinkingSetting {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 impl std::str::FromStr for ThinkingSetting {
@@ -3053,7 +3048,7 @@ mod tests {
         session_active_mcp_tools, session_codemode_store, session_preview, session_transcript,
         trusted_url, validate_session_id,
     };
-    use super::{Config, SessionOptions};
+    use super::{Config, SessionOptions, ThinkingSetting};
     use mu_session::{
         AssistantToolResponse, AssistantTurnResponse, MessageUsage, SessionDocument, ToolCallRecord,
     };
