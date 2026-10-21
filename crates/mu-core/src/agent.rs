@@ -1612,7 +1612,13 @@ impl Provider {
         let response = http
             .post(endpoint.clone())
             .header("x-goog-api-key", key)
-            .json(&google::request_body(&system, history, tools))
+            .json(&{
+                let mut body = google::request_body(&system, history, tools);
+                if self.supports_reasoning {
+                    body["generationConfig"] = json!({"thinkingConfig": google::thinking_config(&self.model, self.reasoning_effort)});
+                }
+                body
+            })
             .send()
             .await
             .map_err(|e| AgentError::Provider(format!("model request failed: {e}")))?;

@@ -80,6 +80,74 @@ fn clean_schema(schema: &Value) -> Value {
     }
 }
 
+/// Whether the model takes Gemini's discrete `thinkingLevel` instead of a token budget
+/// (Pi's `usesGoogleThinkingLevel`).
+fn uses_thinking_level(model: &str) -> bool {
+    let id = model.to_lowercase();
+    let major = id.strip_prefix("gemini-").and_then(|rest| {
+        let digits = rest
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        digits
+            .parse::<u32>()
+            .ok()
+            .map(|n| (n, rest[digits.len()..].to_owned()))
+    });
+    let gemini3_family = major.as_ref().is_some_and(|(n, rest)| {
+        *n == 3 && {
+            let rest = rest.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+            rest.starts_with("-pro") || rest.starts_with("-flash")
+        }
+    });
+    gemini3_family
+        || major.as_ref().is_some_and(|(n, _)| *n >= 4)
+        || id == "gemini-flash-latest"
+        || id == "gemini-flash-lite-latest"
+        || id.contains("gemma-4")
+        || id.contains("gemma4")
+}
+
+/// Pi's `getGoogleBudget` defaults, for `minimal|low|medium|high`; `-1` lets the model decide.
+fn thinking_budget(model: &str, level: &str) -> i64 {
+    let table = |values: [i64; 4]| match level {
+        "minimal" => values[0],
+        "low" => values[1],
+        "medium" => values[2],
+        _ => values[3],
+    };
+    if model.contains("2.5-pro") {
+        table([128, 2048, 8192, 32768])
+    } else if model.contains("2.5-flash-lite") {
+        table([512, 2048, 8192, 24576])
+    } else if model.contains("2.5-flash") {
+        table([128, 2048, 8192, 24576])
+    } else {
+        -1
+    }
+}
+
+/// `generationConfig.thinkingConfig` for a reasoning model at `effort` (Pi's reasoning options);
+/// levels above `high` clamp to `high`, and `off` asks for no thinking.
+pub(super) fn thinking_config(model: &str, effort: Option<&str>) -> Value {
+    let Some(effort) = effort else {
+        return if uses_thinking_level(model) {
+            json!({})
+        } else {
+            json!({"thinkingBudget": 0})
+        };
+    };
+    let level = match effort {
+        "minimal" | "low" | "medium" | "high" => effort,
+        _ => "high",
+    };
+    if uses_thinking_level(model) {
+        json!({"includeThoughts": true, "thinkingLevel": level.to_uppercase()})
+    } else {
+        json!({"includeThoughts": true, "thinkingBudget": thinking_budget(model, level)})
+    }
+}
+
 pub(super) fn request_body(system: &str, history: &[Value], definitions: &[Value]) -> Value {
     let mut body = json!({
         "systemInstruction": {"parts": [{"text": system}]},
@@ -218,6 +286,35 @@ mod tests {
         assert_eq!(out[1]["parts"][0]["functionCall"]["args"]["p"], 1);
         assert_eq!(out[2]["parts"][0]["functionResponse"]["name"], "read");
         assert_eq!(out[3]["role"], "model");
+    }
+
+    #[test]
+    fn thinking_config_follows_pis_level_and_budget_rules() {
+        assert_eq!(
+            thinking_config("gemini-3-flash-preview", Some("medium")),
+            json!({"includeThoughts": true, "thinkingLevel": "MEDIUM"})
+        );
+        assert_eq!(
+            thinking_config("gemini-2.5-pro", Some("high")),
+            json!({"includeThoughts": true, "thinkingBudget": 32768})
+        );
+        assert_eq!(
+            thinking_config("gemini-2.5-flash-lite", Some("max")),
+            json!({"includeThoughts": true, "thinkingBudget": 24576}),
+            "levels above high clamp to high"
+        );
+        assert_eq!(
+            thinking_config("gemini-2.0-x", Some("low"))["thinkingBudget"],
+            -1
+        );
+        assert_eq!(
+            thinking_config("gemini-2.5-flash", None),
+            json!({"thinkingBudget": 0})
+        );
+        assert!(uses_thinking_level("gemini-3.1-pro-preview"));
+        assert!(uses_thinking_level("gemini-4-argon"));
+        assert!(uses_thinking_level("gemma4-31b"));
+        assert!(!uses_thinking_level("gemini-2.5-pro"));
     }
 
     #[test]

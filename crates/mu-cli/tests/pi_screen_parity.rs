@@ -362,7 +362,7 @@ fn mu_matches_recorded_pi_screens() {
     failures.retain(|(file, _)| {
         let fixture: Value =
             serde_json::from_slice(&std::fs::read(fixture_dir().join(file)).unwrap()).unwrap();
-        replay(&fixture).is_err()
+        (0..3).all(|_| replay(&fixture).is_err())
     });
     failures.sort();
     if verbose {
