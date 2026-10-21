@@ -59,6 +59,29 @@ type Signals = mpsc::UnboundedSender<Signal>;
 // Transcript <-> Responses API conversion
 // ---------------------------------------------------------------------------
 
+/// A Responses `function_call_output.output`: plain text, or `input_text`/`input_image` parts
+/// when the tool returned images.
+fn tool_output_value(blocks: &[ContentBlock]) -> Value {
+    if !blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }))
+    {
+        return Value::String(content_text(blocks));
+    }
+    Value::Array(
+        blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(json!({"type":"input_text","text":text})),
+                ContentBlock::Image { data, mime_type } => Some(
+                    json!({"type":"input_image","image_url":format!("data:{mime_type};base64,{data}")}),
+                ),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
 fn content_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
@@ -108,7 +131,7 @@ pub(super) fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
             AgentMessage::ToolResult(result) => input.push(json!({
                 "type":"function_call_output",
                 "call_id":result.tool_call_id,
-                "output":content_text(&result.content),
+                "output":tool_output_value(&result.content),
             })),
             AgentMessage::System(_) | AgentMessage::Custom { .. } => {}
         }
@@ -393,8 +416,22 @@ struct RuntimeTool {
 }
 
 fn flatten_result(output: String, is_error: bool, details: Option<Value>) -> AgentToolResult {
+    flatten_result_with_images(output, Vec::new(), is_error, details)
+}
+
+fn flatten_result_with_images(
+    output: String,
+    images: Vec<crate::tools::ToolImage>,
+    is_error: bool,
+    details: Option<Value>,
+) -> AgentToolResult {
+    let mut content = vec![ContentBlock::text(output)];
+    content.extend(images.into_iter().map(|image| ContentBlock::Image {
+        data: image.data,
+        mime_type: image.mime_type,
+    }));
     AgentToolResult {
-        content: vec![ContentBlock::text(output)],
+        content,
         details: details.unwrap_or(Value::Null),
         is_error,
         ..AgentToolResult::default()
@@ -530,8 +567,9 @@ impl ToolRuntime {
             )
             .await
             .map(|result| {
-                flatten_result(
+                flatten_result_with_images(
                     result.content,
+                    result.images,
                     result.is_error,
                     result.details.or(result.structured_content),
                 )

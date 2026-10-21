@@ -14,6 +14,26 @@ use thiserror::Error;
 use tokio::sync::OnceCell;
 
 mod anthropic;
+
+/// A tool output as plain text: strings pass through; image-bearing outputs keep their text parts
+/// and note each omitted image (providers without tool-result image support).
+fn output_text(item: &Value) -> String {
+    match &item["output"] {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| match part["type"].as_str() {
+                Some("input_image") => {
+                    "[image omitted: this provider does not accept images in tool results]"
+                        .to_owned()
+                }
+                _ => part["text"].as_str().unwrap_or_default().to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    }
+}
 mod bedrock;
 mod completions;
 mod google;

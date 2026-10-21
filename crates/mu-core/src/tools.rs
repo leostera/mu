@@ -33,8 +33,16 @@ pub enum ToolError {
     Command(String),
 }
 
+/// A base64 image attached to a tool result (Pi's `ImageContent`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolImage {
+    pub mime_type: String,
+    pub data: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolResult {
+    pub images: Vec<ToolImage>,
     /// Plain model-facing text until the agent's content-block bridge is complete.
     pub content: String,
     pub details: Option<Value>,
@@ -45,6 +53,7 @@ pub struct ToolResult {
 impl ToolResult {
     fn text(content: impl Into<String>) -> Self {
         Self {
+            images: Vec::new(),
             content: content.into(),
             details: None,
             structured_content: None,
@@ -222,10 +231,35 @@ fn read_file_io_error(path: &Path, error: std::io::Error) -> ToolError {
     ToolError::Command(format!("{code}: {message}, access '{}'", path.display()))
 }
 
+/// Image type by file magic (Pi's `detectSupportedImageMimeTypeFromFile`, minus BMP conversion).
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 fn read_file(cwd: &Path, args: &Value) -> Result<ToolResult, ToolError> {
     let requested_path = string_arg(args, "path")?;
     let path = resolve_read_path(cwd, args)?;
     let bytes = std::fs::read(&path).map_err(|error| read_file_io_error(&path, error))?;
+    if let Some(mime_type) = detect_image_mime(&bytes) {
+        use base64::Engine;
+        return Ok(ToolResult {
+            images: vec![ToolImage {
+                mime_type: mime_type.to_owned(),
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }],
+            ..ToolResult::text(format!("Read image file [{mime_type}]"))
+        });
+    }
     // Node's Buffer.toString("utf-8") replaces malformed sequences instead of
     // rejecting the entire text file; mirror that decoding boundary here.
     let text = String::from_utf8_lossy(&bytes);
@@ -2192,6 +2226,7 @@ fn shell_result(output: Output, started_at: Instant, temp_file_prefix: &str) -> 
     let Some(exit_code) = exit_code else {
         content.push_str("\n\nCommand terminated without an exit code");
         return ToolResult {
+            images: Vec::new(),
             content,
             details: (!details.is_empty()).then_some(Value::Object(details)),
             structured_content: None,
@@ -2213,6 +2248,7 @@ fn shell_result(output: Output, started_at: Instant, temp_file_prefix: &str) -> 
         structured["full_output_path"] = Value::String(path);
     }
     ToolResult {
+        images: Vec::new(),
         content,
         details: (!details.is_empty()).then_some(Value::Object(details)),
         structured_content: Some(structured),
@@ -2341,6 +2377,30 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[test]
+    fn read_returns_image_files_as_attachments_by_magic_not_extension() {
+        let dir = std::env::temp_dir().join(format!("mu-read-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shot.txt"),
+            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1],
+        )
+        .unwrap();
+        let result = read_file(&dir, &json!({"path":"shot.txt"})).unwrap();
+        assert_eq!(result.content, "Read image file [image/png]");
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].mime_type, "image/png");
+        std::fs::write(dir.join("plain.png"), "just text").unwrap();
+        let plain = read_file(&dir, &json!({"path":"plain.png"})).unwrap();
+        assert!(plain.images.is_empty() && plain.content.contains("just text"));
+        assert_eq!(detect_image_mime(b"GIF89a.."), Some("image/gif"));
+        assert_eq!(
+            detect_image_mime(&[0xff, 0xd8, 0xff, 0xe0]),
+            Some("image/jpeg")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn find_relative_path_matches_node_for_absolute_results_outside_root() {
         assert_eq!(

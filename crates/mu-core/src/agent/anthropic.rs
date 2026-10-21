@@ -39,7 +39,7 @@ pub(super) fn messages(history: &[Value]) -> Vec<Value> {
             ),
             Some("function_call_output") => push(
                 "user",
-                json!({"type":"tool_result","tool_use_id":item["call_id"],"content":item["output"]}),
+                json!({"type":"tool_result","tool_use_id":item["call_id"],"content":tool_result_content(&item["output"])}),
             ),
             _ => {
                 let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
@@ -53,6 +53,27 @@ pub(super) fn messages(history: &[Value]) -> Vec<Value> {
     out.into_iter()
         .map(|(role, content)| json!({"role":role,"content":content}))
         .collect()
+}
+
+/// Anthropic tool-result content: text, or text and base64 image blocks.
+fn tool_result_content(output: &Value) -> Value {
+    let Some(parts) = output.as_array() else {
+        return output.clone();
+    };
+    Value::Array(
+        parts
+            .iter()
+            .filter_map(|part| match part["type"].as_str() {
+                Some("input_text") => Some(json!({"type":"text","text":part["text"]})),
+                Some("input_image") => {
+                    let url = part["image_url"].as_str()?;
+                    let (header, data) = url.strip_prefix("data:")?.split_once(";base64,")?;
+                    Some(json!({"type":"image","source":{"type":"base64","media_type":header,"data":data}}))
+                }
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// Responses-format tool definitions → Anthropic tools.
@@ -227,6 +248,26 @@ mod tests {
         assert_eq!(out[1]["content"][1]["input"]["path"], "a");
         assert_eq!(out[2]["role"], "user");
         assert_eq!(out[2]["content"][0]["tool_use_id"], "c1");
+    }
+
+    #[test]
+    fn image_tool_outputs_become_anthropic_image_blocks() {
+        let history = vec![
+            json!({"type":"function_call","call_id":"c","name":"read","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"c","output":[
+                {"type":"input_text","text":"Read image file [image/png]"},
+                {"type":"input_image","image_url":"data:image/png;base64,QUJD"}]}),
+        ];
+        let out = messages(&history);
+        let content = &out[1]["content"][0]["content"];
+        assert_eq!(
+            content[0],
+            json!({"type":"text","text":"Read image file [image/png]"})
+        );
+        assert_eq!(
+            content[1]["source"],
+            json!({"type":"base64","media_type":"image/png","data":"QUJD"})
+        );
     }
 
     #[test]

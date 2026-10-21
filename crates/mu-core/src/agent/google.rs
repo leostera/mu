@@ -45,7 +45,7 @@ pub(super) fn contents(history: &[Value]) -> Vec<Value> {
                 "user",
                 json!({"functionResponse":{
                     "name": names.get(item["call_id"].as_str().unwrap_or_default()).copied().unwrap_or("tool"),
-                    "response": {"output": item["output"]},
+                    "response": {"output": super::output_text(item)},
                 }}),
             ),
             _ => {

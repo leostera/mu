@@ -40,7 +40,7 @@ pub(super) fn messages(history: &[Value]) -> Vec<Value> {
                 "user",
                 json!({"toolResult":{
                     "toolUseId": item["call_id"],
-                    "content": [{"text": item["output"].as_str().unwrap_or_default()}],
+                    "content": [{"text": super::output_text(item)}],
                 }}),
             ),
             _ => {

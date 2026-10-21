@@ -35,7 +35,7 @@ pub(super) fn messages(system: &str, history: &[Value]) -> Vec<Value> {
                 }
             }
             Some("function_call_output") => out.push(
-                json!({"role":"tool","tool_call_id":item["call_id"],"content":item["output"]}),
+                json!({"role":"tool","tool_call_id":item["call_id"],"content":super::output_text(item)}),
             ),
             _ => {
                 let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
