@@ -1,5 +1,5 @@
 mod chrome;
-mod fuzzy;
+pub(crate) mod fuzzy;
 mod markdown;
 mod terminal;
 mod theme;

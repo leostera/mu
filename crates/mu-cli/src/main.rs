@@ -1,3 +1,4 @@
+mod list_models;
 mod tui;
 
 use std::{
@@ -74,6 +75,10 @@ struct Cli {
     /// Enable coding, read-only, or all tools; use names/patterns or ordered +name/-name modifiers.
     #[arg(short = 't', long, value_delimiter = ',')]
     tools: Option<Vec<String>>,
+
+    /// List models from models.json (optionally fuzzy-filtered) and exit.
+    #[arg(long, value_name = "SEARCH", num_args = 0..=1, default_missing_value = "")]
+    list_models: Option<String>,
 
     /// Disable tools by name or `*` pattern, after selection.
     #[arg(
@@ -159,6 +164,21 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if let Some(search) = &cli.list_models {
+        let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
+            .ok_or("HOME is not set")?;
+        let models = std::fs::read_to_string(agent_dir.join("models.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(serde_json::Value::Null);
+        println!(
+            "{}",
+            list_models::render(&models, Some(search.as_str()).filter(|s| !s.is_empty()))
+        );
+        return Ok(());
+    }
     if cli.mode == OutputMode::Rpc {
         return Err(format!("--mode {:?} is not implemented yet", cli.mode).into());
     }
