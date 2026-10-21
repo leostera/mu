@@ -340,3 +340,75 @@ mod cut_tests {
         assert_eq!(find_cut_point(&[], 0, 0, 10).first_kept_entry_index, 0);
     }
 }
+
+/// Compaction-aware context entries for a root-to-leaf `path` (Pi's `buildContextEntries`).
+///
+/// With a compaction on the path the result is: the newest compaction entry, the retained
+/// entries from its `firstKeptEntryId` up to it (system messages dropped), then everything
+/// after it. Without one the path is returned unchanged.
+pub fn build_context_entries(path: &[Value]) -> Vec<Value> {
+    let Some(index) = path.iter().rposition(is_compaction) else {
+        return path.to_vec();
+    };
+    let compaction = &path[index];
+    let first_kept = compaction.get("firstKeptEntryId").and_then(Value::as_str);
+    let mut entries = vec![compaction.clone()];
+    let mut found = false;
+    for entry in &path[..index] {
+        found |= first_kept.is_some() && entry.get("id").and_then(Value::as_str) == first_kept;
+        if found && role(entry) != Some("system") {
+            entries.push(entry.clone());
+        }
+    }
+    entries.extend(path[index + 1..].iter().cloned());
+    entries
+}
+
+#[cfg(test)]
+mod context_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn entry(id: &str, role: &str) -> Value {
+        json!({"type":"message","id":id,"message":{"role":role,"content":"x"}})
+    }
+
+    #[test]
+    fn compaction_keeps_entries_from_the_first_kept_id_and_everything_after() {
+        let path = vec![
+            entry("a", "user"),
+            entry("b", "assistant"),
+            entry("sys", "system"),
+            entry("c", "user"),
+            json!({"type":"compaction","id":"k","firstKeptEntryId":"c","summary":"s"}),
+            entry("d", "user"),
+        ];
+        let ids = build_context_entries(&path)
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["k", "c", "d"]);
+        assert_eq!(
+            build_context_entries(&path[..2]).len(),
+            2,
+            "no compaction: unchanged"
+        );
+    }
+
+    #[test]
+    fn system_messages_inside_the_retained_range_are_dropped_and_newest_compaction_wins() {
+        let path = vec![
+            json!({"type":"compaction","id":"old","firstKeptEntryId":"a","summary":"o"}),
+            entry("a", "user"),
+            entry("sys", "system"),
+            entry("b", "assistant"),
+            json!({"type":"compaction","id":"new","firstKeptEntryId":"a","summary":"n"}),
+        ];
+        let ids = build_context_entries(&path)
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["new", "a", "b"]);
+    }
+}
