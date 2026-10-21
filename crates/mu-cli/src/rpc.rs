@@ -107,6 +107,17 @@ pub async fn handle(agent: &mut MuAgent, command: &Value) -> Value {
                 .map(|(id, text)| json!({"entryId": id, "text": text}))
                 .collect::<Vec<_>>(),
         }))),
+        "fork" => match command["entryId"].as_str() {
+            None => Err("fork requires `entryId`".into()),
+            Some(entry_id) => agent
+                .fork_before_user_message(entry_id)
+                .map(|text| Some(json!({"text": text, "cancelled": false})))
+                .map_err(|error| error.to_string()),
+        },
+        "clone" => agent
+            .clone_session()
+            .map(|()| Some(json!({"cancelled": false})))
+            .map_err(|error| error.to_string()),
         "get_session_stats" => Ok(Some(json!({"summary": agent.session_summary()}))),
         "get_last_assistant_text" => Ok(Some(json!({"text": agent.last_assistant_text()}))),
         other => Err(format!("Unknown command: {other}")),
@@ -210,6 +221,15 @@ mod tests {
             .clone();
         assert_eq!(last["text"], "hello");
         assert!(last["entryId"].as_str().is_some());
+        let entry = last["entryId"].as_str().unwrap().to_owned();
+        let forked = handle(&mut agent, &json!({"type":"fork","entryId":entry})).await;
+        assert_eq!(forked["data"]["text"], "hello");
+        assert!(
+            agent.user_messages().is_empty(),
+            "history before the message is empty"
+        );
+        let bad_fork = handle(&mut agent, &json!({"type":"fork","entryId":"nope"})).await;
+        assert_eq!(bad_fork["success"], false);
         let nothing = handle(&mut agent, &json!({"type":"compact"})).await;
         assert_eq!(nothing["error"], "Nothing to compact");
         let missing = handle(&mut agent, &json!({"type":"prompt"})).await;
