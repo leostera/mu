@@ -296,7 +296,11 @@ impl McpRegistry {
                 LIST_RESOURCES_TOOL | LIST_TEMPLATES_TOOL | READ_RESOURCE_TOOL
             )
         {
-            return Some(self.call_resource_tool(name, arguments).await);
+            let mut result = self.call_resource_tool(name, arguments).await;
+            if let Ok(outcome) = &mut result {
+                outcome.content = limit_mcp_text(&outcome.content, save_to_temp_file);
+            }
+            return Some(result);
         }
         let tool = self.tools.get(name)?;
         let mut result = tool
