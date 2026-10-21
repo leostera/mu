@@ -851,13 +851,7 @@ fn allocate_columns(
             let total_weight: usize = weights.iter().sum();
             let growth = weights
                 .iter()
-                .map(|w| {
-                    if total_weight > 0 {
-                        w * remaining / total_weight
-                    } else {
-                        0
-                    }
-                })
+                .map(|w| (w * remaining).checked_div(total_weight).unwrap_or(0))
                 .collect::<Vec<_>>();
             for (min, grow) in min_columns.iter_mut().zip(&growth) {
                 *min += grow;
@@ -892,11 +886,7 @@ fn allocate_columns(
         .zip(natural)
         .map(|(min, nat)| {
             let delta = nat.saturating_sub(*min);
-            min + if potential > 0 {
-                delta * extra / potential
-            } else {
-                0
-            }
+            min + (delta * extra).checked_div(potential).unwrap_or(0)
         })
         .collect::<Vec<_>>();
     let mut remaining = available.saturating_sub(widths.iter().sum::<usize>());
