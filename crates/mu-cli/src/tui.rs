@@ -2041,6 +2041,9 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "share" | "bug" => app.show_status(format!(
+            "/{command} is not supported in Mu: it would upload session data to an external service."
+        )),
         "tree" => {
             let status = match agent.try_lock() {
                 Err(_) => "Mu is busy.".to_owned(),
@@ -2800,6 +2803,23 @@ mod tests {
         assert!(super::find_session(&sessions, "nope").is_none());
         assert!(super::session_list_text(&sessions).contains("abc123  (unnamed)"));
         assert!(super::session_list_text(&[]).starts_with("No sessions"));
+    }
+
+    #[tokio::test]
+    async fn share_and_bug_explain_that_uploads_are_unsupported() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().expect("demo agent")));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        for command in ["/share", "/bug broken"] {
+            app.input = command.chars().collect();
+            execute_command(&mut app, &agent);
+            assert!(
+                app.statuses
+                    .last()
+                    .unwrap()
+                    .1
+                    .contains("not supported in Mu")
+            );
+        }
     }
 
     #[test]
