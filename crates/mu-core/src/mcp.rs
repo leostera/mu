@@ -882,6 +882,33 @@ pub(crate) fn set_project_trust_override(decision: Option<bool>) {
     TRUST_OVERRIDE.store(value, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Persist a trust decision for `cwd` in `trust.json` (keyed by canonical path, like Pi).
+pub(crate) fn save_project_trust(
+    agent_dir: &Path,
+    cwd: &Path,
+    trusted: bool,
+) -> Result<(), String> {
+    let path = agent_dir.join("trust.json");
+    let mut trust = match std::fs::read_to_string(&path) {
+        Ok(source) => {
+            serde_json::from_str::<Value>(source.strip_prefix('\u{feff}').unwrap_or(&source))
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .ok_or_else(|| format!("{}: expected a JSON object", path.display()))?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let key = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
+    trust.insert(key.to_string_lossy().into_owned(), Value::Bool(trusted));
+    std::fs::create_dir_all(agent_dir).map_err(|error| error.to_string())?;
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&Value::Object(trust)).unwrap_or_default(),
+    )
+    .map_err(|error| format!("{}: {error}", path.display()))
+}
+
 fn project_is_trusted(agent_dir: &Path, cwd: &Path) -> Result<bool, String> {
     match TRUST_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
         1 => return Ok(true),
@@ -1442,6 +1469,19 @@ mod tests {
             "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n";
         let response = parse_http_response(body, "text/event-stream", 7, "tools/list").unwrap();
         assert_eq!(response["ok"], true);
+    }
+
+    #[test]
+    fn saved_trust_decisions_round_trip_through_trust_json() {
+        let dir = std::env::temp_dir().join(format!("mu-savetrust-{}", uuid::Uuid::new_v4()));
+        let project = dir.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        assert_eq!(project_is_trusted(&dir, &project), Ok(false));
+        save_project_trust(&dir, &project, true).unwrap();
+        assert_eq!(project_is_trusted(&dir, &project), Ok(true));
+        save_project_trust(&dir, &project, false).unwrap();
+        assert_eq!(project_is_trusted(&dir, &project), Ok(false));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

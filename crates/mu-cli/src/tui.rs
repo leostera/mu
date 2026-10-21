@@ -2040,6 +2040,25 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "trust" => {
+            let decision = match argument {
+                "" | "yes" | "on" | "true" => Some(true),
+                "no" | "off" | "false" => Some(false),
+                _ => None,
+            };
+            let status = match (decision, agent.try_lock()) {
+                (None, _) => "Usage: /trust [yes|no]".to_owned(),
+                (_, Err(_)) => "Mu is busy.".to_owned(),
+                (Some(trusted), Ok(agent)) => match agent.set_project_trust(trusted) {
+                    Ok(()) => format!(
+                        "Project {}; applies to the next session",
+                        if trusted { "trusted" } else { "marked untrusted" }
+                    ),
+                    Err(error) => format!("Could not save trust: {error}"),
+                },
+            };
+            app.show_status(status);
+        }
         "reload" => {
             let status = match agent.try_lock() {
                 Ok(mut agent) => agent.reload_resources(),

@@ -3501,6 +3501,12 @@ impl MuAgent {
         stats
     }
 
+    /// Save a project-trust decision for the working directory (`/trust`).
+    pub fn set_project_trust(&self, trusted: bool) -> Result<(), AgentError> {
+        crate::mcp::save_project_trust(&self.agent_dir, &self.cwd, trusted)
+            .map_err(AgentError::Configuration)
+    }
+
     /// Remove a provider's stored credential from `auth.json`; returns whether one existed.
     pub fn logout(&self, provider: &str) -> Result<bool, AgentError> {
         crate::auth::remove(&self.agent_dir.join("auth.json"), provider)
