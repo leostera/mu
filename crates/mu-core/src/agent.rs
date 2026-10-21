@@ -177,6 +177,8 @@ pub struct SessionOptions {
     pub api_key: Option<String>,
     /// `--approve` (`Some(true)`) / `--no-approve` (`Some(false)`): project trust for this run.
     pub project_trust: Option<bool>,
+    /// `--theme`: theme name for this run (overrides the `theme` setting).
+    pub theme: Option<String>,
 }
 
 /// Pi's thinking levels (`off` … `max`); Mu's default is `medium`.
@@ -235,6 +237,7 @@ struct PromptOptions {
     context: String,
     thinking: ThinkingSetting,
     api_key: Option<String>,
+    theme: Option<String>,
 }
 
 impl PromptOptions {
@@ -249,6 +252,7 @@ impl PromptOptions {
             context: String::new(),
             thinking: options.thinking,
             api_key: options.api_key.clone().filter(|key| !key.is_empty()),
+            theme: options.theme.clone(),
         }
     }
 
@@ -2474,6 +2478,7 @@ fn resolve_session_options(
         no_prompt_templates: _,
         api_key: _,
         project_trust: _,
+        theme: _,
     } = options;
     let name = normalize_session_name(name)?;
     if let Some(source_path) = fork_from {
@@ -2876,6 +2881,7 @@ impl Prepared {
             templates: self.templates,
             thinking: self.prompt.thinking,
             no_mcp: false,
+            theme_override: self.prompt.theme,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup,
             active_mcp_tools,
@@ -2905,6 +2911,7 @@ pub struct MuAgent {
     excluded_tools: Vec<String>,
     thinking: ThinkingSetting,
     no_mcp: bool,
+    theme_override: Option<String>,
     mcp: crate::mcp::McpRegistry,
     mcp_startup: Option<Arc<OnceCell<crate::mcp::McpRegistry>>>,
     active_mcp_tools: HashSet<String>,
@@ -3033,6 +3040,7 @@ impl MuAgent {
             templates: Vec::new(),
             thinking: ThinkingSetting::default(),
             no_mcp: false,
+            theme_override: None,
             mcp: crate::mcp::McpRegistry::default(),
             mcp_startup: None,
             active_mcp_tools,
@@ -3432,6 +3440,9 @@ impl MuAgent {
 
     /// The `theme` setting (project settings override agent settings), if any.
     pub fn theme_name(&self) -> Option<String> {
+        if let Some(name) = &self.theme_override {
+            return Some(name.clone());
+        }
         configured_setting(&self.agent_dir, &self.cwd, "theme", |value| {
             value.as_str().map(str::to_owned)
         })

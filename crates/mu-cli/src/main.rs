@@ -104,6 +104,10 @@ struct Cli {
     #[arg(long, conflicts_with = "approve")]
     no_approve: bool,
 
+    /// Theme name for this run (dark or light).
+    #[arg(long, value_name = "NAME")]
+    theme: Option<String>,
+
     /// Do not connect MCP servers.
     #[arg(long)]
     no_mcp: bool,
@@ -291,6 +295,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         provider: cli.provider,
         no_mcp: cli.no_mcp,
         api_key: cli.api_key,
+        theme: cli.theme,
         project_trust: match (cli.approve, cli.no_approve) {
             (true, _) => Some(true),
             (_, true) => Some(false),
