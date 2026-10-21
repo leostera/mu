@@ -1765,6 +1765,19 @@ fn filtered_commands(app: &App) -> Vec<chrome::SlashCommand> {
     chrome::matching_commands(query.split_whitespace().next().unwrap_or_default())
 }
 
+/// Text of the newest assistant message that has any (what `/copy` copies).
+fn last_assistant_text(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| {
+            matches!(message.role, Role::Assistant)
+                && !message.error
+                && !message.text.trim().is_empty()
+        })
+        .map(|message| message.text.trim().to_owned())
+}
+
 /// Shortcuts Mu implements today (Pi's table lists more; unimplemented keys are omitted).
 const HOTKEYS: &str = "**Keyboard Shortcuts**
 
@@ -1887,6 +1900,16 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "copy" => {
+            let status = match last_assistant_text(&app.messages) {
+                None => "No agent messages to copy yet.".to_owned(),
+                Some(text) => match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+                    Ok(()) => "Copied last agent message to clipboard".to_owned(),
+                    Err(error) => format!("Could not copy to clipboard: {error}"),
+                },
+            };
+            app.show_status(status);
+        }
         "compact" => {
             let agent = Arc::clone(agent);
             let status = match agent.try_lock() {
@@ -2622,6 +2645,29 @@ mod tests {
         assert_eq!(app.queued_prompts.len(), 1);
         assert_eq!(app.messages[0].text, "add a test");
         assert!(matches!(app.messages[0].role, Role::User));
+    }
+
+    #[test]
+    fn copy_targets_the_newest_non_empty_assistant_message() {
+        let message = |role, text: &str, error| Message {
+            role,
+            text: text.into(),
+            thinking: String::new(),
+            tools: vec![],
+            error,
+        };
+        let messages = vec![
+            message(Role::Assistant, "first", false),
+            message(Role::User, "question", false),
+            message(Role::Assistant, "  second  ", false),
+            message(Role::Assistant, "", false),
+            message(Role::Assistant, "boom", true),
+        ];
+        assert_eq!(
+            super::last_assistant_text(&messages).as_deref(),
+            Some("second")
+        );
+        assert_eq!(super::last_assistant_text(&[]), None);
     }
 
     #[tokio::test]
