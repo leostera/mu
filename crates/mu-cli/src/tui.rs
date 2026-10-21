@@ -35,6 +35,7 @@ use tokio::{
     sync::{Mutex, mpsc},
     task::AbortHandle,
 };
+use tokio_util::sync::CancellationToken;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -1069,6 +1070,8 @@ struct App {
     model_selector_open: bool,
     /// Generic selector overlay (thinking level, fork point); Enter runs `command <value>`.
     picker: Option<Picker>,
+    /// `(mime type, base64)` images attached to the next prompt (`@file` images).
+    pending_images: Vec<(String, String)>,
     keybindings: keybindings::Keybindings,
     /// `quietStartup: true` hides the startup header.
     quiet_startup: bool,
@@ -1213,6 +1216,7 @@ impl App {
             command_selection: 0,
             model_selector_open: false,
             picker: None,
+            pending_images: Vec::new(),
             keybindings: keybindings::Keybindings::default(),
             quiet_startup: false,
             autocomplete_max_visible: chrome::DEFAULT_MAX_VISIBLE,
@@ -1365,6 +1369,7 @@ impl App {
         });
         self.loading = true;
         self.messages.scroll.scroll_to_end();
+        let images = std::mem::take(&mut self.pending_images);
         let task = tokio::spawn(async move {
             let mut on_event = |event| {
                 let _ = tx.send(UiEvent::Agent(event));
@@ -1372,7 +1377,7 @@ impl App {
             let result = agent
                 .lock()
                 .await
-                .submit(prompt, &mut on_event)
+                .submit_with_images(prompt, images, &mut on_event, &CancellationToken::new())
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx.send(UiEvent::Finished(result));
@@ -1565,21 +1570,30 @@ type StartupFuture = Pin<Box<dyn Future<Output = Result<MuAgent, AgentError>> + 
 pub async fn run_starting<F>(
     startup: F,
     initial_prompt: Option<String>,
+    initial_images: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     F: Future<Output = Result<MuAgent, AgentError>> + Send + 'static,
 {
-    run_loop(None, Some(Box::pin(startup)), initial_prompt).await
+    run_loop(
+        None,
+        Some(Box::pin(startup)),
+        initial_prompt,
+        initial_images,
+    )
+    .await
 }
 
 async fn run_loop(
     initial_agent: Option<MuAgent>,
     startup: Option<StartupFuture>,
     mut initial_prompt: Option<String>,
+    initial_images: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _terminal_session = terminal::TerminalSession::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut app = initial_agent.as_ref().map_or_else(App::starting, App::new);
+    app.pending_images = initial_images;
     let mut agent = initial_agent.map(|agent| Arc::new(Mutex::new(agent)));
     let (tx, mut rx) = mpsc::unbounded_channel();
 

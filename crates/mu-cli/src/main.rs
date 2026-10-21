@@ -441,12 +441,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         rest,
         images,
     } = initial_prompt_from(&cli.prompt, None)?;
-    if !images.is_empty() {
-        eprintln!(
-            "mu: @image attachments are only sent in print and JSON modes; ignoring {} image(s)",
-            images.len()
-        );
-    }
     // The TUI sends one opening prompt; later messages are kept by joining them onto it.
     let initial_prompt = (first.is_some() || !rest.is_empty())
         .then(|| first.into_iter().chain(rest).collect::<Vec<_>>().join(" "));
@@ -454,6 +448,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     tui::run_starting(
         async move { mu_core::MuAgent::connect_with_options(session_options).await },
         initial_prompt,
+        images,
     )
     .await
 }
