@@ -2128,7 +2128,7 @@ fn connect_custom_provider(
         .api_key
         .clone()
         .or_else(|| crate::auth::api_key(&config.agent_dir.join("auth.json"), &config.provider))
-        .or_else(|| std::env::var(key).ok())
+        .or_else(|| crate::config_value::resolve(key, &HashMap::new()))
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| key.to_owned());
     let model = configured_model_entry(&config.agent_dir, &config.provider, &config.model);

@@ -8,6 +8,7 @@ pub mod agent_loop;
 pub mod auth;
 mod codemode;
 pub mod compaction;
+pub mod config_value;
 mod context_files;
 mod mcp;
 pub mod path_utils;
