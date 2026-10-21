@@ -1,6 +1,7 @@
 mod chrome;
 mod complete;
 pub(crate) mod fuzzy;
+mod keybindings;
 mod markdown;
 mod terminal;
 mod theme;
@@ -1068,6 +1069,7 @@ struct App {
     model_selector_open: bool,
     /// Generic selector overlay (thinking level, fork point); Enter runs `command <value>`.
     picker: Option<Picker>,
+    keybindings: keybindings::Keybindings,
     /// `quietStartup: true` hides the startup header.
     quiet_startup: bool,
     /// `autocompleteMaxVisible`: rows shown in menus and pickers.
@@ -1140,6 +1142,7 @@ impl App {
             .map(|model| (model.clone(), agent.model_display_name(model)))
             .collect();
         self.cwd = agent.cwd().display().to_string();
+        self.keybindings = keybindings::Keybindings::load(agent.agent_dir());
         self.quiet_startup = agent.settings().get("quietStartup") == Some(serde_json::json!(true));
         self.autocomplete_max_visible = agent
             .settings()
@@ -1210,6 +1213,7 @@ impl App {
             command_selection: 0,
             model_selector_open: false,
             picker: None,
+            keybindings: keybindings::Keybindings::default(),
             quiet_startup: false,
             autocomplete_max_visible: chrome::DEFAULT_MAX_VISIBLE,
             last_escape: None,
@@ -1676,7 +1680,7 @@ fn handle_key(
     agent: Arc<Mutex<MuAgent>>,
     tx: mpsc::UnboundedSender<UiEvent>,
 ) {
-    if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if app.keybindings.matches("app.thinking.toggle", &key) {
         app.hide_thinking = !app.hide_thinking;
         return;
     }
@@ -1684,7 +1688,7 @@ fn handle_key(
         complete_word_before_cursor(app);
         return;
     }
-    if key.code == KeyCode::BackTab && !app.loading {
+    if app.keybindings.matches("app.thinking.cycle", &key) && !app.loading {
         // Shift+Tab cycles the thinking level (Pi's `app.thinking.cycle`).
         if let Ok(mut agent) = agent.try_lock() {
             let level = agent.thinking().next();
@@ -1693,20 +1697,17 @@ fn handle_key(
         }
         return;
     }
-    if key.code == KeyCode::Char('l')
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && !app.loading
-    {
+    if app.keybindings.matches("app.model.select", &key) && !app.loading {
         // Ctrl+L opens the model selector (Pi's `app.model.select`).
         app.model_selection = app.models.iter().position(|m| m == &app.model).unwrap_or(0);
         app.model_selector_open = true;
         return;
     }
-    if key.code == KeyCode::Char('x') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if app.keybindings.matches("app.message.copy", &key) {
         copy_last_message(app);
         return;
     }
-    if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if app.keybindings.matches("app.tools.expand", &key) {
         app.tools_expanded = !app.tools_expanded;
         return;
     }
@@ -1737,7 +1738,7 @@ fn handle_key(
         }
         return;
     }
-    if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::ALT) {
+    if app.keybindings.matches("app.message.dequeue", &key) {
         // Alt+Up (Pi's `app.message.dequeue`): pull queued messages back into the editor.
         if app.restore_queued_to_editor() > 0 {
             app.show_status("Restored queued messages to the editor".to_owned());
@@ -1777,11 +1778,9 @@ fn handle_key(
         handle_command_menu(key, app, &agent);
         return;
     }
-    if matches!(key.code, KeyCode::Char('p' | 'P')) && key.modifiers.contains(KeyModifiers::CONTROL)
-    {
-        let backward =
-            key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::Char('P');
-        cycle_model(app, &agent, backward);
+    let forward = app.keybindings.matches("app.model.cycleForward", &key);
+    if forward || app.keybindings.matches("app.model.cycleBackward", &key) {
+        cycle_model(app, &agent, !forward);
         return;
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
