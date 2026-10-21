@@ -1736,28 +1736,27 @@ fn handle_model_selector(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent
 }
 
 fn cycle_model(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
-    if app.models.len() < 2 {
-        return;
-    }
-    let next = (app.model_selection + 1) % app.models.len();
-    let Some(model) = app.models.get(next).cloned() else {
+    let Ok(mut agent) = agent.try_lock() else {
         return;
     };
-    let selected = agent
-        .try_lock()
-        .ok()
-        .and_then(|mut agent| agent.select_model(&model).ok())
-        .unwrap_or(false);
-    if selected {
-        app.model_selection = next;
-        let name = app
-            .model_names
-            .get(&model)
-            .cloned()
-            .unwrap_or_else(|| model.clone());
-        app.model = model;
-        app.show_status(format!("Switched to {name}"));
+    let scope = agent.cycle_models();
+    if scope.len() < 2 {
+        return;
     }
+    let position = scope.iter().position(|model| *model == app.model);
+    let next = position.map_or(0, |index| (index + 1) % scope.len());
+    let model = scope[next].clone();
+    if !agent.select_model(&model).unwrap_or(false) {
+        return;
+    }
+    app.model_selection = app.models.iter().position(|m| *m == model).unwrap_or(0);
+    let name = app
+        .model_names
+        .get(&model)
+        .cloned()
+        .unwrap_or_else(|| model.clone());
+    app.model = model;
+    app.show_status(format!("Switched to {name}"));
 }
 
 fn filtered_commands(app: &App) -> Vec<chrome::SlashCommand> {

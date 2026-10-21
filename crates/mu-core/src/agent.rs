@@ -812,6 +812,39 @@ fn config_for(demo: bool) -> Result<Config, AgentError> {
 }
 
 /// Apply `--provider` / `--model` (`provider/id` allowed) over the settings defaults.
+/// Resolve `enabledModels` patterns to model ids, in pattern order without duplicates.
+///
+/// A pattern matches a model's id or `provider/id` case-insensitively and may use `*`/`?` globs;
+/// an optional `:<thinking>` suffix is ignored. With no patterns, or none matching, every
+/// choice is returned.
+fn scope_models(patterns: &[String], choices: &[String], provider: &str) -> Vec<String> {
+    let mut scoped: Vec<String> = Vec::new();
+    for pattern in patterns {
+        let base = pattern
+            .rsplit_once(':')
+            .filter(|(_, level)| level.parse::<ThinkingSetting>().is_ok())
+            .map_or(pattern.as_str(), |(base, _)| base);
+        let Ok(glob) = globset::GlobBuilder::new(&base.to_lowercase()).build() else {
+            continue;
+        };
+        let matcher = glob.compile_matcher();
+        for choice in choices {
+            let id = choice.to_lowercase();
+            if (matcher.is_match(&id)
+                || matcher.is_match(format!("{}/{id}", provider.to_lowercase())))
+                && !scoped.contains(choice)
+            {
+                scoped.push(choice.clone());
+            }
+        }
+    }
+    if scoped.is_empty() {
+        choices.to_vec()
+    } else {
+        scoped
+    }
+}
+
 fn apply_model_override(
     config: &mut Config,
     provider: Option<&str>,
@@ -3313,6 +3346,21 @@ impl MuAgent {
         self.prompt_queue.clone()
     }
 
+    /// Models Ctrl+P cycles through: `enabledModels` patterns applied to the choices.
+    pub fn cycle_models(&self) -> Vec<String> {
+        let patterns = configured_setting(&self.agent_dir, &self.cwd, "enabledModels", |value| {
+            value.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+        scope_models(&patterns, &self.model_choices, &self.provider_id)
+    }
+
     pub fn model_choices(&self) -> &[String] {
         &self.model_choices
     }
@@ -5755,6 +5803,25 @@ mod tests {
         );
         assert!(summary.contains("Tokens: 7 input, 3 output"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enabled_models_scope_the_cycle_list() {
+        let choices = ["gpt-a", "gpt-b", "claude-x"].map(String::from).to_vec();
+        let pats = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::scope_models(&[], &choices, "p"), choices);
+        assert_eq!(
+            super::scope_models(&pats(&["claude-*"]), &choices, "p"),
+            ["claude-x"]
+        );
+        assert_eq!(
+            super::scope_models(&pats(&["P/GPT-B:high", "gpt-a"]), &choices, "p"),
+            ["gpt-b", "gpt-a"]
+        );
+        assert_eq!(
+            super::scope_models(&pats(&["nomatch"]), &choices, "p"),
+            choices
+        );
     }
 
     #[test]
