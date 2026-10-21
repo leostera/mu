@@ -119,9 +119,13 @@ struct Cli {
     #[arg(long, value_name = "MODE", value_parser = ["fullscreen", "regular"])]
     tui_mode: Option<String>,
 
-    /// Theme name for this run (dark or light).
-    #[arg(long, value_name = "NAME")]
+    /// Theme for this run: dark, light, a theme file path, or a name in `<agent dir>/themes`.
+    #[arg(long, alias = "use-theme", value_name = "NAME")]
     theme: Option<String>,
+
+    /// Only allow bundled themes (no theme files or theme directories).
+    #[arg(long)]
+    no_themes: bool,
 
     /// Do not connect MCP servers.
     #[arg(long)]
@@ -304,6 +308,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     if let Some(name) = &cli.theme {
+        if cli.no_themes && tui::Theme::named(name).is_none() {
+            return Err(format!(
+                "--no-themes allows only bundled themes (dark, light), not \"{name}\""
+            )
+            .into());
+        }
         let agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
