@@ -56,9 +56,21 @@ fn demo_backend_drives_real_tui_without_gateway_or_credentials()
             .screen()
             .alternate_screen()
     );
-    writer.write_all(&[0x10])?;
-    writer.flush()?;
-    wait_for(&screen, |text| text.contains("mu-demo-alt"))?;
+    // Keys sent while the agent is still connecting are ignored, so resend Ctrl+P until it lands.
+    let mut cycled = false;
+    for _ in 0..5 {
+        writer.write_all(&[0x10])?;
+        writer.flush()?;
+        if wait_for_within(&screen, Duration::from_secs(2), |text| {
+            text.contains("mu-demo-alt")
+        })
+        .is_ok()
+        {
+            cycled = true;
+            break;
+        }
+    }
+    assert!(cycled, "Ctrl+P never switched to mu-demo-alt");
     writer.write_all(&[0x10])?;
     writer.flush()?;
     wait_for(&screen, |text| !text.contains("mu-demo-alt"))?;
@@ -177,7 +189,15 @@ fn wait_for(
     screen: &Arc<Mutex<Parser>>,
     predicate: impl Fn(&str) -> bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    wait_for_within(screen, Duration::from_secs(5), predicate)
+}
+
+fn wait_for_within(
+    screen: &Arc<Mutex<Parser>>,
+    timeout: Duration,
+    predicate: impl Fn(&str) -> bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + timeout;
     loop {
         let text = screen.lock().expect("screen mutex").screen().contents();
         if predicate(&text) {

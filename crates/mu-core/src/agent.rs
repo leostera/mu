@@ -3288,31 +3288,6 @@ pub struct CompactionOutcome {
 }
 
 /// Plain-text rendering of messages for the summarizer.
-fn conversation_text(entries: &[Value]) -> String {
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let message = entry.get("message")?.as_object()?;
-            let role = message.get("role")?.as_str()?;
-            let text = message_blocks(message)
-                .iter()
-                .filter_map(|block| match block.get("type").and_then(Value::as_str) {
-                    Some("text") => block.get("text")?.as_str().map(str::to_owned),
-                    Some("toolCall") => Some(format!(
-                        "[tool call {}: {}]",
-                        block.get("name")?.as_str()?,
-                        block.get("arguments")?
-                    )),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Some(format!("[{role}]: {text}"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 /// Token, cost, and context totals shown in Pi's footer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FooterStats {
@@ -4007,7 +3982,7 @@ impl MuAgent {
         let summary = if has_messages(prefix) {
             let history_text = if has_messages(summarized) {
                 self.summarize(
-                    &conversation_text(summarized),
+                    &crate::compaction::serialize_conversation(summarized),
                     previous_summary.as_deref(),
                     custom_instructions,
                 )
@@ -4020,14 +3995,14 @@ impl MuAgent {
             let prefix_text = self
                 .summarize_text(format!(
                     "# Conversation\n{}\n\n# Instructions\n{}",
-                    conversation_text(prefix),
+                    crate::compaction::serialize_conversation(prefix),
                     crate::compaction::TURN_PREFIX_SUMMARIZATION_PROMPT
                 ))
                 .await?;
             format!("{history_text}\n\n---\n\n**Turn Context (split turn):**\n\n{prefix_text}")
         } else {
             self.summarize(
-                &conversation_text(summarized),
+                &crate::compaction::serialize_conversation(summarized),
                 previous_summary.as_deref(),
                 custom_instructions,
             )

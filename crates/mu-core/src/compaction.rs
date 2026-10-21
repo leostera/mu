@@ -99,6 +99,102 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
+const TOOL_RESULT_MAX_CHARS: usize = 2000;
+
+fn truncate_for_summary(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_owned();
+    }
+    let kept = text.chars().take(max_chars).collect::<String>();
+    format!(
+        "{kept}\n\n[... {} more characters truncated]",
+        total - max_chars
+    )
+}
+
+fn text_of_blocks(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Pi's `serializeConversation`: `[User]`, `[Assistant]`, `[Assistant tool calls]` and
+/// `[Tool result]` (truncated to 2000 characters) paragraphs; thinking is omitted.
+pub fn serialize_conversation(entries: &[Value]) -> String {
+    let mut parts = Vec::new();
+    for message in entries.iter().filter_map(|entry| entry.get("message")) {
+        match message.get("role").and_then(Value::as_str) {
+            Some("user") => {
+                let text = text_of_blocks(message.get("content"));
+                if !text.is_empty() {
+                    parts.push(format!("[User]: {text}"));
+                }
+            }
+            Some("assistant") => {
+                let blocks = message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let calls = blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("toolCall"))
+                    .map(|block| {
+                        let args = block
+                            .get("arguments")
+                            .and_then(Value::as_object)
+                            .map(|args| {
+                                args.iter()
+                                    .map(|(k, v)| format!("{k}={v}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "{}({args})",
+                            block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if blocks
+                    .iter()
+                    .any(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                {
+                    parts.push(format!(
+                        "[Assistant]: {}",
+                        text_of_blocks(message.get("content"))
+                    ));
+                }
+                if !calls.is_empty() {
+                    parts.push(format!("[Assistant tool calls]: {}", calls.join("; ")));
+                }
+            }
+            Some("toolResult") => {
+                let text = text_of_blocks(message.get("content"));
+                if !text.is_empty() {
+                    parts.push(format!(
+                        "[Tool result]: {}",
+                        truncate_for_summary(&text, TOOL_RESULT_MAX_CHARS)
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    parts.join("\n\n")
+}
+
 /// File paths touched by `read`, `write` and `edit` tool calls (Pi's `FileOperations`).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FileOperations {
@@ -445,6 +541,35 @@ mod tests {
         let mut none = FileOperations::default();
         none.add_previous_summary("no lists here");
         assert_eq!(none.format(), "");
+    }
+
+    #[test]
+    fn conversation_serialization_matches_pis_format() {
+        let entries = vec![
+            json!({"message":{"role":"user","content":[{"type":"text","text":"fix it"}]}}),
+            json!({"message":{"role":"assistant","content":[
+                {"type":"thinking","thinking":"hidden"},
+                {"type":"text","text":"looking"},
+                {"type":"toolCall","id":"1","name":"read","arguments":{"path":"a.rs","limit":5}}]}}),
+            json!({"message":{"role":"toolResult","content":[{"type":"text","text":"x".repeat(2005)}]}}),
+            json!({"message":{"role":"toolResult","content":[]}}),
+        ];
+        let text = serialize_conversation(&entries);
+        let parts = text.split("\n\n").collect::<Vec<_>>();
+        assert_eq!(parts[0], "[User]: fix it");
+        assert_eq!(parts[1], "[Assistant]: looking");
+        assert_eq!(
+            parts[2],
+            "[Assistant tool calls]: read(path=\"a.rs\", limit=5)"
+        );
+        assert!(parts[3].starts_with("[Tool result]: xxx"));
+        assert!(text.ends_with("[... 5 more characters truncated]"));
+        assert!(!text.contains("hidden"));
+        assert_eq!(
+            parts.len(),
+            5,
+            "the truncation note is its own paragraph: {parts:?}"
+        );
     }
 
     #[test]
