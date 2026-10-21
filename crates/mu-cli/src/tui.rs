@@ -2138,6 +2138,16 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
             };
             app.show_status(status);
         }
+        "scoped-models" => {
+            let status = match agent.try_lock() {
+                Err(_) => "Mu is busy.".to_owned(),
+                Ok(agent) => format!(
+                    "Ctrl+P cycles: {}\nScope it with the enabledModels setting or --models.",
+                    agent.cycle_models().join(", ")
+                ),
+            };
+            app.show_status(status);
+        }
         "reload" => {
             let status = match agent.try_lock() {
                 Ok(mut agent) => agent.reload_resources(),
