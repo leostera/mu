@@ -34,7 +34,7 @@ Extensions are not just scripts. Pi extensions import packages and register comm
 3. Explicit capability/permission policy. Upstream extensions run with process permissions, so isolation must not silently break trusted extensions or imply a sandbox that does not exist.
 4. Contract tests that run existing upstream extensions against the Rust host, including failure, cancellation, reload, and shutdown cases.
 
-Deno Core supplies V8 and low-level runtime primitives, not the complete Deno CLI resolver/compiler/permissions stack. TypeScript transpilation, npm/package resolution, and Node-compatible APIs need intentional choices and tests.
+Deno Core supplies V8 and low-level runtime primitives, not the complete Deno CLI resolver/compiler/permissions stack. `mu-runtime-deno` uses `deno_ast` to transpile script-shaped `.ts`, `.mts`, and `.cts` sources before evaluation; this does not type-check source or support TSX, module entrypoints, imports, npm/package resolution, or Node-compatible APIs. The remaining loader/compiler/runtime behavior needs intentional choices and compatibility tests.
 
 ## Testing approach
 

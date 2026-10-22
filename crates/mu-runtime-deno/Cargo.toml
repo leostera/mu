@@ -7,4 +7,5 @@ rust-version.workspace = true
 
 [dependencies]
 deno_core = "0.412.0"
+deno_ast = { version = "0.53.3", features = ["transpiling"] }
 thiserror.workspace = true
