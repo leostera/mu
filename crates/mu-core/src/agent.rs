@@ -2405,6 +2405,23 @@ fn connect_custom_provider(
     ) {
         (Some(base), _) => base.to_owned(),
         (None, Some("google-vertex")) => vertex_base_url(entry)?,
+        // A GitHub Copilot login names its API host inside the stored token.
+        (None, _) if config.provider == "github-copilot" => {
+            let (access, _, _) =
+                crate::auth::oauth_access(&config.agent_dir.join("auth.json"), &config.provider)
+                    .ok_or_else(unsupported)?;
+            let enterprise = crate::auth::load(&config.agent_dir.join("auth.json"))
+                .ok()
+                .and_then(|mut all| all.remove(&config.provider))
+                .and_then(|credential| match credential {
+                    crate::auth::Credential::Oauth { extra, .. } => extra
+                        .get("enterpriseUrl")
+                        .and_then(Value::as_str)
+                        .and_then(crate::oauth::github_copilot::normalize_domain),
+                    crate::auth::Credential::ApiKey { .. } => None,
+                });
+            crate::oauth::github_copilot::base_url(&access, enterprise.as_deref())
+        }
         (None, _) => return Err(unsupported()),
     };
     let base = base.as_str();
@@ -2434,12 +2451,12 @@ fn connect_custom_provider(
         endpoint.set_query(Some("alt=sse"));
     }
     // Bedrock may omit `apiKey` and sign with AWS credentials from the environment instead.
-    let key = match entry.get("apiKey").and_then(Value::as_str) {
-        Some(key) => key,
-        None if bedrock => "",
-        None if anthropic => "",
-        None => return Err(unsupported()),
-    };
+    // `apiKey` may be omitted when a stored login (OAuth or `auth.json`) supplies the token; a
+    // missing credential is reported below.
+    let key = entry
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let token = prompt
         .api_key
         .clone()
@@ -6871,6 +6888,53 @@ mod tests {
         assert!(request.contains("x-command: two"), "{request}");
         assert!(!request.contains("x-unset"), "{request}");
         assert!(super::provider_http_client(Some(&serde_json::json!({"bad name":"x"}))).is_err());
+    }
+
+    #[test]
+    fn github_copilot_base_url_comes_from_the_stored_token_when_models_json_has_none() {
+        let dir = std::env::temp_dir().join(format!("mu-copilot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"github-copilot":{"api":"openai-completions","models":[{"id":"gpt-x"}]}}}"#,
+        )
+        .unwrap();
+        let config = super::Config {
+            agent_dir: dir.clone(),
+            cwd: dir.clone(),
+            provider: "github-copilot".into(),
+            model: "gpt-x".into(),
+            model_choices: vec![],
+            hide_thinking_block: false,
+            retry: super::RetryPolicy::default(),
+            enabled_tools: vec![],
+        };
+        let prompt = super::PromptOptions::default();
+        assert!(
+            super::connect_custom_provider(&config, String::new(), &prompt).is_err(),
+            "not logged in"
+        );
+        crate::auth::set_credential(
+            &dir.join("auth.json"),
+            "github-copilot",
+            crate::auth::Credential::Oauth {
+                access: "tid=1;proxy-ep=proxy.business.githubcopilot.com".into(),
+                refresh: "gho".into(),
+                expires: f64::MAX,
+                extra: Default::default(),
+            },
+        )
+        .unwrap();
+        let provider = super::connect_custom_provider(&config, String::new(), &prompt).unwrap();
+        let super::ProviderTransport::Completions { endpoint, key, .. } = provider.transport else {
+            panic!("expected a completions transport");
+        };
+        assert_eq!(
+            endpoint.as_str(),
+            "https://api.business.githubcopilot.com/chat/completions"
+        );
+        assert_eq!(key, "tid=1;proxy-ep=proxy.business.githubcopilot.com");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
