@@ -134,6 +134,11 @@ pub fn enum_setting_options(key: &str) -> Option<&'static [&'static str]> {
 /// Parse and validate `text` for an enum or number setting.
 pub fn parse_setting_value(key: &str, text: &str) -> Result<Value, String> {
     let text = text.trim();
+    if key == "theme" {
+        return (!text.is_empty())
+            .then(|| json!(text))
+            .ok_or_else(|| "theme must not be empty".to_owned());
+    }
     if let Some((_, allowed)) = ENUM_SETTINGS.iter().find(|(k, _)| *k == key) {
         return allowed
             .contains(&text)
@@ -151,9 +156,8 @@ pub fn parse_setting_value(key: &str, text: &str) -> Result<Value, String> {
 
 /// Keys accepted by [`parse_setting_value`].
 pub fn text_setting_keys() -> Vec<&'static str> {
-    ENUM_SETTINGS
-        .iter()
-        .map(|(k, _)| *k)
+    std::iter::once("theme")
+        .chain(ENUM_SETTINGS.iter().map(|(k, _)| *k))
         .chain(NUMBER_SETTINGS.iter().map(|(k, _, _)| *k))
         .collect()
 }
@@ -437,6 +441,7 @@ mod tests {
 
     #[test]
     fn enum_choices_are_exposed_for_settings_ui() {
+        assert_eq!(enum_setting_options("theme"), None);
         assert_eq!(
             enum_setting_options("steeringMode"),
             Some(["all", "one-at-a-time"].as_slice())
@@ -446,6 +451,11 @@ mod tests {
 
     #[test]
     fn enum_and_number_settings_are_validated() {
+        assert_eq!(
+            parse_setting_value("theme", "custom/path.json").unwrap(),
+            json!("custom/path.json")
+        );
+        assert!(parse_setting_value("theme", " ").is_err());
         assert_eq!(
             parse_setting_value("doubleEscapeAction", " fork ").unwrap(),
             json!("fork")
