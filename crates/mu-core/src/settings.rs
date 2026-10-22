@@ -280,7 +280,15 @@ fn load_layer(scope: Scope, path: &Path, errors: &mut Vec<SettingsError>) -> Map
 }
 
 impl Settings {
+    /// Load layered settings only when the current project has an affirmative trust decision.
+    /// Invalid trust data fails closed, so untrusted project settings cannot affect execution.
+    pub fn load_for_project(agent_dir: &Path, cwd: &Path) -> Self {
+        let project_trusted = crate::mcp::project_is_trusted(agent_dir, cwd).unwrap_or(false);
+        Self::load(agent_dir, cwd, project_trusted)
+    }
+
     /// Load both layers. An untrusted project contributes nothing and cannot be written.
+    /// Prefer [`Self::load_for_project`] outside tests and trust-management code.
     pub fn load(agent_dir: &Path, cwd: &Path, project_trusted: bool) -> Self {
         let global_path = agent_dir.join("settings.json");
         let project_path = cwd.join(".pi/settings.json");

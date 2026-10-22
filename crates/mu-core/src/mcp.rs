@@ -1419,7 +1419,7 @@ pub(crate) fn save_project_trust(
     .map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn project_is_trusted(agent_dir: &Path, cwd: &Path) -> Result<bool, String> {
+pub(crate) fn project_is_trusted(agent_dir: &Path, cwd: &Path) -> Result<bool, String> {
     match TRUST_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
         1 => return Ok(true),
         2 => return Ok(false),

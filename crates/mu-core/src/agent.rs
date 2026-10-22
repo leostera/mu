@@ -792,7 +792,7 @@ fn configured_setting<T>(
     key: &str,
     parse: impl Fn(&Value) -> Option<T>,
 ) -> Option<T> {
-    let settings = crate::settings::Settings::load(agent_dir, cwd, true);
+    let settings = crate::settings::Settings::load_for_project(agent_dir, cwd);
     settings.merged().get(key).and_then(parse)
 }
 
@@ -3049,7 +3049,7 @@ fn configured_session_dir(
 }
 
 fn session_directory(agent_dir: &Path, cwd: &Path, override_dir: Option<&Path>) -> PathBuf {
-    let setting = crate::settings::Settings::load(agent_dir, cwd, true).get("sessionDir");
+    let setting = crate::settings::Settings::load_for_project(agent_dir, cwd).get("sessionDir");
     let env = std::env::var("PI_CODING_AGENT_SESSION_DIR").ok();
     if let Some(directory) = configured_session_dir(
         override_dir,
@@ -4111,7 +4111,7 @@ impl MuAgent {
 
     /// Effective layered settings, read fresh from disk.
     pub fn settings(&self) -> crate::settings::Settings {
-        crate::settings::Settings::load(&self.agent_dir, &self.cwd, true)
+        crate::settings::Settings::load_for_project(&self.agent_dir, &self.cwd)
     }
 
     /// Flip a boolean setting in the global `settings.json`; returns the new value.
@@ -5023,6 +5023,7 @@ mod tests {
         let project_dir = root.join("project/.pi");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(&project_dir).unwrap();
+        crate::mcp::set_project_trust_override(None);
         std::fs::write(
             agent_dir.join("settings.json"),
             r#"{"shellCommandPrefix":"global setup","enableSkillCommands":true}"#,
@@ -5033,6 +5034,7 @@ mod tests {
             r#"{"shellCommandPrefix":"project setup","shellPath":"bin/bash","enableSkillCommands":false}"#,
         )
         .unwrap();
+        crate::mcp::save_project_trust(&agent_dir, &root.join("project"), true).unwrap();
         assert_eq!(
             super::shell_setting(&agent_dir, &root.join("project"), "shellCommandPrefix")
                 .as_deref(),
@@ -5051,6 +5053,53 @@ mod tests {
             &root
         ));
         std::fs::remove_dir_all(root).unwrap();
+        crate::mcp::set_project_trust_override(None);
+    }
+
+    #[test]
+    fn project_settings_are_ignored_until_the_project_is_trusted() {
+        let root = std::env::temp_dir().join(format!("mu-settings-trust-{}", uuid::Uuid::new_v4()));
+        let agent_dir = root.join("agent");
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".pi")).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"shellCommandPrefix":"global setup"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".pi/settings.json"),
+            r#"{"shellCommandPrefix":"project setup","autocompleteMaxVisible":11}"#,
+        )
+        .unwrap();
+        crate::mcp::set_project_trust_override(None);
+        crate::mcp::save_project_trust(&agent_dir, &cwd, false).unwrap();
+
+        assert_eq!(
+            super::shell_setting(&agent_dir, &cwd, "shellCommandPrefix").as_deref(),
+            Some("global setup")
+        );
+
+        crate::mcp::save_project_trust(&agent_dir, &cwd, true).unwrap();
+        assert_eq!(
+            super::shell_setting(&agent_dir, &cwd, "shellCommandPrefix").as_deref(),
+            Some("project setup")
+        );
+        assert_eq!(
+            crate::settings::Settings::load_for_project(&agent_dir, &cwd)
+                .get("autocompleteMaxVisible"),
+            Some(serde_json::json!(11))
+        );
+
+        std::fs::write(agent_dir.join("trust.json"), "not json").unwrap();
+        assert_eq!(
+            super::shell_setting(&agent_dir, &cwd, "shellCommandPrefix").as_deref(),
+            Some("global setup"),
+            "malformed trust data fails closed"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        crate::mcp::set_project_trust_override(None);
     }
 
     #[test]

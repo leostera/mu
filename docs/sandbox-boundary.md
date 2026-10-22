@@ -22,9 +22,10 @@ What a codemode script, an MCP server and a built-in tool can and cannot do in M
 - stdio servers are spawned as the user's own child processes with the configured command, args
   and `env`; HTTP servers receive the configured headers. Servers are fully trusted: they run with
   the user's permissions and nothing restricts their file or network access.
-- Project-level `.pi/mcp.json` is honoured only for a trusted project (`trust.json`,
-  `defaultProjectTrust`, `--approve` / `--no-approve`); untrusted projects fall back to the global
-  config and project overrides are limited to safe fields.
+- Project-level `.pi/mcp.json` and `.pi/settings.json` are honoured only for a trusted project
+  (`trust.json`, `defaultProjectTrust`, `--approve` / `--no-approve`); untrusted projects fall back
+  to global configuration. Malformed trust data fails closed for project settings. MCP project
+  overrides remain limited to safe fields; `/settings` currently writes only global settings.
 - Tool results are text, structured content, and images; large text is truncated in the middle
   and saved to a temp file. Resource tools expose only servers that advertised `resources`.
 

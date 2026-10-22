@@ -283,7 +283,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Ok(cwd) = std::env::current_dir() {
             // Unreadable settings files are reported once instead of being ignored silently.
-            let mut settings = mu_core::settings::Settings::load(&agent_dir, &cwd, true);
+            let mut settings = match (cli.approve, cli.no_approve) {
+                (true, _) => mu_core::settings::Settings::load(&agent_dir, &cwd, true),
+                (_, true) => mu_core::settings::Settings::load(&agent_dir, &cwd, false),
+                _ => mu_core::settings::Settings::load_for_project(&agent_dir, &cwd),
+            };
             let proxy = settings.get("httpProxy");
             for (name, value) in mu_core::settings::proxy_env_updates(
                 proxy.as_ref().and_then(|v| v.as_str()),
