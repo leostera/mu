@@ -717,14 +717,27 @@ impl McpHttpClient {
             .map_err(|error| format!("MCP HTTP {method} failed: {error}"))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(unauthorized_or_status_message(
-                method,
-                status,
-                response
-                    .headers()
-                    .get(reqwest::header::WWW_AUTHENTICATE)
-                    .and_then(|value| value.to_str().ok()),
-            ));
+            let challenge_header = response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let mut message =
+                unauthorized_or_status_message(method, status, challenge_header.as_deref());
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                let challenge =
+                    crate::mcp_oauth::parse_www_authenticate(challenge_header.as_deref());
+                if let Ok(found) = crate::mcp_oauth::discover_authorization_server(
+                    &self.client,
+                    &self.endpoint,
+                    &challenge,
+                )
+                .await
+                {
+                    message.push_str(&format!(" (authorization server: {})", found.issuer));
+                }
+            }
+            return Err(message);
         }
         if let Some(session_id) = response.headers().get("mcp-session-id") {
             self.session_id = Some(
