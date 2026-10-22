@@ -115,6 +115,13 @@ const NUMBER_SETTINGS: &[(&str, u64, u64)] = &[
     ("retry.maxRetries", 0, 100),
 ];
 
+/// Allowed choices for an enum-valued setting, when the key is an enum setting.
+pub fn enum_setting_options(key: &str) -> Option<&'static [&'static str]> {
+    ENUM_SETTINGS
+        .iter()
+        .find_map(|(candidate, choices)| (*candidate == key).then_some(*choices))
+}
+
 /// Parse and validate `text` for an enum or number setting.
 pub fn parse_setting_value(key: &str, text: &str) -> Result<Value, String> {
     let text = text.trim();
@@ -408,6 +415,15 @@ mod tests {
             Settings::load(&agent, &cwd, true).get("defaultTools"),
             Some(json!(["bash"]))
         );
+    }
+
+    #[test]
+    fn enum_choices_are_exposed_for_settings_ui() {
+        assert_eq!(
+            enum_setting_options("steeringMode"),
+            Some(["all", "one-at-a-time"].as_slice())
+        );
+        assert_eq!(enum_setting_options("retry.maxRetries"), None);
     }
 
     #[test]

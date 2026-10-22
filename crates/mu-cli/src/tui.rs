@@ -2108,24 +2108,50 @@ const TOGGLE_SETTINGS: &[(&str, &str)] = &[
     ("collapseChangelog", "Collapse changelog"),
 ];
 
+const ENUM_SETTINGS: &[(&str, &str)] = &[
+    ("doubleEscapeAction", "Double Escape action"),
+    ("steeringMode", "Steering mode"),
+    ("followUpMode", "Follow-up mode"),
+    ("defaultProjectTrust", "Default project trust"),
+    ("transport", "Transport"),
+    ("treeFilterMode", "Session tree filter"),
+    ("codemode.mode", "Codemode"),
+];
+
 fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
     let state = |key: &str| settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut items = TOGGLE_SETTINGS
+        .iter()
+        .map(|(key, label)| chrome::SelectItem {
+            label: (*label).to_owned(),
+            description: Some(if state(key) { "on" } else { "off" }.to_owned()),
+        })
+        .collect::<Vec<_>>();
+    let mut values = TOGGLE_SETTINGS
+        .iter()
+        .map(|(key, _)| (*key).to_owned())
+        .collect::<Vec<_>>();
+
+    for (key, label) in ENUM_SETTINGS {
+        let current = settings
+            .get(key)
+            .and_then(|value| value.as_str().map(str::to_owned));
+        for choice in mu_core::settings::enum_setting_options(key).unwrap_or_default() {
+            items.push(chrome::SelectItem {
+                label: format!("{label}: {choice}"),
+                description: (current.as_deref() == Some(*choice)).then(|| "current".to_owned()),
+            });
+            values.push(format!("{key} {choice}"));
+        }
+    }
+
     Picker {
         sessions: Vec::new(),
         named_only: false,
         query: String::new(),
         command: "settings",
-        items: TOGGLE_SETTINGS
-            .iter()
-            .map(|(key, label)| chrome::SelectItem {
-                label: (*label).to_owned(),
-                description: Some(if state(key) { "on" } else { "off" }.to_owned()),
-            })
-            .collect(),
-        values: TOGGLE_SETTINGS
-            .iter()
-            .map(|(key, _)| (*key).to_owned())
-            .collect(),
+        items,
+        values,
         selection: 0,
     }
 }
@@ -2646,7 +2672,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 Ok(agent) => {
                     let settings = agent.settings();
                     app.picker = Some(settings_picker(&settings));
-                    "Settings: Enter toggles the selected option.".to_owned()
+                    "Settings: Enter toggles booleans or applies the selected enum value.".to_owned()
                 }
             };
             app.show_status(status);
@@ -3704,6 +3730,16 @@ mod tests {
         assert_eq!(state("quietStartup"), "on");
         assert_eq!(state("compaction.enabled"), "on", "Pi default");
         assert_eq!(state("hideThinkingBlock"), "off");
+        let steering = picker
+            .values
+            .iter()
+            .position(|value| value == "steeringMode one-at-a-time")
+            .unwrap();
+        assert_eq!(
+            picker.items[steering].description.as_deref(),
+            Some("current")
+        );
+        assert!(picker.values.contains(&"steeringMode all".into()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
