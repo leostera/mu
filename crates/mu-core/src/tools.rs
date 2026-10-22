@@ -4008,6 +4008,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bash_children_inherit_the_agent_markers_when_set() {
+        let dir = std::env::temp_dir();
+        let env = HashMap::from([("AI_AGENT".to_owned(), "pi".to_owned())]);
+        let result = execute_with_environment(
+            &dir,
+            "bash",
+            &json!({"command":"printf %s \"$AI_AGENT\""}),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.content, "pi");
+    }
+
+    #[tokio::test]
     async fn bash_trailing_newline_is_not_counted_as_an_extra_line() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -249,6 +249,12 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     mu_core::timings::time("args parsed");
+    // Pi's `setupCli`: let child processes (bash tool, MCP servers) know an agent is running.
+    // SAFETY: first thing in `run`, before any task reads or writes the environment.
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT", "true");
+        std::env::set_var("AI_AGENT", "pi");
+    }
     if let Some(agent_dir) = std::env::var_os("PI_CODING_AGENT_DIR")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
