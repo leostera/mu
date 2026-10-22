@@ -3871,6 +3871,19 @@ impl MuAgent {
         }
     }
 
+    /// `/mcp reload`: drop the connected servers and connect again from the current config
+    /// (Pi's MCP `reload`). Previously loaded deferred tools are forgotten, as the tools may differ.
+    pub async fn reload_mcp(&mut self) -> String {
+        self.mcp_startup = None;
+        self.active_mcp_tools.clear();
+        self.mcp = if self.no_mcp {
+            crate::mcp::McpRegistry::default()
+        } else {
+            crate::mcp::McpRegistry::connect(&self.agent_dir, &self.cwd).await
+        };
+        self.mcp.status_text()
+    }
+
     pub fn prompt_queue(&self) -> AgentPromptQueue {
         self.prompt_queue.clone()
     }

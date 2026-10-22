@@ -2870,6 +2870,24 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 error: true,
             }),
         },
+        "mcp" if argument == "reload" => {
+            let (text, error) = match agent.try_lock() {
+                Ok(mut agent) => (
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(agent.reload_mcp())
+                    }),
+                    false,
+                ),
+                Err(_) => ("MCP cannot reload while Mu is busy.".to_owned(), true),
+            };
+            app.messages.push(Message {
+                role: Role::Assistant,
+                text: format!("MCP reloaded.\n{text}"),
+                thinking: String::new(),
+                tools: Vec::new(),
+                error,
+            });
+        }
         "mcp" => {
             let result = agent.try_lock().map(|agent| match argument {
                 "" | "status" => Ok(agent.mcp_status()),
@@ -2881,7 +2899,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                         Ok(format!("MCP tools:\n{}", tools.join("\n")))
                     }
                 }
-                _ => Err("Usage: /mcp [status|tools]".to_owned()),
+                _ => Err("Usage: /mcp [status|tools|reload]".to_owned()),
             });
             let (text, error) = match result {
                 Ok(Ok(text)) => (text, false),
@@ -2898,7 +2916,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         "help" => app.messages.push(Message {
             role: Role::Assistant,
-            text: "Commands: /help, /model, /mcp [status|tools], /new, /clear, /clone, /name, /session, /export, /import, /quit"
+            text: "Commands: /help, /model, /mcp [status|tools|reload], /new, /clear, /clone, /name, /session, /export, /import, /quit"
                 .into(),
             thinking: String::new(),
             tools: Vec::new(),
