@@ -2496,7 +2496,7 @@ fn connect_custom_provider(
             region,
         })
     };
-    let http = provider_http_client(entry.get("headers"))?;
+    let http = provider_http_client(entry.get("headers"), &config.provider)?;
     let model = configured_model_entry(&config.agent_dir, &config.provider, &config.model);
     let flag = |name: &str| {
         model
@@ -2559,8 +2559,26 @@ fn connect_custom_provider(
 
 /// An HTTP client sending the provider's `headers` from `models.json` on every request; values
 /// resolve like other config values (`$VAR`, `!command`) and unresolved ones are skipped.
-fn provider_http_client(headers: Option<&Value>) -> Result<Client, AgentError> {
+/// Pi's static `COPILOT_HEADERS` plus the `Openai-Intent` of its dynamic ones. `X-Initiator` and
+/// `Copilot-Vision-Request` depend on the request and are not sent.
+const COPILOT_HEADERS: &[(&str, &str)] = &[
+    ("user-agent", "GitHubCopilotChat/0.35.0"),
+    ("editor-version", "vscode/1.107.0"),
+    ("editor-plugin-version", "copilot-chat/0.35.0"),
+    ("copilot-integration-id", "vscode-chat"),
+    ("openai-intent", "conversation-edits"),
+];
+
+fn provider_http_client(headers: Option<&Value>, provider: &str) -> Result<Client, AgentError> {
     let mut defaults = header::HeaderMap::new();
+    if provider == "github-copilot" {
+        for (name, value) in COPILOT_HEADERS {
+            defaults.insert(
+                header::HeaderName::from_static(name),
+                header::HeaderValue::from_static(value),
+            );
+        }
+    }
     for (name, value) in headers.and_then(Value::as_object).into_iter().flatten() {
         let Some(resolved) = value
             .as_str()
@@ -6877,7 +6895,7 @@ mod tests {
             String::from_utf8_lossy(&buffer[..read]).to_lowercase()
         });
         let headers = serde_json::json!({"X-Static":"one","X-Command":"!echo two","X-Unset":"$MU_SURELY_UNSET_VAR"});
-        let client = super::provider_http_client(Some(&headers)).unwrap();
+        let client = super::provider_http_client(Some(&headers), "acme").unwrap();
         client
             .get(format!("http://127.0.0.1:{port}/"))
             .send()
@@ -6887,7 +6905,52 @@ mod tests {
         assert!(request.contains("x-static: one"), "{request}");
         assert!(request.contains("x-command: two"), "{request}");
         assert!(!request.contains("x-unset"), "{request}");
-        assert!(super::provider_http_client(Some(&serde_json::json!({"bad name":"x"}))).is_err());
+        assert!(
+            super::provider_http_client(Some(&serde_json::json!({"bad name":"x"})), "acme")
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn github_copilot_requests_carry_pis_static_headers_and_user_headers_win() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 4096];
+            let read = socket.read(&mut buffer).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&buffer[..read]).to_lowercase()
+        });
+        let user = serde_json::json!({"editor-version":"custom/1"});
+        let client = super::provider_http_client(Some(&user), "github-copilot").unwrap();
+        client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert!(
+            request.contains("user-agent: githubcopilotchat/0.35.0"),
+            "{request}"
+        );
+        assert!(
+            request.contains("copilot-integration-id: vscode-chat"),
+            "{request}"
+        );
+        assert!(
+            request.contains("openai-intent: conversation-edits"),
+            "{request}"
+        );
+        assert!(request.contains("editor-version: custom/1"), "{request}");
+        assert!(
+            !request.contains("vscode/1.107.0"),
+            "the user header replaced the default"
+        );
     }
 
     #[test]
