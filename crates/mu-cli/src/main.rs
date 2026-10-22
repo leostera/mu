@@ -181,7 +181,7 @@ struct Cli {
     no_context_files: bool,
 
     /// Do not make startup network requests (Pi's `--offline`; also `PI_OFFLINE=1`).
-    #[arg(long, env = "PI_OFFLINE")]
+    #[arg(long)]
     offline: bool,
 
     /// Do not load extensions (Mu has no extension runtime yet, so this is always the case).
@@ -247,13 +247,25 @@ async fn main() {
     }
 }
 
+fn is_truthy_env_flag(value: &str) -> bool {
+    matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+}
+
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     mu_core::timings::time("args parsed");
-    // Pi's `setupCli`: let child processes (bash tool, MCP servers) know an agent is running.
+    let offline = cli.offline
+        || std::env::var("PI_OFFLINE")
+            .ok()
+            .is_some_and(|value| is_truthy_env_flag(&value));
+    // Pi propagates offline mode to startup helpers and child processes.
     // SAFETY: first thing in `run`, before any task reads or writes the environment.
     unsafe {
         std::env::set_var("PI_CODING_AGENT", "true");
         std::env::set_var("AI_AGENT", "pi");
+        if offline {
+            std::env::set_var("PI_OFFLINE", "1");
+            std::env::set_var("PI_SKIP_VERSION_CHECK", "1");
+        }
     }
     if let Some(agent_dir) = std::env::var_os("PI_CODING_AGENT_DIR")
         .map(PathBuf::from)
@@ -626,8 +638,14 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn offline_flag_is_a_plain_switch() {
+    fn offline_flag_and_environment_match_pi_truthy_values() {
         assert!(Cli::try_parse_from(["mu", "--offline"]).unwrap().offline);
+        for value in ["1", "true", "TRUE", "yes"] {
+            assert!(super::is_truthy_env_flag(value), "{value:?}");
+        }
+        for value in ["", "0", "false", "no", " yes "] {
+            assert!(!super::is_truthy_env_flag(value), "{value:?}");
+        }
     }
 
     #[test]
