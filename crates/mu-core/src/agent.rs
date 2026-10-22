@@ -1504,6 +1504,10 @@ async fn refresh_expired_oauth(config: &Config) -> Result<(), AgentError> {
     let refreshed = match config.provider.as_str() {
         "anthropic" => crate::oauth::anthropic::refresh_token(&refresh).await,
         "xai" => crate::oauth::xai::refresh_token(&refresh).await,
+        "openai-codex" => {
+            crate::oauth::openai_codex::refresh_token(&refresh, crate::oauth::openai_codex::TOKEN_URL)
+                .await
+        }
         "github-copilot" => {
             let enterprise = crate::auth::load(&path)
                 .ok()

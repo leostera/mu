@@ -1577,6 +1577,174 @@ pub mod github_copilot {
     }
 }
 
+/// OpenAI Codex (ChatGPT Plus/Pro) browser login (Pi's `openai-codex.ts`, browser method): PKCE
+/// against `auth.openai.com` with a callback on port 1455. The device-code method is not ported.
+pub mod openai_codex {
+    use super::*;
+
+    const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+    const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+    pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+    pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+    pub const CALLBACK_PORT: u16 = 1455;
+    pub const CALLBACK_PATH: &str = "/auth/callback";
+    const SCOPE: &str = "openid profile email offline_access";
+    const JWT_CLAIM_PATH: &str = "https://api.openai.com/auth";
+
+    pub struct Login {
+        pub url: String,
+        pub state: String,
+        pkce: Pkce,
+    }
+
+    impl Login {
+        pub fn start(originator: &str) -> Self {
+            let pkce = Pkce::generate();
+            // 16 random bytes as hex, like Pi's `createState`.
+            let state = uuid::Uuid::new_v4().simple().to_string();
+            let url = authorize_url(
+                AUTHORIZE_URL,
+                &[
+                    ("response_type", "code"),
+                    ("client_id", CLIENT_ID),
+                    ("redirect_uri", REDIRECT_URI),
+                    ("scope", SCOPE),
+                    ("code_challenge", &pkce.challenge),
+                    ("code_challenge_method", "S256"),
+                    ("state", &state),
+                    ("id_token_add_organizations", "true"),
+                    ("codex_cli_simplified_flow", "true"),
+                    ("originator", originator),
+                ],
+            )
+            .expect("static authorize URL parses");
+            Self { url, state, pkce }
+        }
+
+        /// Finish with a pasted redirect URL or code; a mismatched state is rejected.
+        pub async fn finish_with_input(
+            &self,
+            input: &str,
+            token_url: &str,
+        ) -> Result<Credential, String> {
+            let parsed = parse_authorization_input(input);
+            if parsed
+                .state
+                .as_deref()
+                .is_some_and(|state| state != self.state)
+            {
+                return Err("State mismatch".into());
+            }
+            self.finish_with_code(&parsed.code.ok_or("Missing authorization code")?, token_url)
+                .await
+        }
+
+        pub async fn finish_with_code(
+            &self,
+            code: &str,
+            token_url: &str,
+        ) -> Result<Credential, String> {
+            let body = post_form(
+                token_url,
+                &[
+                    ("grant_type", "authorization_code"),
+                    ("client_id", CLIENT_ID),
+                    ("code", code),
+                    ("code_verifier", &self.pkce.verifier),
+                    ("redirect_uri", REDIRECT_URI),
+                ],
+                "exchange",
+            )
+            .await?;
+            credential_from_token(&body, "exchange", now_ms())
+        }
+    }
+
+    /// `chatgpt_account_id` from the access token's JWT payload.
+    pub fn account_id(access_token: &str) -> Option<String> {
+        let payload = access_token
+            .split('.')
+            .nth(1)
+            .filter(|_| access_token.split('.').count() == 3)?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload.trim_end_matches('='))
+            .ok()?;
+        let claims: Value = serde_json::from_slice(&bytes).ok()?;
+        claims[JWT_CLAIM_PATH]["chatgpt_account_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// Expiry has no early margin here, and the credential carries the ChatGPT `accountId`.
+    pub fn credential_from_token(
+        body: &Value,
+        operation: &str,
+        now_ms: f64,
+    ) -> Result<Credential, String> {
+        let (Some(access), Some(refresh), Some(expires_in)) = (
+            body.get("access_token")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty()),
+            body.get("refresh_token")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty()),
+            body.get("expires_in").and_then(Value::as_f64),
+        ) else {
+            return Err(format!(
+                "OpenAI Codex token {operation} response missing fields: {body}"
+            ));
+        };
+        let account = account_id(access).ok_or("Failed to extract accountId from token")?;
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("accountId".to_owned(), json!(account));
+        Ok(Credential::Oauth {
+            access: access.to_owned(),
+            refresh: refresh.to_owned(),
+            expires: now_ms + expires_in * 1000.0,
+            extra,
+        })
+    }
+
+    async fn post_form(
+        url: &str,
+        fields: &[(&str, &str)],
+        operation: &str,
+    ) -> Result<Value, String> {
+        let response = reqwest::Client::new()
+            .post(url)
+            .timeout(Duration::from_secs(30))
+            .form(fields)
+            .send()
+            .await
+            .map_err(|e| format!("OpenAI Codex token {operation} error: {e}"))?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "OpenAI Codex token {operation} failed ({}): {text}",
+                status.as_u16()
+            ));
+        }
+        serde_json::from_str(&text)
+            .map_err(|_| format!("OpenAI Codex token {operation} response missing fields: {text}"))
+    }
+
+    pub async fn refresh_token(refresh: &str, token_url: &str) -> Result<Credential, String> {
+        let body = post_form(
+            token_url,
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh),
+                ("client_id", CLIENT_ID),
+            ],
+            "refresh",
+        )
+        .await?;
+        credential_from_token(&body, "refresh", now_ms())
+    }
+}
+
 /// Whether a stored OAuth credential needs refreshing.
 pub fn is_expired(expires_ms: f64) -> bool {
     now_ms() >= expires_ms
@@ -1983,6 +2151,58 @@ mod tests {
         );
         assert_eq!(extra["enterpriseUrl"], "c.ghe.com");
         assert!(gh::credential_from_copilot_token("g", &json!({"token":"t"}), None).is_err());
+    }
+
+    #[test]
+    fn openai_codex_login_url_jwt_account_id_and_credentials() {
+        let login = openai_codex::Login::start("mu");
+        let url = url::Url::parse(&login.url).unwrap();
+        let q = |k: &str| {
+            url.query_pairs()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.into_owned())
+                .unwrap()
+        };
+        assert_eq!(q("client_id"), "app_EMoamEEZ73f0CkXaXp7hrann");
+        assert_eq!(
+            (q("state"), q("originator"), q("codex_cli_simplified_flow")),
+            (login.state.clone(), "mu".into(), "true".into())
+        );
+        assert_eq!(login.state.len(), 32);
+        let claims = json!({"https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}});
+        let jwt = format!(
+            "h.{}.s",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+        );
+        assert_eq!(openai_codex::account_id(&jwt).as_deref(), Some("acct-1"));
+        assert_eq!(openai_codex::account_id("not-a-jwt"), None);
+        assert_eq!(openai_codex::account_id("a.!!.c"), None);
+        let Credential::Oauth { expires, extra, .. } = openai_codex::credential_from_token(
+            &json!({"access_token": jwt, "refresh_token":"r","expires_in":60}),
+            "exchange",
+            1000.0,
+        )
+        .unwrap() else {
+            panic!("oauth")
+        };
+        assert_eq!(
+            (expires, extra["accountId"].as_str()),
+            (61_000.0, Some("acct-1"))
+        );
+        assert!(
+            openai_codex::credential_from_token(
+                &json!({"access_token":"x.y.z","refresh_token":"r","expires_in":1}),
+                "refresh",
+                0.0
+            )
+            .unwrap_err()
+            .contains("Failed to extract accountId")
+        );
+        assert!(
+            openai_codex::credential_from_token(&json!({}), "refresh", 0.0)
+                .unwrap_err()
+                .starts_with("OpenAI Codex token refresh response missing fields")
+        );
     }
 
     #[test]

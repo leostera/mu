@@ -103,6 +103,53 @@ pub fn check(provider: &str, json: bool, agent_dir: &Path) -> (String, i32) {
     (output, i32::from(status != "ready"))
 }
 
+async fn login_openai_codex(agent_dir: &Path) -> Result<String, AuthCommandError> {
+    use mu_core::oauth::{CallbackServer, openai_codex as codex};
+    let fail = AuthCommandError::Login;
+    let login = codex::Login::start("mu");
+    // Port 1455 is shared with the Codex CLI; when it is taken, only pasting the redirect works.
+    let server = CallbackServer::bind(
+        "127.0.0.1",
+        codex::CALLBACK_PORT,
+        codex::CALLBACK_PATH,
+        "localhost",
+    )
+    .await
+    .ok();
+    eprintln!("Open this URL to sign in to OpenAI:\n\n{}\n", login.url);
+    eprintln!(
+        "Then paste the code or redirect URL here{}:",
+        if server.is_some() {
+            " (or just finish in the browser)"
+        } else {
+            ""
+        }
+    );
+    let pasted = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map(|_| line)
+    });
+    let credential = match server {
+        Some(server) => tokio::select! {
+            code = server.wait_for_code("OpenAI", Some(&login.state), std::time::Duration::from_secs(300)) => {
+                login.finish_with_code(&code.map_err(fail)?, codex::TOKEN_URL).await
+            }
+            line = pasted => {
+                let line = line.map_err(|e| AuthCommandError::Login(e.to_string()))?.map_err(|e| AuthCommandError::Login(e.to_string()))?;
+                login.finish_with_input(&line, codex::TOKEN_URL).await
+            }
+        },
+        None => {
+            let line = pasted.await.map_err(|e| AuthCommandError::Login(e.to_string()))?.map_err(|e| AuthCommandError::Login(e.to_string()))?;
+            login.finish_with_input(&line, codex::TOKEN_URL).await
+        }
+    }
+    .map_err(AuthCommandError::Login)?;
+    mu_core::auth::set_credential(&agent_dir.join("auth.json"), "openai-codex", credential)
+        .map_err(|e| AuthCommandError::Login(e.to_string()))?;
+    Ok("Logged in to openai-codex; credential saved to auth.json".to_owned())
+}
+
 async fn login_github_copilot(agent_dir: &Path) -> Result<String, AuthCommandError> {
     use mu_core::oauth::github_copilot as gh;
     let fail = AuthCommandError::Login;
@@ -288,12 +335,15 @@ pub async fn login(
     if provider == "meta" {
         return login_meta(agent_dir).await;
     }
+    if provider == "openai-codex" {
+        return login_openai_codex(agent_dir).await;
+    }
     if provider == "github-copilot" {
         return login_github_copilot(agent_dir).await;
     }
     if provider != "anthropic" {
         return Err(AuthCommandError::Login(format!(
-            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\", \"kimi-coding\", \"openai-chatgpt\", \"meta\" and \"github-copilot\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
+            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\", \"kimi-coding\", \"openai-chatgpt\", \"meta\", \"github-copilot\" and \"openai-codex\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
         )));
     }
     let fail = AuthCommandError::Login;
