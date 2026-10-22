@@ -269,8 +269,8 @@ fn replay(fixture: &Value) -> Result<(), String> {
 /// Mu's own product text (logo, version, tagline) replaces Pi's in the recorded screens.
 fn brand(expected: &str) -> String {
     expected
-        .replace(" ▀▀█  v1.3.0", " ▛▜▌  v0.1.0")
-        .replace(" █▀ █ escape", " ▙▟ ▐ escape")
+        .replace(" ▀▀█  v1.3.0", " μ  v0.1.0")
+        .replace(" █▀ █ escape", " escape")
         .replace(
             "Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.",
             "Mu can explain its own features and look up its docs. Ask it how to use or extend Mu.",

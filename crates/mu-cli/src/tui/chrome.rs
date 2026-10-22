@@ -35,27 +35,10 @@ pub fn header_lines(version: &str, width: usize, theme: &Theme) -> Vec<Line<'sta
     };
     let mut lines = vec![Line::from("")];
     lines.extend(paragraph(vec![
-        Span::styled("▛▜▌ ", accent),
-        Span::styled(format!(" v{version}"), dim),
+        Span::styled("μ", accent),
+        Span::styled(format!("  v{version}"), dim),
     ]));
-    let mut hints = vec![Span::styled("▙▟ ▐", accent), Span::raw(" ")];
-    for (index, (key, description)) in [
-        ("escape", "interrupt"),
-        ("ctrl+c/ctrl+d", "clear/exit"),
-        ("/", "commands"),
-        ("!", "bash"),
-        ("ctrl+o", "more"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        if index > 0 {
-            hints.push(Span::styled(" · ", muted));
-        }
-        hints.push(Span::styled(key, dim));
-        hints.push(Span::styled(format!(" {description}"), muted));
-    }
-    lines.extend(paragraph(hints));
+    lines.extend(hint_lines(inner, dim, muted));
     lines.extend(paragraph(vec![Span::styled(
         "Press ctrl+o to show full startup help and loaded resources.",
         dim,
@@ -67,6 +50,38 @@ pub fn header_lines(version: &str, width: usize, theme: &Theme) -> Vec<Line<'sta
     )]));
     lines.push(Line::from(""));
     lines
+}
+
+/// Wrap the key hints, reserving the width of Pi's leading hint mark. Mu replaces that mark with
+/// its logo above, while the screen-oracle normalizes away Pi's mark before comparing text rows.
+fn hint_lines(width: usize, key_style: Style, description_style: Style) -> Vec<Line<'static>> {
+    let hints = [
+        ("escape", "interrupt"),
+        ("ctrl+c/ctrl+d", "clear/exit"),
+        ("/", "commands"),
+        ("!", "bash"),
+        ("ctrl+o", "more"),
+    ];
+    let spans = hints
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, (key, description))| {
+            let separator = (index > 0).then(|| Span::styled(" · ", description_style));
+            separator.into_iter().chain([
+                Span::styled(key, key_style),
+                Span::styled(format!(" {description}"), description_style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let wrap_width = width.saturating_sub(5).max(1);
+    wrap_spans(&spans, wrap_width)
+        .into_iter()
+        .map(|row| {
+            let mut line = vec![Span::raw(" ")];
+            line.extend(row);
+            Line::from(line)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +532,17 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn startup_hints_reserve_the_hidden_logo_width() {
+        let lines = hint_lines(78, Style::default(), Style::default());
+        assert_eq!(
+            text(&lines[0]),
+            " escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash ·"
+        );
+        assert_eq!(text(&lines[1]), " ctrl+o more");
+        assert!(lines.iter().all(|line| text(line).width() <= 79));
     }
 
     #[test]

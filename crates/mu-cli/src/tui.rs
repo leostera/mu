@@ -4524,7 +4524,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(
-            !screen.contains("▙▟ ▐"),
+            !screen.contains('μ'),
             "header should scroll with the document"
         );
         assert!(screen.contains("0.0%/0 (auto)"), "footer remains docked");
@@ -4540,7 +4540,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("▙▟ ▐"));
+        assert!(screen.contains('μ'));
         assert!(screen.contains("0.0%/0 (auto)"));
     }
 
