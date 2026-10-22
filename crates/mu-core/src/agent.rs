@@ -4070,6 +4070,14 @@ impl MuAgent {
         Ok(value)
     }
 
+    /// The `codemode.inlineBudget` setting (Pi default 3000 estimated tokens).
+    pub(crate) fn codemode_inline_budget(&self) -> Option<usize> {
+        self.settings()
+            .get("codemode.inlineBudget")
+            .and_then(|value| value.as_u64())
+            .map(|budget| budget as usize)
+    }
+
     pub fn agent_dir(&self) -> &Path {
         &self.agent_dir
     }
@@ -4668,6 +4676,7 @@ impl MuAgent {
             no_tools: self.no_tools,
             selection: self.tool_selection.clone(),
             excluded: self.excluded_tools.clone(),
+            codemode_inline_budget: self.codemode_inline_budget(),
         };
         plan.definitions(&self.mcp, active_mcp_tools)
             .iter()

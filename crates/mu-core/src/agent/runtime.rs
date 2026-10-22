@@ -422,6 +422,8 @@ pub(super) struct ToolPlan {
     pub(super) no_tools: bool,
     pub(super) selection: Option<ToolSelection>,
     pub(super) excluded: Vec<String>,
+    /// `codemode.inlineBudget`: estimated tokens of tool sections codemode may list.
+    pub(super) codemode_inline_budget: Option<usize>,
 }
 
 impl ToolPlan {
@@ -447,7 +449,10 @@ impl ToolPlan {
             .collect::<Vec<_>>();
         definitions.extend(mcp.definitions_for_model(active));
         if mcp.codemode_enabled() {
-            definitions.push(crate::codemode::definition(mcp));
+            definitions.push(crate::codemode::definition(
+                mcp,
+                self.codemode_inline_budget,
+            ));
         }
         if mcp.has_deferred_tools() {
             definitions.push(crate::tool_search::definition());
@@ -1032,6 +1037,7 @@ impl MuAgent {
             no_tools: self.no_tools,
             selection: self.tool_selection.clone(),
             excluded: self.excluded_tools.clone(),
+            codemode_inline_budget: self.codemode_inline_budget(),
         };
         let tools = build_tools(&plan(), &runtime);
         let hooks = Arc::new(RuntimeHooks {

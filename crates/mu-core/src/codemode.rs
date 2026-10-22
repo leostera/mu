@@ -8,9 +8,33 @@ use crate::{mcp::McpRegistry, tools};
 const TOOL_NAME: &str = "codemode";
 const CODEMODE_DESCRIPTION: &str = "Run JavaScript that calls other tools. Provide raw JavaScript as the code value; it runs as an async function body. Use `await tools.<name>({ ...args })` to call tools. `text(value)`, `console.log(...)`, and `return value` produce output. `searchTools(query)`, `describeTool(name)`, and `ALL_TOOLS` help discover tools.";
 
-pub(crate) fn definition(mcp: &McpRegistry) -> Value {
+/// Characters per token when estimating the cost of a tool section (Pi's `CHARS_PER_TOKEN`).
+const CHARS_PER_TOKEN: usize = 4;
+
+/// Pi's `selectCatalog` for one group: tools are listed cheapest first until the budget is spent;
+/// a tool that does not fit is left out (and so is every costlier one). Returns the kept indexes
+/// in their original order. `None` lists everything.
+fn select_within_budget(costs: &[usize], budget: Option<usize>) -> Vec<usize> {
+    let Some(mut remaining) = budget else {
+        return (0..costs.len()).collect();
+    };
+    let mut order = (0..costs.len()).collect::<Vec<_>>();
+    order.sort_by_key(|&i| costs[i]);
+    let mut kept = Vec::new();
+    for index in order {
+        if costs[index] > remaining {
+            break;
+        }
+        remaining -= costs[index];
+        kept.push(index);
+    }
+    kept.sort_unstable();
+    kept
+}
+
+pub(crate) fn definition(mcp: &McpRegistry, inline_budget: Option<usize>) -> Value {
     let callable_tools = callable_tool_definitions(mcp);
-    let declarations = callable_tools
+    let sections = callable_tools
         .iter()
         .filter_map(|tool| {
             let name = tool.get("name")?.as_str()?;
@@ -23,8 +47,23 @@ pub(crate) fn definition(mcp: &McpRegistry) -> Value {
                 description.lines().next().unwrap_or_default()
             ))
         })
+        .collect::<Vec<_>>();
+    let costs = sections
+        .iter()
+        .map(|s| s.len().div_ceil(CHARS_PER_TOKEN))
+        .collect::<Vec<_>>();
+    let kept = select_within_budget(&costs, inline_budget);
+    let hidden = sections.len() - kept.len();
+    let mut declarations = kept
+        .iter()
+        .map(|&i| sections[i].as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    if hidden > 0 {
+        declarations.push_str(&format!(
+            "\n({hidden} more tools are callable but not listed; find them with `searchTools(query)`)"
+        ));
+    }
     let description = if declarations.is_empty() {
         CODEMODE_DESCRIPTION.to_owned()
     } else {
