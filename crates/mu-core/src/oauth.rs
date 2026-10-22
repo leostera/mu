@@ -1357,6 +1357,226 @@ pub mod meta {
     }
 }
 
+/// GitHub Copilot login (Pi's `github-copilot.ts`): a GitHub device-code login yields a GitHub
+/// token (stored as `refresh`), which is exchanged for a short-lived Copilot token (`access`).
+/// The model catalog and per-model policy enabling Pi does afterwards are not ported.
+pub mod github_copilot {
+    use super::*;
+
+    // Pi stores the client id base64-encoded; it is public.
+    const CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+    const USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
+
+    /// Pi's `normalizeDomain`: a bare host from `company.ghe.com` or `https://company.ghe.com/x`.
+    pub fn normalize_domain(input: &str) -> Option<String> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let with_scheme = if trimmed.contains("://") {
+            trimmed.to_owned()
+        } else {
+            format!("https://{trimmed}")
+        };
+        url::Url::parse(&with_scheme)
+            .ok()?
+            .host_str()
+            .map(str::to_owned)
+    }
+
+    pub struct Urls {
+        pub device_code: String,
+        pub access_token: String,
+        pub copilot_token: String,
+    }
+
+    pub fn urls(domain: &str) -> Urls {
+        Urls {
+            device_code: format!("https://{domain}/login/device/code"),
+            access_token: format!("https://{domain}/login/oauth/access_token"),
+            copilot_token: format!("https://api.{domain}/copilot_internal/v2/token"),
+        }
+    }
+
+    /// The API base URL: the `proxy-ep` host of the token with `proxy.` turned into `api.`, else
+    /// the enterprise endpoint, else the individual one.
+    pub fn base_url(token: &str, enterprise_domain: Option<&str>) -> String {
+        if let Some(host) = token
+            .split(';')
+            .find_map(|part| part.strip_prefix("proxy-ep="))
+            .filter(|host| !host.is_empty())
+        {
+            return format!(
+                "https://{}",
+                host.strip_prefix("proxy.")
+                    .map_or_else(|| host.to_owned(), |rest| format!("api.{rest}"))
+            );
+        }
+        match enterprise_domain {
+            Some(domain) => format!("https://copilot-api.{domain}"),
+            None => "https://api.individual.githubcopilot.com".to_owned(),
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct DeviceCode {
+        pub device_code: String,
+        pub user_code: String,
+        pub verification_uri: String,
+        pub interval_seconds: Option<u64>,
+        pub expires_in_seconds: u64,
+    }
+
+    pub fn parse_device_code(json: &Value) -> Result<DeviceCode, String> {
+        let text = |k: &str| json.get(k).and_then(Value::as_str).map(str::to_owned);
+        let (Some(device_code), Some(user_code), Some(uri), Some(expires)) = (
+            text("device_code"),
+            text("user_code"),
+            text("verification_uri"),
+            json.get("expires_in").and_then(Value::as_f64),
+        ) else {
+            return Err("Invalid device code response fields".into());
+        };
+        let parsed = url::Url::parse(&uri)
+            .map_err(|_| "Untrusted verification_uri in device code response".to_owned())?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("Untrusted verification_uri in device code response".into());
+        }
+        Ok(DeviceCode {
+            device_code,
+            user_code,
+            verification_uri: parsed.into(),
+            interval_seconds: json.get("interval").and_then(Value::as_u64),
+            expires_in_seconds: expires as u64,
+        })
+    }
+
+    /// One poll of GitHub's access-token endpoint; the GitHub token is the result.
+    pub fn poll_result(json: &Value) -> DevicePoll<String> {
+        if let Some(token) = json.get("access_token").and_then(Value::as_str) {
+            return DevicePoll::Complete(token.to_owned());
+        }
+        let Some(error) = json.get("error").and_then(Value::as_str) else {
+            return DevicePoll::Failed("Invalid device token response".into());
+        };
+        match error {
+            "authorization_pending" => DevicePoll::Pending,
+            "slow_down" => DevicePoll::SlowDown(json.get("interval").and_then(Value::as_u64)),
+            other => {
+                let suffix = json
+                    .get("error_description")
+                    .and_then(Value::as_str)
+                    .filter(|d| !d.is_empty())
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default();
+                DevicePoll::Failed(format!("Device flow failed: {other}{suffix}"))
+            }
+        }
+    }
+
+    /// The Copilot token response as a credential; the GitHub token is kept as `refresh`.
+    pub fn credential_from_copilot_token(
+        github_token: &str,
+        json: &Value,
+        enterprise_domain: Option<&str>,
+    ) -> Result<Credential, String> {
+        let (Some(token), Some(expires_at)) = (
+            json.get("token").and_then(Value::as_str),
+            json.get("expires_at").and_then(Value::as_f64),
+        ) else {
+            return Err("Invalid Copilot token response fields".into());
+        };
+        let mut extra = std::collections::BTreeMap::new();
+        if let Some(domain) = enterprise_domain {
+            extra.insert("enterpriseUrl".to_owned(), json!(domain));
+        }
+        Ok(Credential::Oauth {
+            access: token.to_owned(),
+            refresh: github_token.to_owned(),
+            expires: expires_at * 1000.0 - EXPIRY_MARGIN_MS,
+            extra,
+        })
+    }
+
+    async fn json_request(request: reqwest::RequestBuilder) -> Result<Value, String> {
+        let response = request
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = response.status();
+        let text = response.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!(
+                "{} {}: {text}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("")
+            ));
+        }
+        serde_json::from_str(&text).map_err(|e| format!("invalid JSON: {e}"))
+    }
+
+    pub async fn start(domain: &str) -> Result<DeviceCode, String> {
+        let json = json_request(
+            reqwest::Client::new()
+                .post(urls(domain).device_code)
+                .header("accept", "application/json")
+                .header("user-agent", USER_AGENT)
+                .form(&[("client_id", CLIENT_ID), ("scope", "read:user")]),
+        )
+        .await?;
+        parse_device_code(&json)
+    }
+
+    pub async fn poll_for_github_token(
+        domain: &str,
+        device: &DeviceCode,
+    ) -> Result<String, String> {
+        let timing = DevicePollTiming::pi(
+            device.interval_seconds,
+            Some(device.expires_in_seconds),
+            true,
+        );
+        let url = urls(domain).access_token;
+        poll_device_code(timing, || async {
+            let request = reqwest::Client::new()
+                .post(&url)
+                .header("accept", "application/json")
+                .header("user-agent", USER_AGENT)
+                .form(&[
+                    ("client_id", CLIENT_ID),
+                    ("device_code", device.device_code.as_str()),
+                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ]);
+            match json_request(request).await {
+                Ok(json) => poll_result(&json),
+                Err(message) => DevicePoll::Failed(message),
+            }
+        })
+        .await
+    }
+
+    /// Exchange a GitHub token for a Copilot token (login, and every refresh).
+    pub async fn copilot_token(
+        github_token: &str,
+        enterprise_domain: Option<&str>,
+    ) -> Result<Credential, String> {
+        let domain = enterprise_domain.unwrap_or("github.com");
+        let json = json_request(
+            reqwest::Client::new()
+                .get(urls(domain).copilot_token)
+                .header("accept", "application/json")
+                .header("user-agent", USER_AGENT)
+                .header("editor-version", "vscode/1.107.0")
+                .header("editor-plugin-version", "copilot-chat/0.35.0")
+                .header("copilot-integration-id", "vscode-chat")
+                .bearer_auth(github_token),
+        )
+        .await?;
+        credential_from_copilot_token(github_token, &json, enterprise_domain)
+    }
+}
+
 /// Whether a stored OAuth credential needs refreshing.
 pub fn is_expired(expires_ms: f64) -> bool {
     now_ms() >= expires_ms
@@ -1683,6 +1903,86 @@ mod tests {
                 .unwrap_err()
                 .ends_with("status 500: down")
         );
+    }
+
+    #[test]
+    fn github_copilot_domains_urls_tokens_and_polls_follow_pi() {
+        use github_copilot as gh;
+        assert_eq!(
+            gh::normalize_domain("company.ghe.com").as_deref(),
+            Some("company.ghe.com")
+        );
+        assert_eq!(
+            gh::normalize_domain(" https://company.ghe.com/x ").as_deref(),
+            Some("company.ghe.com")
+        );
+        assert_eq!(gh::normalize_domain("  "), None);
+        assert_eq!(
+            gh::urls("github.com").copilot_token,
+            "https://api.github.com/copilot_internal/v2/token"
+        );
+        assert_eq!(
+            gh::base_url(
+                "tid=1;exp=2;proxy-ep=proxy.business.githubcopilot.com;x=y",
+                None
+            ),
+            "https://api.business.githubcopilot.com"
+        );
+        assert_eq!(
+            gh::base_url("plain", Some("c.ghe.com")),
+            "https://copilot-api.c.ghe.com"
+        );
+        assert_eq!(
+            gh::base_url("plain", None),
+            "https://api.individual.githubcopilot.com"
+        );
+        let device = gh::parse_device_code(&json!({
+            "device_code":"d","user_code":"U","verification_uri":"https://github.com/login/device","expires_in":900})).unwrap();
+        assert_eq!(
+            (device.interval_seconds, device.expires_in_seconds),
+            (None, 900)
+        );
+        assert!(gh::parse_device_code(&json!({"device_code":"d","user_code":"U","verification_uri":"file:///x","expires_in":1})).unwrap_err().contains("Untrusted"));
+        assert_eq!(
+            gh::poll_result(&json!({"access_token":"gho"})),
+            DevicePoll::Complete("gho".into())
+        );
+        assert_eq!(
+            gh::poll_result(&json!({"error":"authorization_pending"})),
+            DevicePoll::Pending
+        );
+        assert_eq!(
+            gh::poll_result(&json!({"error":"slow_down","interval":10})),
+            DevicePoll::SlowDown(Some(10))
+        );
+        assert_eq!(
+            gh::poll_result(&json!({"error":"access_denied","error_description":"nope"})),
+            DevicePoll::Failed("Device flow failed: access_denied: nope".into())
+        );
+        assert_eq!(
+            gh::poll_result(&json!({})),
+            DevicePoll::Failed("Invalid device token response".into())
+        );
+        let Credential::Oauth {
+            access,
+            refresh,
+            expires,
+            extra,
+        } = gh::credential_from_copilot_token(
+            "gho",
+            &json!({"token":"tok","expires_at":1000}),
+            Some("c.ghe.com"),
+        )
+        .unwrap()
+        else {
+            panic!("oauth")
+        };
+        assert_eq!(
+            (access.as_str(), refresh.as_str(), expires),
+            ("tok", "gho", 700_000.0)
+        );
+        assert_eq!(extra["enterpriseUrl"], "c.ghe.com");
+        assert!(gh::credential_from_copilot_token("g", &json!({"token":"t"}), None).is_err());
     }
 
     #[test]

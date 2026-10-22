@@ -1504,6 +1504,19 @@ async fn refresh_expired_oauth(config: &Config) -> Result<(), AgentError> {
     let refreshed = match config.provider.as_str() {
         "anthropic" => crate::oauth::anthropic::refresh_token(&refresh).await,
         "xai" => crate::oauth::xai::refresh_token(&refresh).await,
+        "github-copilot" => {
+            let enterprise = crate::auth::load(&path)
+                .ok()
+                .and_then(|mut all| all.remove(&config.provider))
+                .and_then(|credential| match credential {
+                    crate::auth::Credential::Oauth { extra, .. } => extra
+                        .get("enterpriseUrl")
+                        .and_then(Value::as_str)
+                        .and_then(crate::oauth::github_copilot::normalize_domain),
+                    crate::auth::Credential::ApiKey { .. } => None,
+                });
+            crate::oauth::github_copilot::copilot_token(&refresh, enterprise.as_deref()).await
+        }
         "meta" => {
             crate::oauth::meta::mint_api_key(&refresh, crate::oauth::meta::API_KEY_MINT_URL).await
         }

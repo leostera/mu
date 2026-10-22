@@ -103,6 +103,39 @@ pub fn check(provider: &str, json: bool, agent_dir: &Path) -> (String, i32) {
     (output, i32::from(status != "ready"))
 }
 
+async fn login_github_copilot(agent_dir: &Path) -> Result<String, AuthCommandError> {
+    use mu_core::oauth::github_copilot as gh;
+    let fail = AuthCommandError::Login;
+    eprintln!("GitHub Enterprise URL/domain (blank for github.com):");
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| fail(e.to_string()))?;
+    let enterprise = gh::normalize_domain(&line);
+    if !line.trim().is_empty() && enterprise.is_none() {
+        return Err(AuthCommandError::Login(
+            "Invalid GitHub Enterprise URL/domain".into(),
+        ));
+    }
+    let domain = enterprise
+        .clone()
+        .unwrap_or_else(|| "github.com".to_owned());
+    let device = gh::start(&domain).await.map_err(AuthCommandError::Login)?;
+    eprintln!(
+        "Open {} and enter the code {}.",
+        device.verification_uri, device.user_code
+    );
+    let github_token = gh::poll_for_github_token(&domain, &device)
+        .await
+        .map_err(AuthCommandError::Login)?;
+    let credential = gh::copilot_token(&github_token, enterprise.as_deref())
+        .await
+        .map_err(AuthCommandError::Login)?;
+    mu_core::auth::set_credential(&agent_dir.join("auth.json"), "github-copilot", credential)
+        .map_err(|e| AuthCommandError::Login(e.to_string()))?;
+    Ok("Logged in to github-copilot; credential saved to auth.json".to_owned())
+}
+
 async fn login_meta(agent_dir: &Path) -> Result<String, AuthCommandError> {
     use mu_core::oauth::meta;
     let fail = AuthCommandError::Login;
@@ -255,9 +288,12 @@ pub async fn login(
     if provider == "meta" {
         return login_meta(agent_dir).await;
     }
+    if provider == "github-copilot" {
+        return login_github_copilot(agent_dir).await;
+    }
     if provider != "anthropic" {
         return Err(AuthCommandError::Login(format!(
-            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\", \"kimi-coding\", \"openai-chatgpt\" and \"meta\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
+            "OAuth login is only implemented for \"anthropic\", \"openrouter\", \"xai\", \"kimi-coding\", \"openai-chatgpt\", \"meta\" and \"github-copilot\" (got \"{provider}\"); use /login <provider> <api-key> for API keys"
         )));
     }
     let fail = AuthCommandError::Login;
