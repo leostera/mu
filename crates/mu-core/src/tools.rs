@@ -3388,24 +3388,19 @@ mod tests {
     async fn bash_collects_output_from_recently_exited_shell_descendants() {
         let dir = std::env::temp_dir().join(format!("mu-tools-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        // Output is collected while a descendant keeps writing, and ends after 100ms of silence, so
-        // a machine stall longer than that can cut it short: allow a few attempts.
-        let mut last = Value::Null;
-        for _ in 0..6 {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            let result = execute(
-                &dir,
-                "bash",
-                &json!({"command":"(for i in {1..30}; do sleep 0.01; printf x; done) &"}),
-            )
-            .await
-            .unwrap();
-            last = result.structured_content.unwrap()["output"].clone();
-            if last == "x".repeat(30).as_str() {
-                break;
-            }
-        }
-        assert_eq!(last, "x".repeat(30));
+        // The parent writes once, then exits while its busy descendant continues writing for longer
+        // than the 100ms post-exit grace. The collector must re-arm that grace on every chunk.
+        let result = execute(
+            &dir,
+            "bash",
+            &json!({"command":"printf x; (for ((i=0;i<49999;i++)); do printf x; done) &"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.structured_content.unwrap()["output"],
+            "x".repeat(50_000)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
