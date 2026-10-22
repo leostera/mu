@@ -115,6 +115,15 @@ const NUMBER_SETTINGS: &[(&str, u64, u64)] = &[
     ("retry.maxRetries", 0, 100),
 ];
 
+/// Allowed range for an integer setting, when the key is a numeric setting.
+pub fn number_setting_range(key: &str) -> Option<(u64, u64)> {
+    NUMBER_SETTINGS
+        .iter()
+        .find_map(|(candidate, minimum, maximum)| {
+            (*candidate == key).then_some((*minimum, *maximum))
+        })
+}
+
 /// Allowed choices for an enum-valued setting, when the key is an enum setting.
 pub fn enum_setting_options(key: &str) -> Option<&'static [&'static str]> {
     ENUM_SETTINGS
@@ -131,9 +140,9 @@ pub fn parse_setting_value(key: &str, text: &str) -> Result<Value, String> {
             .then(|| json!(text))
             .ok_or_else(|| format!("{key} must be one of: {}", allowed.join(", ")));
     }
-    if let Some((_, min, max)) = NUMBER_SETTINGS.iter().find(|(k, _, _)| *k == key) {
+    if let Some((min, max)) = number_setting_range(key) {
         return match text.parse::<u64>() {
-            Ok(n) if (*min..=*max).contains(&n) => Ok(json!(n)),
+            Ok(n) if (min..=max).contains(&n) => Ok(json!(n)),
             _ => Err(format!("{key} must be a whole number from {min} to {max}")),
         };
     }
@@ -415,6 +424,15 @@ mod tests {
             Settings::load(&agent, &cwd, true).get("defaultTools"),
             Some(json!(["bash"]))
         );
+    }
+
+    #[test]
+    fn numeric_ranges_are_exposed_for_settings_ui() {
+        assert_eq!(
+            number_setting_range("autocompleteMaxVisible"),
+            Some((1, 20))
+        );
+        assert_eq!(number_setting_range("steeringMode"), None);
     }
 
     #[test]

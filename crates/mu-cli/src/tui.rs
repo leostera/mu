@@ -1981,7 +1981,21 @@ fn handle_picker(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         }
         KeyCode::Enter if picker.items.is_empty() => {}
         KeyCode::Enter => {
-            let line = format!("/{} {}", picker.command, picker.values[picker.selection]);
+            let command = picker.command;
+            let value = picker.values[picker.selection].clone();
+            if let Some((minimum, maximum)) = (command == "settings")
+                .then(|| mu_core::settings::number_setting_range(&value))
+                .flatten()
+            {
+                app.picker = None;
+                app.composer.clear();
+                app.composer.insert_text(&format!("/settings {value} "));
+                app.show_status(format!(
+                    "Enter a whole number from {minimum} to {maximum}, then press Enter."
+                ));
+                return;
+            }
+            let line = format!("/{command} {value}");
             app.picker = None;
             app.composer.insert_text(&line);
             execute_command(app, agent);
@@ -2118,6 +2132,19 @@ const ENUM_SETTINGS: &[(&str, &str)] = &[
     ("codemode.mode", "Codemode"),
 ];
 
+const NUMBER_SETTINGS: &[(&str, &str)] = &[
+    ("autocompleteMaxVisible", "Autocomplete max visible"),
+    ("editorPaddingX", "Editor horizontal padding"),
+    ("outputPad", "Output padding"),
+    ("codemode.inlineBudget", "Codemode inline budget"),
+    ("compaction.reserveTokens", "Compaction reserve tokens"),
+    (
+        "compaction.keepRecentTokens",
+        "Compaction keep recent tokens",
+    ),
+    ("retry.maxRetries", "Maximum retries"),
+];
+
 fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
     let state = |key: &str| settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
     let mut items = TOGGLE_SETTINGS
@@ -2143,6 +2170,21 @@ fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
             });
             values.push(format!("{key} {choice}"));
         }
+    }
+
+    for (key, label) in NUMBER_SETTINGS {
+        let Some((minimum, maximum)) = mu_core::settings::number_setting_range(key) else {
+            continue;
+        };
+        let current = settings
+            .get(key)
+            .and_then(|value| value.as_u64())
+            .map_or_else(|| "unset".to_owned(), |value| value.to_string());
+        items.push(chrome::SelectItem {
+            label: format!("{label}: {current}"),
+            description: Some(format!("Enter to edit ({minimum}–{maximum})")),
+        });
+        values.push((*key).to_owned());
     }
 
     Picker {
@@ -2672,7 +2714,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 Ok(agent) => {
                     let settings = agent.settings();
                     app.picker = Some(settings_picker(&settings));
-                    "Settings: Enter toggles booleans or applies the selected enum value.".to_owned()
+                    "Settings: Enter toggles booleans or applies a value; numeric settings open in the editor.".to_owned()
                 }
             };
             app.show_status(status);
@@ -3740,6 +3782,47 @@ mod tests {
             Some("current")
         );
         assert!(picker.values.contains(&"steeringMode all".into()));
+        let numeric = picker
+            .values
+            .iter()
+            .position(|value| value == "autocompleteMaxVisible")
+            .unwrap();
+        assert!(
+            picker.items[numeric]
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("1–20")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn selecting_a_numeric_setting_prompts_for_its_value() {
+        let agent = Arc::new(Mutex::new(MuAgent::demo().unwrap()));
+        let mut app = App::from_metadata("demo".into(), "mu-demo".into(), "session".into());
+        let dir = std::env::temp_dir().join(format!("mu-settings-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = mu_core::settings::Settings::load(&dir, &dir, true);
+        let mut picker = super::settings_picker(&settings);
+        picker.selection = picker
+            .values
+            .iter()
+            .position(|value| value == "autocompleteMaxVisible")
+            .unwrap();
+        app.picker = Some(picker);
+
+        super::handle_picker(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &agent,
+        );
+
+        assert!(app.picker.is_none());
+        assert_eq!(
+            app.composer.input_text(),
+            "/settings autocompleteMaxVisible "
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
