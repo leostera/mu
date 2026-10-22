@@ -424,6 +424,18 @@ pub(super) struct ToolPlan {
     pub(super) excluded: Vec<String>,
     /// `codemode.inlineBudget`: estimated tokens of tool sections codemode may list.
     pub(super) codemode_inline_budget: Option<usize>,
+    /// `codemode.mode: "only"`: with codemode active, other tools are callable only from scripts.
+    pub(super) codemode_only: bool,
+}
+
+/// Pi's `hiddenDeclarations` for `codemode.mode: "only"`: scripts still reach every tool, but the
+/// request declares none of them (only `tool_search` stays, since it loads tools for scripts).
+pub(super) fn hide_declarations_for_codemode_only(definitions: &mut Vec<Value>, only: bool) {
+    if only {
+        definitions.retain(|definition| {
+            definition.get("name").and_then(Value::as_str) == Some("tool_search")
+        });
+    }
 }
 
 impl ToolPlan {
@@ -448,6 +460,10 @@ impl ToolPlan {
             })
             .collect::<Vec<_>>();
         definitions.extend(mcp.definitions_for_model(active));
+        hide_declarations_for_codemode_only(
+            &mut definitions,
+            self.codemode_only && mcp.codemode_enabled(),
+        );
         if mcp.codemode_enabled() {
             definitions.push(crate::codemode::definition(
                 mcp,
@@ -1038,6 +1054,7 @@ impl MuAgent {
             selection: self.tool_selection.clone(),
             excluded: self.excluded_tools.clone(),
             codemode_inline_budget: self.codemode_inline_budget(),
+            codemode_only: self.codemode_only(),
         };
         let tools = build_tools(&plan(), &runtime);
         let hooks = Arc::new(RuntimeHooks {

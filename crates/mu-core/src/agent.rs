@@ -4078,6 +4078,15 @@ impl MuAgent {
             .map(|budget| budget as usize)
     }
 
+    /// `codemode.mode` is `only` (Pi's default is `on`).
+    pub(crate) fn codemode_only(&self) -> bool {
+        self.settings()
+            .get("codemode.mode")
+            .as_ref()
+            .and_then(Value::as_str)
+            == Some("only")
+    }
+
     pub fn agent_dir(&self) -> &Path {
         &self.agent_dir
     }
@@ -4677,6 +4686,7 @@ impl MuAgent {
             selection: self.tool_selection.clone(),
             excluded: self.excluded_tools.clone(),
             codemode_inline_budget: self.codemode_inline_budget(),
+            codemode_only: self.codemode_only(),
         };
         plan.definitions(&self.mcp, active_mcp_tools)
             .iter()
@@ -6742,6 +6752,23 @@ mod tests {
             input[0]["content"][1]["image_url"],
             "data:image/png;base64,QUJD"
         );
+    }
+
+    #[test]
+    fn codemode_only_hides_every_declaration_except_tool_search() {
+        let tools = || {
+            vec![
+                serde_json::json!({"name":"read"}),
+                serde_json::json!({"name":"mcp__x__y"}),
+                serde_json::json!({"name":"tool_search"}),
+            ]
+        };
+        let mut on = tools();
+        super::runtime::hide_declarations_for_codemode_only(&mut on, false);
+        assert_eq!(on.len(), 3);
+        let mut only = tools();
+        super::runtime::hide_declarations_for_codemode_only(&mut only, true);
+        assert_eq!(only, vec![serde_json::json!({"name":"tool_search"})]);
     }
 
     #[test]
