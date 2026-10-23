@@ -2223,6 +2223,79 @@ mod tests {
         assert_eq!(response["ok"], true);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_server_lists_and_reads_resources_end_to_end() {
+        let script = r#"
+while IFS= read -r line; do
+  case "$line" in
+    *initialize*)
+      echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"resource-server","version":"1"}}}' ;;
+    *tools/list*)
+      echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}' ;;
+    *resources/list*)
+      echo '{"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"file:///guide","name":"Guide"},{"uri":"ui://widget","name":"Widget"}]}}' ;;
+    *resources/templates/list*)
+      echo '{"jsonrpc":"2.0","id":4,"result":{"resourceTemplates":[{"uriTemplate":"file:///docs/{name}","name":"Docs"}]}}' ;;
+    *resources/read*)
+      echo '{"jsonrpc":"2.0","id":5,"result":{"contents":[{"uri":"file:///guide","mimeType":"text/plain","text":"hello resource"}]}}' ;;
+  esac
+done
+"#;
+        let config = ServerConfig {
+            name: "docs".into(),
+            transport: ServerTransportConfig::Stdio {
+                command: "sh".into(),
+                args: vec!["-c".into(), script.into()],
+                env: BTreeMap::new(),
+                cwd: None,
+            },
+            exposure: Exposure::Hidden,
+            tool_exposure: Vec::new(),
+            timeout: DEFAULT_REQUEST_TIMEOUT,
+        };
+        let (server, tools) = connect_server(config, Path::new("."))
+            .await
+            .expect("connect local resource server");
+        assert!(tools.is_empty());
+        let mut registry = McpRegistry::default();
+        registry.resource_servers.insert("docs".into(), server);
+
+        let listed = registry
+            .call("list_mcp_resources", &json!({"server":"docs"}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            listed.structured_content.unwrap()["resources"],
+            json!([{"server":"docs","uri":"file:///guide","name":"Guide"}])
+        );
+
+        let templates = registry
+            .call("list_mcp_resource_templates", &json!({"server":"docs"}))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            templates.structured_content.unwrap()["resourceTemplates"][0]["uriTemplate"],
+            "file:///docs/{name}"
+        );
+
+        let read = registry
+            .call(
+                "read_mcp_resource",
+                &json!({"server":"docs","uri":"file:///guide"}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.content, "hello resource");
+        assert_eq!(
+            read.structured_content.unwrap()["contents"][0]["text"],
+            "hello resource"
+        );
+    }
+
     #[test]
     fn saved_trust_decisions_round_trip_through_trust_json() {
         let dir = std::env::temp_dir().join(format!("mu-savetrust-{}", uuid::Uuid::new_v4()));
