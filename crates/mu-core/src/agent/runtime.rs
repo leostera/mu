@@ -492,7 +492,7 @@ impl ToolPlan {
             !self
                 .excluded
                 .iter()
-                .any(|pattern| super::tool_name_matches(pattern, name))
+                .any(|pattern| super::tool_selection::tool_name_matches(pattern, name))
         });
         definitions
     }

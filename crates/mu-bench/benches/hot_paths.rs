@@ -90,7 +90,10 @@ fn edit_tool(c: &mut Criterion) {
     )];
     for edits in [&exact, &fuzzy] {
         let diff = tools::compute_edit_diff(&dir, "file.rs", edits);
-        assert!(diff.get("error").is_none(), "benchmark edit must apply: {diff}");
+        assert!(
+            diff.get("error").is_none(),
+            "benchmark edit must apply: {diff}"
+        );
     }
     let mut group = c.benchmark_group("edit_diff");
     group.bench_function("exact_2000_lines", |b| {
