@@ -465,9 +465,16 @@ impl ToolPlan {
             self.codemode_only && mcp.codemode_enabled(),
         );
         if mcp.codemode_enabled() {
+            // Pi's `on` mode lists only tools without direct exposure; `only` mode hid the
+            // direct declarations above, so every callable tool is listed.
+            let declared = definitions
+                .iter()
+                .filter_map(|definition| definition.get("name")?.as_str().map(str::to_owned))
+                .collect::<HashSet<_>>();
             definitions.push(crate::codemode::definition(
                 mcp,
                 self.codemode_inline_budget,
+                &declared,
             ));
         }
         if mcp.has_deferred_tools() {

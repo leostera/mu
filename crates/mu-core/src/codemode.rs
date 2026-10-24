@@ -32,12 +32,21 @@ fn select_within_budget(costs: &[usize], budget: Option<usize>) -> Vec<usize> {
     kept
 }
 
-pub(crate) fn definition(mcp: &McpRegistry, inline_budget: Option<usize>) -> Value {
+/// The codemode declaration. Tools in `declared` are already direct declarations, so the
+/// catalog leaves them out (they stay callable as `tools.<name>`).
+pub(crate) fn definition(
+    mcp: &McpRegistry,
+    inline_budget: Option<usize>,
+    declared: &std::collections::HashSet<String>,
+) -> Value {
     let callable_tools = callable_tool_definitions(mcp);
     let sections = callable_tools
         .iter()
         .filter_map(|tool| {
             let name = tool.get("name")?.as_str()?;
+            if declared.contains(name) {
+                return None;
+            }
             let description = tool
                 .get("description")
                 .and_then(Value::as_str)
@@ -420,6 +429,24 @@ mod tests {
         assert!(output.contains("\"capabilities\":[\"undefined\",\"undefined\",\"undefined\"]"));
         assert_eq!(store_writes.unwrap()["set"]["count"], 2);
         fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[test]
+    fn catalog_lists_only_tools_without_direct_declarations() {
+        let declared = ["read".to_owned(), "bash".to_owned()].into();
+        let on = definition(&McpRegistry::default(), None, &declared);
+        let description = on["description"].as_str().unwrap();
+        assert!(!description.contains("`tools.read(args)`"));
+        assert!(!description.contains("`tools.bash(args)`"));
+        assert!(description.contains("`tools.grep(args)`"));
+
+        let only = definition(&McpRegistry::default(), None, &Default::default());
+        assert!(
+            only["description"]
+                .as_str()
+                .unwrap()
+                .contains("`tools.read(args)`")
+        );
     }
 
     #[tokio::test]
