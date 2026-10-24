@@ -489,9 +489,16 @@ impl McpRegistry {
                 .cloned()
                 .unwrap_or_default();
             let mut parts = Vec::new();
+            let mut images = Vec::new();
             for item in &contents {
                 if contents.len() > 1 {
                     parts.push(format!("{}:", item["uri"].as_str().unwrap_or_default()));
+                }
+                // Pi converts each item as an embedded resource block: image blobs attach.
+                if let Some(image) = embedded_image(&json!({"type": "resource", "resource": item}))
+                {
+                    images.push(image);
+                    continue;
                 }
                 match item.get("text").and_then(Value::as_str) {
                     Some(text) => parts.push(text.to_owned()),
@@ -507,13 +514,13 @@ impl McpRegistry {
                     item
                 })
                 .collect::<Vec<_>>();
-            let content = if parts.is_empty() {
+            let content = if parts.is_empty() && images.is_empty() {
                 format!("Resource {uri} is empty.")
             } else {
                 parts.join("\n")
             };
             return Ok(McpToolResult {
-                images: Vec::new(),
+                images,
                 content,
                 structured_content: Some(
                     json!({"server": server_name, "uri": uri, "contents": contents}),
@@ -2238,7 +2245,7 @@ while IFS= read -r line; do
     *resources/templates/list*)
       echo '{"jsonrpc":"2.0","id":4,"result":{"resourceTemplates":[{"uriTemplate":"file:///docs/{name}","name":"Docs"}]}}' ;;
     *resources/read*)
-      echo '{"jsonrpc":"2.0","id":5,"result":{"contents":[{"uri":"file:///guide","mimeType":"text/plain","text":"hello resource"}]}}' ;;
+      echo '{"jsonrpc":"2.0","id":5,"result":{"contents":[{"uri":"file:///guide","mimeType":"text/plain","text":"hello resource"},{"uri":"file:///guide.png","mimeType":"image/png","blob":"QUJD"}]}}' ;;
   esac
 done
 "#;
@@ -2289,7 +2296,13 @@ done
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(read.content, "hello resource");
+        assert_eq!(
+            read.content,
+            "file:///guide:\nhello resource\nfile:///guide.png:"
+        );
+        assert_eq!(read.images.len(), 1);
+        assert_eq!(read.images[0].mime_type, "image/png");
+        assert_eq!(read.images[0].data, "QUJD");
         assert_eq!(
             read.structured_content.unwrap()["contents"][0]["text"],
             "hello resource"
