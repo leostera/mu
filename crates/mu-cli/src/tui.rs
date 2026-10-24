@@ -1601,6 +1601,7 @@ pub async fn run_starting<F>(
     startup: F,
     initial_prompt: Option<String>,
     initial_images: Vec<(String, String)>,
+    alternate_screen: bool,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     F: Future<Output = Result<MuAgent, AgentError>> + Send + 'static,
@@ -1610,6 +1611,7 @@ where
         Some(Box::pin(startup)),
         initial_prompt,
         initial_images,
+        alternate_screen,
     )
     .await
 }
@@ -1619,8 +1621,9 @@ async fn run_loop(
     startup: Option<StartupFuture>,
     mut initial_prompt: Option<String>,
     initial_images: Vec<(String, String)>,
+    alternate_screen: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _terminal_session = terminal::TerminalSession::enter()?;
+    let _terminal_session = terminal::TerminalSession::enter(alternate_screen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut app = initial_agent.as_ref().map_or_else(App::starting, App::new);
     app.pending_images = initial_images;

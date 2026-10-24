@@ -29,9 +29,9 @@ pub(super) struct TerminalSession {
 }
 
 impl TerminalSession {
-    pub(super) fn enter() -> io::Result<Self> {
+    pub(super) fn enter(alternate_screen: bool) -> io::Result<Self> {
         Ok(Self {
-            _protocol: TerminalProtocol::enter_with(CrosstermControl::default())?,
+            _protocol: TerminalProtocol::enter_with(CrosstermControl::default(), alternate_screen)?,
         })
     }
 }
@@ -43,15 +43,20 @@ struct TerminalProtocol<C: TerminalControl> {
 }
 
 impl<C: TerminalControl> TerminalProtocol<C> {
-    fn enter_with(mut control: C) -> io::Result<Self> {
+    fn enter_with(mut control: C, alternate_screen: bool) -> io::Result<Self> {
         control.set_raw_mode(true)?;
         let mut session = Self {
             control,
             acquired: Vec::new(),
             raw_mode: true,
         };
+        if alternate_screen {
+            session
+                .control
+                .set_mode(TerminalMode::AlternateScreen, true)?;
+            session.acquired.push(TerminalMode::AlternateScreen);
+        }
         for mode in [
-            TerminalMode::AlternateScreen,
             TerminalMode::MouseCapture,
             TerminalMode::BracketedPaste,
             TerminalMode::KeyboardEnhancement,
@@ -171,7 +176,7 @@ mod tests {
     fn restores_terminal_modes_in_reverse_order() {
         let control = MockControl::default();
         let operations = Arc::clone(&control.operations);
-        let session = TerminalProtocol::enter_with(control).expect("enter terminal modes");
+        let session = TerminalProtocol::enter_with(control, true).expect("enter terminal modes");
         drop(session);
 
         assert_eq!(
@@ -193,6 +198,20 @@ mod tests {
     }
 
     #[test]
+    fn regular_mode_does_not_enter_or_leave_the_alternate_screen() {
+        let control = MockControl::default();
+        let operations = Arc::clone(&control.operations);
+        let session = TerminalProtocol::enter_with(control, false).expect("enter regular mode");
+        drop(session);
+
+        let operations = operations.lock().expect("mock log");
+        assert!(!operations.contains(&Operation::Mode(TerminalMode::AlternateScreen, true)));
+        assert!(!operations.contains(&Operation::Mode(TerminalMode::AlternateScreen, false)));
+        assert!(operations.contains(&Operation::Mode(TerminalMode::MouseCapture, true)));
+        assert!(operations.contains(&Operation::Mode(TerminalMode::KeyboardEnhancement, false)));
+    }
+
+    #[test]
     fn partial_setup_failure_rolls_back_already_enabled_modes() {
         let control = MockControl {
             fail_on: Some(Operation::Mode(TerminalMode::MouseCapture, true)),
@@ -200,7 +219,7 @@ mod tests {
         };
         let operations = Arc::clone(&control.operations);
 
-        assert!(TerminalProtocol::enter_with(control).is_err());
+        assert!(TerminalProtocol::enter_with(control, true).is_err());
         assert_eq!(
             *operations.lock().expect("mock log"),
             [

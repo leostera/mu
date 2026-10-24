@@ -115,9 +115,9 @@ struct Cli {
     #[arg(long)]
     verbose: bool,
 
-    /// TUI screen mode: fullscreen (default). `regular` (main screen) is not implemented yet.
-    #[arg(long, value_name = "MODE", value_parser = ["fullscreen", "regular"])]
-    tui_mode: Option<String>,
+    /// TUI screen mode: fullscreen (default) or regular (main screen).
+    #[arg(long, value_enum, value_name = "MODE")]
+    tui_mode: Option<TuiMode>,
 
     /// Theme for this run: dark, light, a theme file path, or a name in `<agent dir>/themes`.
     #[arg(long, alias = "use-theme", value_name = "NAME")]
@@ -195,6 +195,12 @@ struct Cli {
     /// Send a one-shot prompt instead of opening the interactive TUI.
     #[arg(value_name = "PROMPT", num_args = 1..)]
     prompt: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum TuiMode {
+    Fullscreen,
+    Regular,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -304,9 +310,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let is_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    if cli.tui_mode.as_deref() == Some("regular") {
-        return Err("--tui-mode regular (main-screen mode) is not implemented yet; Mu always uses the fullscreen alternate screen".into());
-    }
+    let alternate_screen = cli.tui_mode != Some(TuiMode::Regular);
     if let Some(input) = &cli.export {
         let output = cli.prompt.first().map(PathBuf::from);
         match mu_core::export_session_file(input, output.as_deref()) {
@@ -471,6 +475,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         async move { mu_core::MuAgent::connect_with_options(session_options).await },
         initial_prompt,
         images,
+        alternate_screen,
     )
     .await
 }
@@ -637,13 +642,26 @@ fn read_stdin_prompt(is_terminal: bool) -> Result<String, std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, select_session};
+    use super::{Cli, TuiMode, select_session};
     use clap::{CommandFactory, Parser};
     use std::path::PathBuf;
 
     #[test]
     fn offline_flag_and_environment_match_pi_truthy_values() {
         assert!(Cli::try_parse_from(["mu", "--offline"]).unwrap().offline);
+        assert_eq!(
+            Cli::try_parse_from(["mu", "--tui-mode", "regular"])
+                .unwrap()
+                .tui_mode,
+            Some(TuiMode::Regular)
+        );
+        assert_eq!(
+            Cli::try_parse_from(["mu", "--tui-mode", "fullscreen"])
+                .unwrap()
+                .tui_mode,
+            Some(TuiMode::Fullscreen)
+        );
+        assert!(Cli::try_parse_from(["mu", "--tui-mode", "compact"]).is_err());
         for value in ["1", "true", "TRUE", "yes"] {
             assert!(super::is_truthy_env_flag(value), "{value:?}");
         }
