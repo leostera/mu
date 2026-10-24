@@ -1032,8 +1032,59 @@ impl MuAgent {
         let prompt = self.expand_prompt(prompt, on_event);
         self.session.append_user_content(prompt.clone(), &images);
         self.save_session()?;
-        self.ensure_mcp_ready().await;
+        let mut content = vec![ContentBlock::text(prompt)];
+        content.extend(
+            images
+                .into_iter()
+                .map(|(mime_type, data)| ContentBlock::Image { data, mime_type }),
+        );
+        self.run_loop(
+            Some(vec![AgentMessage::User(UserMessage {
+                content,
+                timestamp: 0,
+            })]),
+            on_event,
+            cancel,
+        )
+        .await
+    }
 
+    /// Continue from a pending user or tool-result message without appending a new prompt.
+    pub async fn continue_from_transcript(
+        &mut self,
+        on_event: &mut impl FnMut(AgentEvent),
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        if self.transcript.is_empty()
+            || self
+                .transcript
+                .iter()
+                .all(|message| matches!(message, AgentMessage::System(_)))
+        {
+            return Err(AgentError::Session("No messages to continue from".into()));
+        }
+        if matches!(self.transcript.last(), Some(AgentMessage::Assistant(_))) {
+            if let Some((prompt, behavior)) = self.prompt_queue.take_next() {
+                on_event(AgentEvent::QueuedPromptStarted {
+                    prompt: prompt.clone(),
+                    behavior,
+                });
+                return self.submit_with_cancel(prompt, on_event, cancel).await;
+            }
+            return Err(AgentError::Session(
+                "Cannot continue from message role: assistant".into(),
+            ));
+        }
+        self.run_loop(None, on_event, cancel).await
+    }
+
+    async fn run_loop(
+        &mut self,
+        initial_messages: Option<Vec<AgentMessage>>,
+        on_event: &mut impl FnMut(AgentEvent),
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        self.ensure_mcp_ready().await;
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let shared: Shared = Arc::new(StdMutex::new(RunShared {
             mcp: self.mcp.clone(),
@@ -1096,40 +1147,33 @@ impl MuAgent {
         });
         drop(sender);
 
-        let run = agent_loop::run_agent_loop(
-            vec![{
-                let mut content = vec![ContentBlock::text(prompt)];
-                content.extend(
-                    images
-                        .into_iter()
-                        .map(|(mime_type, data)| ContentBlock::Image { data, mime_type }),
-                );
-                AgentMessage::User(UserMessage {
-                    content,
-                    timestamp: 0,
-                })
-            }],
-            context,
-            config,
-            sink,
-            cancel,
-            &stream,
-        );
+        let run = async {
+            match initial_messages {
+                Some(messages) => Ok(agent_loop::run_agent_loop(
+                    messages, context, config, sink, cancel, &stream,
+                )
+                .await),
+                None => agent_loop::run_agent_loop_continue(context, config, sink, cancel, &stream)
+                    .await
+                    .map_err(|error| AgentError::Session(error.to_string())),
+            }
+        };
         tokio::pin!(run);
         let mut initial_prompt_seen = false;
-        let new_messages = loop {
+        let run_result = loop {
             tokio::select! {
                 biased;
                 Some(signal) = receiver.recv() => {
                     self.apply_signal(signal, &shared, &mut initial_prompt_seen, on_event)?;
                 }
-                messages = &mut run => break messages,
+                result = &mut run => break result,
             }
         };
         while let Ok(signal) = receiver.try_recv() {
             self.apply_signal(signal, &shared, &mut initial_prompt_seen, on_event)?;
         }
 
+        let new_messages = run_result?;
         let (provider_error, active, mcp) = {
             let mut state = lock(&shared);
             (

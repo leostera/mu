@@ -4793,6 +4793,15 @@ impl MuAgent {
         self.submit_with_cancel(prompt, on_event, &CancellationToken::new())
             .await
     }
+
+    /// Continue a pending user/tool-result turn without adding a new user message.
+    pub async fn continue_session(
+        &mut self,
+        on_event: &mut impl FnMut(AgentEvent),
+    ) -> Result<(), AgentError> {
+        self.continue_from_transcript(on_event, &CancellationToken::new())
+            .await
+    }
 }
 
 pub fn list_sessions_for_current_cwd(
@@ -6561,6 +6570,81 @@ mod tests {
             std::sync::Mutex::new(replies.into()),
         ));
         agent
+    }
+
+    #[tokio::test]
+    async fn continue_session_runs_from_a_pending_user_message_without_adding_another() {
+        let root = std::env::temp_dir().join(format!("mu-continue-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(
+            &root,
+            vec![
+                Ok(scripted_reply("continued", vec![])),
+                Ok(scripted_reply("processed", vec![])),
+            ],
+        );
+        assert_eq!(
+            agent
+                .continue_session(&mut |_| {})
+                .await
+                .unwrap_err()
+                .to_string(),
+            "session: No messages to continue from"
+        );
+
+        agent.session.append_user_text("pending prompt");
+        agent
+            .transcript
+            .push(crate::agent_loop::AgentMessage::user_text(
+                "pending prompt",
+                0,
+            ));
+        agent.save_session().unwrap();
+        agent.continue_session(&mut |_| {}).await.unwrap();
+
+        assert_eq!(responses_input(&agent.transcript).len(), 2);
+        assert_eq!(responses_input(&agent.transcript)[0]["role"], "user");
+        assert_eq!(
+            responses_input(&agent.transcript)[0]["content"][0]["text"],
+            "pending prompt"
+        );
+        assert_eq!(responses_input(&agent.transcript)[1]["role"], "assistant");
+        assert!(matches!(
+            agent.transcript.last(),
+            Some(crate::agent_loop::AgentMessage::Assistant(message))
+                if message.content.iter().any(
+                    |block| matches!(block, crate::agent_loop::ContentBlock::Text { text } if text == "continued")
+                )
+        ));
+        assert_eq!(
+            agent
+                .continue_session(&mut |_| {})
+                .await
+                .unwrap_err()
+                .to_string(),
+            "session: Cannot continue from message role: assistant"
+        );
+        agent.prompt_queue.enqueue(
+            "queued follow-up".to_owned(),
+            super::PromptBehavior::FollowUp,
+        );
+        agent.continue_session(&mut |_| {}).await.unwrap();
+        assert_eq!(responses_input(&agent.transcript).len(), 4);
+        assert_eq!(responses_input(&agent.transcript)[2]["role"], "user");
+        assert_eq!(
+            responses_input(&agent.transcript)[2]["content"][0]["text"],
+            "queued follow-up"
+        );
+        let session = std::fs::read_to_string(agent.session_path()).unwrap();
+        let parsed = SessionDocument::parse_jsonl(&session).unwrap();
+        assert_eq!(
+            parsed
+                .active_branch_entries()
+                .into_iter()
+                .filter(|entry| entry.entry_type.as_str() == "message")
+                .count(),
+            4
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
