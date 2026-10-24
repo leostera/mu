@@ -2198,7 +2198,12 @@ fn settings_picker(
     settings: &mu_core::settings::Settings,
     scope: mu_core::settings::Scope,
 ) -> Picker {
-    let state = |key: &str| settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let state = |key: &str| {
+        settings
+            .get_for_scope(scope, key)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    };
     let mut items = TOGGLE_SETTINGS
         .iter()
         .map(|(key, label)| chrome::SelectItem {
@@ -2237,7 +2242,7 @@ fn settings_picker(
     );
 
     let current_theme = settings
-        .get("theme")
+        .get_for_scope(scope, "theme")
         .and_then(|value| value.as_str().map(str::to_owned));
     for name in ["dark", "light"] {
         items.push(chrome::SelectItem {
@@ -2249,7 +2254,7 @@ fn settings_picker(
 
     for (key, label) in ENUM_SETTINGS {
         let current = settings
-            .get(key)
+            .get_for_scope(scope, key)
             .and_then(|value| value.as_str().map(str::to_owned));
         for choice in mu_core::settings::enum_setting_options(key).unwrap_or_default() {
             items.push(chrome::SelectItem {
@@ -2265,7 +2270,7 @@ fn settings_picker(
             continue;
         };
         let current = settings
-            .get(key)
+            .get_for_scope(scope, key)
             .and_then(|value| value.as_u64())
             .map_or_else(|| "unset".to_owned(), |value| value.to_string());
         items.push(chrome::SelectItem {

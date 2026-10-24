@@ -4126,7 +4126,10 @@ impl MuAgent {
         key: &str,
     ) -> Result<bool, AgentError> {
         let mut settings = self.settings();
-        let next = !settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+        let next = !settings
+            .get_for_scope(scope, key)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         settings
             .set(scope, key, Value::Bool(next))
             .map_err(|error| AgentError::Configuration(error.to_string()))?;
@@ -5081,6 +5084,11 @@ mod tests {
             std::env::temp_dir().join(format!("mu-project-setting-write-{}", uuid::Uuid::new_v4()));
         let agent = scripted_agent(&root, vec![]);
         crate::mcp::set_project_trust_override(None);
+        assert!(
+            agent
+                .toggle_setting_in_scope(crate::settings::Scope::Global, "quietStartup")
+                .unwrap()
+        );
 
         let denied =
             agent.set_setting_text_in_scope(crate::settings::Scope::Project, "tuiMode", "regular");
@@ -5094,14 +5102,27 @@ mod tests {
             serde_json::json!("regular")
         );
         assert!(
-            agent
+            !agent
                 .toggle_setting_in_scope(crate::settings::Scope::Project, "quietStartup")
                 .unwrap()
         );
+        let settings = agent.settings();
+        assert_eq!(
+            settings.get_for_scope(crate::settings::Scope::Global, "quietStartup"),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(
+            settings.get_for_scope(crate::settings::Scope::Project, "quietStartup"),
+            Some(serde_json::json!(false))
+        );
         let project_settings = std::fs::read_to_string(root.join(".pi/settings.json")).unwrap();
         assert!(project_settings.contains("\"tuiMode\": \"regular\""));
-        assert!(project_settings.contains("\"quietStartup\": true"));
-        assert!(!root.join("agent/settings.json").exists());
+        assert!(project_settings.contains("\"quietStartup\": false"));
+        assert!(
+            !std::fs::read_to_string(root.join("agent/settings.json"))
+                .unwrap()
+                .contains("tuiMode")
+        );
 
         std::fs::remove_dir_all(root).unwrap();
         crate::mcp::set_project_trust_override(None);

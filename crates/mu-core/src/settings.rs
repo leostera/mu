@@ -323,8 +323,31 @@ impl Settings {
                 .cloned()
         };
         lookup(&self.merged())
-            .filter(|v| !v.is_null())
+            .filter(|value| !value.is_null())
             .or_else(|| lookup(&defaults()))
+    }
+
+    /// Read the value that a setting editor should display in the selected layer.
+    pub fn get_for_scope(&self, scope: Scope, path: &str) -> Option<Value> {
+        let value = match scope {
+            Scope::Global => self
+                .get_from(path, &self.global)
+                .or_else(|| self.get_from(path, defaults().as_object()?)),
+            Scope::Project => self
+                .get_from(path, &self.project)
+                .or_else(|| self.get_from(path, &self.global))
+                .or_else(|| self.get_from(path, defaults().as_object()?)),
+        };
+        value.filter(|value| !value.is_null())
+    }
+
+    fn get_from(&self, path: &str, layer: &Map<String, Value>) -> Option<Value> {
+        let mut segments = path.split('.');
+        let mut value = layer.get(segments.next()?)?;
+        for segment in segments {
+            value = value.get(segment)?;
+        }
+        Some(value.clone())
     }
 
     /// Whether project values from this settings snapshot were loaded and may be written.
