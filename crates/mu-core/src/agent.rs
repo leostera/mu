@@ -6681,6 +6681,82 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn continue_session_accepts_a_pending_tool_result_tail() {
+        let root = std::env::temp_dir().join(format!("mu-continue-tool-{}", uuid::Uuid::new_v4()));
+        let mut agent = scripted_agent(&root, vec![Ok(scripted_reply("continued", vec![]))]);
+        agent.session.append_user_text("run a tool");
+        agent.session.append_assistant_tool_calls(
+            "openai-responses",
+            "test-provider",
+            "test-model",
+            mu_session::AssistantToolResponse {
+                thinking: String::new(),
+                thinking_signature: None,
+                text: String::new(),
+                calls: vec![mu_session::ToolCallRecord {
+                    id: "call-1".into(),
+                    name: "noop".into(),
+                    arguments: serde_json::json!({}),
+                }],
+                usage: mu_session::MessageUsage::default(),
+            },
+        );
+        agent.session.append_tool_result_with_details(
+            "call-1",
+            "noop",
+            "tool finished".to_owned(),
+            false,
+            None,
+        );
+        agent.transcript = vec![
+            crate::agent_loop::AgentMessage::user_text("run a tool", 0),
+            crate::agent_loop::AgentMessage::Assistant(crate::agent_loop::AssistantMessage::new(
+                vec![crate::agent_loop::ContentBlock::ToolCall {
+                    id: "call-1".into(),
+                    name: "noop".into(),
+                    arguments: serde_json::json!({}),
+                }],
+                crate::agent_loop::StopReason::ToolUse,
+            )),
+            crate::agent_loop::AgentMessage::ToolResult(crate::agent_loop::ToolResultMessage {
+                tool_call_id: "call-1".into(),
+                tool_name: "noop".into(),
+                content: vec![crate::agent_loop::ContentBlock::text("tool finished")],
+                details: serde_json::json!({}),
+                usage: None,
+                is_error: false,
+                duration_ms: None,
+                timestamp: 0,
+            }),
+        ];
+        agent.save_session().unwrap();
+
+        agent.continue_session(&mut |_| {}).await.unwrap();
+        assert_eq!(
+            responses_input(&agent.transcript).last().unwrap()["role"],
+            "assistant"
+        );
+        assert!(matches!(
+            agent.transcript.last(),
+            Some(crate::agent_loop::AgentMessage::Assistant(message))
+                if message.content.iter().any(
+                    |block| matches!(block, crate::agent_loop::ContentBlock::Text { text } if text == "continued")
+                )
+        ));
+        let session = std::fs::read_to_string(agent.session_path()).unwrap();
+        let parsed = SessionDocument::parse_jsonl(&session).unwrap();
+        assert_eq!(
+            parsed
+                .active_branch_entries()
+                .into_iter()
+                .filter(|entry| entry.entry_type.as_str() == "message")
+                .count(),
+            4
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn prompt_inputs_read_files_or_fall_back_to_literal_text() {
         let dir = std::env::temp_dir().join(format!("mu-prompt-{}", uuid::Uuid::new_v4()));
