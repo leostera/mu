@@ -47,6 +47,27 @@ impl Theme {
         }
     }
 
+    /// Custom theme names from valid JSON files under `<agent_dir>/themes`, sorted by name.
+    pub fn custom_names(agent_dir: &std::path::Path) -> Vec<String> {
+        let directory = agent_dir.join("themes");
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        let mut names = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+                    .then(|| path.file_stem()?.to_str().map(str::to_owned))
+                    .flatten()
+            })
+            .filter(|name| Self::named(name).is_none() && Self::resolve(name, agent_dir).is_ok())
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// A bundled theme, a JSON file path, or `<agent_dir>/themes/<name>.json`.
     pub fn resolve(name: &str, agent_dir: &std::path::Path) -> Result<Self, String> {
         if let Some(theme) = Self::named(name) {
@@ -169,6 +190,7 @@ mod tests {
         assert!(Theme::resolve("light", &dir).is_ok());
         assert!(Theme::resolve("custom", &dir).is_ok());
         assert!(Theme::resolve(dir.join("themes/custom.json").to_str().unwrap(), &dir).is_ok());
+        assert_eq!(Theme::custom_names(&dir), ["custom"]);
         std::fs::write(dir.join("themes/bad.json"), "{").unwrap();
         assert!(
             Theme::resolve("bad", &dir)

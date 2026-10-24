@@ -1999,8 +1999,8 @@ fn handle_picker(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 } else {
                     mu_core::settings::Scope::Global
                 };
-                let settings = match agent.try_lock() {
-                    Ok(agent) => agent.settings(),
+                let (settings, agent_dir) = match agent.try_lock() {
+                    Ok(agent) => (agent.settings(), agent.agent_dir().to_owned()),
                     Err(_) => {
                         app.show_status("Mu is busy.".to_owned());
                         app.picker = None;
@@ -2017,7 +2017,7 @@ fn handle_picker(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                     return;
                 }
                 app.setting_scope = next_scope;
-                app.picker = Some(settings_picker(&settings, next_scope));
+                app.picker = Some(settings_picker(&settings, next_scope, &agent_dir));
                 app.show_status(format!(
                     "Settings scope: {}",
                     if next_scope == mu_core::settings::Scope::Project {
@@ -2197,6 +2197,7 @@ const SETTINGS_SCOPE_PROJECT: &str = "@scope:project";
 fn settings_picker(
     settings: &mu_core::settings::Settings,
     scope: mu_core::settings::Scope,
+    agent_dir: &std::path::Path,
 ) -> Picker {
     let state = |key: &str| {
         settings
@@ -2244,10 +2245,15 @@ fn settings_picker(
     let current_theme = settings
         .get_for_scope(scope, "theme")
         .and_then(|value| value.as_str().map(str::to_owned));
-    for name in ["dark", "light"] {
+    for name in ["dark", "light"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(Theme::custom_names(agent_dir))
+    {
         items.push(chrome::SelectItem {
             label: format!("Theme: {name}"),
-            description: (current_theme.as_deref() == Some(name)).then(|| "current".to_owned()),
+            description: (current_theme.as_deref() == Some(name.as_str()))
+                .then(|| "current".to_owned()),
         });
         values.push(format!("theme {name}"));
     }
@@ -2822,7 +2828,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                     {
                         app.setting_scope = mu_core::settings::Scope::Global;
                     }
-                    app.picker = Some(settings_picker(&settings, app.setting_scope));
+                    app.picker = Some(settings_picker(&settings, app.setting_scope, agent.agent_dir()));
                     "Settings: Enter toggles booleans or applies a value; numeric settings open in the editor.".to_owned()
                 }
             };
@@ -3870,13 +3876,20 @@ mod tests {
     #[test]
     fn settings_picker_shows_current_values_with_defaults() {
         let dir = std::env::temp_dir().join(format!("mu-settings-ui-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("themes")).unwrap();
+        std::fs::write(
+            dir.join("themes/cobalt.json"),
+            include_str!("../assets/themes/dark.json"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("themes/broken.json"), "{").unwrap();
         std::fs::write(dir.join("settings.json"), r#"{"quietStartup":true}"#).unwrap();
         let settings = mu_core::settings::Settings::load(&dir, &dir, true);
-        let picker = super::settings_picker(&settings, mu_core::settings::Scope::Global);
+        let picker = super::settings_picker(&settings, mu_core::settings::Scope::Global, &dir);
         assert_eq!(picker.values[0], super::SETTINGS_SCOPE_PROJECT);
         assert!(picker.items[0].label.contains("Global"));
-        let project_picker = super::settings_picker(&settings, mu_core::settings::Scope::Project);
+        let project_picker =
+            super::settings_picker(&settings, mu_core::settings::Scope::Project, &dir);
         assert_eq!(project_picker.values[0], super::SETTINGS_SCOPE_GLOBAL);
         assert!(project_picker.items[0].label.contains("Project"));
         let state = |key: &str| {
@@ -3898,6 +3911,8 @@ mod tests {
         assert!(picker.values.contains(&"steeringMode all".into()));
         assert!(picker.values.contains(&"theme dark".into()));
         assert!(picker.values.contains(&"theme light".into()));
+        assert!(picker.values.contains(&"theme cobalt".into()));
+        assert!(!picker.values.contains(&"theme broken".into()));
         assert!(picker.values.contains(&"tuiMode regular".into()));
         assert!(picker.values.contains(&"tuiMode fullscreen".into()));
         let numeric = picker
@@ -3922,7 +3937,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mu-settings-edit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let settings = mu_core::settings::Settings::load(&dir, &dir, true);
-        let mut picker = super::settings_picker(&settings, mu_core::settings::Scope::Global);
+        let mut picker = super::settings_picker(&settings, mu_core::settings::Scope::Global, &dir);
         picker.selection = picker
             .values
             .iter()
