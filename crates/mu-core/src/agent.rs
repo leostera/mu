@@ -7797,6 +7797,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn queue_mode_settings_control_scripted_agent_request_batches() {
+        let cases = [
+            ("steeringMode", PromptBehavior::Steer, "all", 1),
+            ("steeringMode", PromptBehavior::Steer, "one-at-a-time", 2),
+            ("followUpMode", PromptBehavior::FollowUp, "all", 2),
+            ("followUpMode", PromptBehavior::FollowUp, "one-at-a-time", 3),
+        ];
+        for (key, behavior, mode, expected_assistant_turns) in cases {
+            let root = std::env::temp_dir().join(format!("mu-queue-mode-{}", uuid::Uuid::new_v4()));
+            let mut agent = scripted_agent(
+                &root,
+                (0..4)
+                    .map(|index| Ok(scripted_reply(&format!("reply {index}"), vec![])))
+                    .collect(),
+            );
+            let settings_path = root.join("agent/settings.json");
+            std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+            std::fs::write(&settings_path, format!(r#"{{"{key}":"{mode}"}}"#)).unwrap();
+            agent
+                .prompt_queue
+                .enqueue("queued one".to_owned(), behavior);
+            agent
+                .prompt_queue
+                .enqueue("queued two".to_owned(), behavior);
+
+            agent
+                .submit("initial prompt".to_owned(), &mut |_| {})
+                .await
+                .unwrap();
+            let assistant_turns = agent
+                .transcript
+                .iter()
+                .filter(|message| matches!(message, crate::agent_loop::AgentMessage::Assistant(_)))
+                .count();
+            assert_eq!(
+                assistant_turns, expected_assistant_turns,
+                "{key}={mode} should batch queued {behavior:?} messages as Pi does"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[test]
     fn restores_codemode_store_and_tool_loadout_from_the_active_session_branch() {
         let input = [
