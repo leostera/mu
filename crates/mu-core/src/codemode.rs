@@ -82,13 +82,21 @@ pub(crate) fn definition(mcp: &McpRegistry, inline_budget: Option<usize>) -> Val
     })
 }
 
+/// The model-facing result of one script: output text, `image()` outputs, and store writes.
+pub(crate) struct ScriptOutcome {
+    pub(crate) output: String,
+    pub(crate) is_error: bool,
+    pub(crate) store_writes: Option<Value>,
+    pub(crate) images: Vec<tools::ToolImage>,
+}
+
 pub(crate) async fn execute(
     cwd: &Path,
     mcp: &McpRegistry,
     stored_values: &Value,
     arguments: &Value,
     shell_environment: &HashMap<String, String>,
-) -> Result<(String, bool, Option<Value>), String> {
+) -> Result<ScriptOutcome, String> {
     let code = arguments
         .get("code")
         .and_then(Value::as_str)
@@ -246,15 +254,34 @@ pub(crate) async fn execute(
                         .is_some_and(|set| !set.is_empty())
                 })
                 .cloned();
-            Ok((response, !ok, store_writes))
+            let images = result
+                .value
+                .get("images")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|image| {
+                    Some(tools::ToolImage {
+                        data: image.get("data")?.as_str()?.to_owned(),
+                        mime_type: image.get("mimeType")?.as_str()?.to_owned(),
+                    })
+                })
+                .collect();
+            Ok(ScriptOutcome {
+                output: response,
+                is_error: !ok,
+                store_writes,
+                images,
+            })
         }
-        Err(error) => Ok((
-            format!(
+        Err(error) => Ok(ScriptOutcome {
+            output: format!(
                 "Script failed\nWall time {elapsed:.1} seconds\nOutput:\nScript error:\n{error}"
             ),
-            true,
-            None,
-        )),
+            is_error: true,
+            store_writes: None,
+            images: Vec::new(),
+        }),
     }
 }
 
@@ -289,7 +316,41 @@ fn script_source(code: &str, metadata: &[Value], stored_values: &Value) -> Resul
   globalThis.env = undefined;
   globalThis.Deno = undefined;
   globalThis.text = (value) => __muOutput.push(typeof value === "string" ? value : JSON.stringify(value));
-  globalThis.image = (_value) => __muOutput.push("[image output is not supported by this Mu renderer]");
+  const __muImages = [];
+  const __muImageExpects = 'image expects a non-empty image URL string, an object with image_url, or an image block {{ type: "image", data, mimeType }}';
+  // Pi's prelude `image()`: accept base64 data URIs or image blocks, detect the real type.
+  globalThis.image = (value) => {{
+    let url;
+    if (typeof value === "string") url = value;
+    else if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(__muImageExpects);
+    else if (value.image_url !== undefined) {{
+      if (typeof value.image_url !== "string") throw new TypeError(__muImageExpects);
+      url = value.image_url;
+    }} else {{
+      if (typeof value.type !== "string") throw new TypeError(__muImageExpects);
+      if (value.type !== "image") throw new TypeError('image only accepts image blocks, got "' + value.type + '"');
+      if (typeof value.data !== "string" || value.data === "") throw new TypeError("image expected image block data");
+      url = value.data.toLowerCase().startsWith("data:") ? value.data : "data:;base64," + value.data;
+    }}
+    if (url === "") throw new TypeError(__muImageExpects);
+    const colon = url.indexOf(":");
+    const scheme = colon === -1 ? "" : url.slice(0, colon).toLowerCase();
+    if (scheme === "http" || scheme === "https") throw new TypeError("remote image URLs are not supported in tool outputs. Pass a base64 data URI instead");
+    const comma = url.indexOf(",");
+    const header = comma === -1 ? [] : url.slice(colon + 1, comma).split(";");
+    if (scheme !== "data" || comma === -1 || header.slice(1).every((part) => part.toLowerCase() !== "base64")) {{
+      throw new TypeError("invalid image output. Pass a base64 data URI instead");
+    }}
+    const data = url.slice(comma + 1).replace(/\s+/g, "");
+    if (data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={{0,2}}$/.test(data)) {{
+      throw new TypeError("invalid image output. The image data is not valid base64 (truncated or corrupted?)");
+    }}
+    const head = data.slice(0, 16);
+    const signatures = [["image/png", /^iVBORw0KGg/], ["image/jpeg", /^[/]9j[/](?!9)/], ["image/gif", /^R0lGOD[dl]h/], ["image/webp", /^UklG.{{8}}RUJQ/]];
+    const signature = signatures.find(([, pattern]) => pattern.test(head));
+    if (!signature) throw new TypeError("invalid image output. The image data is not a PNG, JPEG, GIF, or WebP image");
+    __muImages.push({{ data, mimeType: signature[0] }});
+  }};
   globalThis.exit = () => {{ throw __muExit; }};
   globalThis.store = (key, value) => {{
     const cloned = JSON.parse(JSON.stringify(value));
@@ -316,9 +377,9 @@ fn script_source(code: &str, metadata: &[Value], stored_values: &Value) -> Resul
 {code}
 }})(); }}
     catch (error) {{ if (error !== __muExit) throw error; }}
-    return {{ ok: true, value: value === undefined ? null : value, output: __muOutput, storeWrites: {{ set: __muStoreWrites, delete: [] }} }};
+    return {{ ok: true, value: value === undefined ? null : value, output: __muOutput, images: __muImages, storeWrites: {{ set: __muStoreWrites, delete: [] }} }};
   }} catch (error) {{
-    return {{ ok: false, value: null, output: __muOutput, error: String(error && error.stack || error) }};
+    return {{ ok: false, value: null, output: __muOutput, images: __muImages, error: String(error && error.stack || error) }};
   }}
 }}"#
     ))
@@ -342,7 +403,7 @@ mod tests {
         fs::create_dir_all(&cwd).unwrap();
         fs::write(cwd.join("sample.txt"), "the file content").unwrap();
 
-        let (output, is_error, store_writes) = execute(
+        let ScriptOutcome { output, is_error, store_writes, .. } = execute(
             &cwd,
             &McpRegistry::default(),
             &json!({"count":1}),
@@ -362,12 +423,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_outputs_validate_like_pi_and_detect_the_real_type() {
+        let cwd = std::env::temp_dir().join(format!("mu-codemode-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&cwd).unwrap();
+        let run = |code: &str| {
+            let code = code.to_owned();
+            let cwd = cwd.clone();
+            async move {
+                execute(
+                    &cwd,
+                    &McpRegistry::default(),
+                    &json!({}),
+                    &json!({ "code": code }),
+                    &HashMap::new(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let ok = run("image('data:image/jpeg;base64,iVBORw0KGgoAAAAN'); image({ type: 'image', data: 'R0lGODlhAQAB', mimeType: 'image/png' });").await;
+        assert!(!ok.is_error, "{}", ok.output);
+        let kinds = ok
+            .images
+            .iter()
+            .map(|image| image.mime_type.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["image/png", "image/gif"]);
+        assert_eq!(ok.images[0].data, "iVBORw0KGgoAAAAN");
+
+        let remote = run("image('https://example.com/a.png')").await;
+        assert!(remote.is_error);
+        assert!(
+            remote
+                .output
+                .contains("remote image URLs are not supported in tool outputs")
+        );
+        let unknown = run("image('data:;base64,AAAA')").await;
+        assert!(
+            unknown
+                .output
+                .contains("is not a PNG, JPEG, GIF, or WebP image")
+        );
+        let corrupt = run("image('data:;base64,abc')").await;
+        assert!(corrupt.output.contains("not valid base64"));
+        fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[tokio::test]
     async fn script_passes_pi_session_environment_to_nested_bash() {
         let cwd = std::env::temp_dir().join(format!("mu-codemode-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&cwd).unwrap();
         let environment = HashMap::from([("PI_SESSION_ID".into(), "nested-session".into())]);
 
-        let (output, is_error, _) = execute(
+        let ScriptOutcome {
+            output, is_error, ..
+        } = execute(
             &cwd,
             &McpRegistry::default(),
             &json!({}),
@@ -387,7 +497,12 @@ mod tests {
         let cwd = std::env::temp_dir().join(format!("mu-codemode-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&cwd).unwrap();
 
-        let (output, is_error, store_writes) = execute(
+        let ScriptOutcome {
+            output,
+            is_error,
+            store_writes,
+            ..
+        } = execute(
             &cwd,
             &McpRegistry::default(),
             &json!({}),

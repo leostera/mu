@@ -675,10 +675,14 @@ impl ToolRuntime {
             let shared = lock(&self.shared);
             (shared.mcp.clone(), shared.codemode_store.clone())
         };
-        let (output, is_error, store_writes) =
-            crate::codemode::execute(&self.cwd, &mcp, &store, params, &self.shell_environment)
-                .await
-                .map_err(|error| error.to_string())?;
+        let crate::codemode::ScriptOutcome {
+            output,
+            is_error,
+            store_writes,
+            images,
+        } = crate::codemode::execute(&self.cwd, &mcp, &store, params, &self.shell_environment)
+            .await
+            .map_err(|error| error.to_string())?;
         if let Some(writes) = store_writes {
             let mut shared = lock(&self.shared);
             apply_codemode_store_write(&mut shared.codemode_store, &writes);
@@ -686,7 +690,7 @@ impl ToolRuntime {
                 .session_entries
                 .push(("codemode-store".into(), writes));
         }
-        Ok(flatten_result(output, is_error, None))
+        Ok(flatten_result_with_images(output, images, is_error, None))
     }
 
     async fn call_independent(

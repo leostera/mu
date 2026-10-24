@@ -2498,7 +2498,7 @@ done
             1
         );
 
-        let (output, is_error, store_writes) = crate::codemode::execute(
+        let crate::codemode::ScriptOutcome { output, is_error, store_writes, .. } = crate::codemode::execute(
             Path::new("."),
             &registry,
             &json!({}),
