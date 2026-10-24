@@ -257,6 +257,14 @@ fn is_truthy_env_flag(value: &str) -> bool {
     matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
 }
 
+fn resolve_tui_mode(cli_mode: Option<TuiMode>, setting: Option<&str>) -> TuiMode {
+    cli_mode.unwrap_or(if setting == Some("regular") {
+        TuiMode::Regular
+    } else {
+        TuiMode::Fullscreen
+    })
+}
+
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     mu_core::timings::time("args parsed");
     let offline = cli.offline
@@ -273,6 +281,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             std::env::set_var("PI_SKIP_VERSION_CHECK", "1");
         }
     }
+    let mut configured_tui_mode = None;
     if let Some(agent_dir) = std::env::var_os("PI_CODING_AGENT_DIR")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent")))
@@ -294,6 +303,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 (_, true) => mu_core::settings::Settings::load(&agent_dir, &cwd, false),
                 _ => mu_core::settings::Settings::load_for_project(&agent_dir, &cwd),
             };
+            configured_tui_mode = settings
+                .get("tuiMode")
+                .and_then(|value| value.as_str().map(str::to_owned));
             let proxy = settings.get("httpProxy");
             for (name, value) in mu_core::settings::proxy_env_updates(
                 proxy.as_ref().and_then(|v| v.as_str()),
@@ -310,7 +322,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let is_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let alternate_screen = cli.tui_mode != Some(TuiMode::Regular);
+    let alternate_screen =
+        resolve_tui_mode(cli.tui_mode, configured_tui_mode.as_deref()) != TuiMode::Regular;
     if let Some(input) = &cli.export {
         let output = cli.prompt.first().map(PathBuf::from);
         match mu_core::export_session_file(input, output.as_deref()) {
@@ -662,6 +675,19 @@ mod tests {
             Some(TuiMode::Fullscreen)
         );
         assert!(Cli::try_parse_from(["mu", "--tui-mode", "compact"]).is_err());
+        assert_eq!(
+            super::resolve_tui_mode(None, Some("regular")),
+            TuiMode::Regular
+        );
+        assert_eq!(
+            super::resolve_tui_mode(None, Some("invalid")),
+            TuiMode::Fullscreen
+        );
+        assert_eq!(
+            super::resolve_tui_mode(Some(TuiMode::Fullscreen), Some("regular")),
+            TuiMode::Fullscreen,
+            "the CLI mode overrides the settings value"
+        );
         for value in ["1", "true", "TRUE", "yes"] {
             assert!(super::is_truthy_env_flag(value), "{value:?}");
         }

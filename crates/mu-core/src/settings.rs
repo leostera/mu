@@ -95,6 +95,7 @@ pub fn proxy_env_updates(
 /// Settings editable as text, with their allowed values (a subset of Pi's settings schema).
 const ENUM_SETTINGS: &[(&str, &[&str])] = &[
     ("doubleEscapeAction", &["tree", "fork", "none"]),
+    ("tuiMode", &["fullscreen", "regular"]),
     ("steeringMode", &["all", "one-at-a-time"]),
     ("followUpMode", &["all", "one-at-a-time"]),
     ("defaultProjectTrust", &["ask", "always", "never"]),
@@ -451,6 +452,10 @@ mod tests {
     fn enum_choices_are_exposed_for_settings_ui() {
         assert_eq!(enum_setting_options("theme"), None);
         assert_eq!(
+            enum_setting_options("tuiMode"),
+            Some(["fullscreen", "regular"].as_slice())
+        );
+        assert_eq!(
             enum_setting_options("steeringMode"),
             Some(["all", "one-at-a-time"].as_slice())
         );
@@ -459,6 +464,10 @@ mod tests {
 
     #[test]
     fn enum_and_number_settings_are_validated() {
+        assert_eq!(
+            parse_setting_value("tuiMode", "regular").unwrap(),
+            json!("regular")
+        );
         assert_eq!(
             parse_setting_value("theme", "custom/path.json").unwrap(),
             json!("custom/path.json")

@@ -2127,6 +2127,7 @@ const TOGGLE_SETTINGS: &[(&str, &str)] = &[
 
 const ENUM_SETTINGS: &[(&str, &str)] = &[
     ("doubleEscapeAction", "Double Escape action"),
+    ("tuiMode", "TUI mode"),
     ("steeringMode", "Steering mode"),
     ("followUpMode", "Follow-up mode"),
     ("defaultProjectTrust", "Default project trust"),
@@ -3809,6 +3810,8 @@ mod tests {
         assert!(picker.values.contains(&"steeringMode all".into()));
         assert!(picker.values.contains(&"theme dark".into()));
         assert!(picker.values.contains(&"theme light".into()));
+        assert!(picker.values.contains(&"tuiMode regular".into()));
+        assert!(picker.values.contains(&"tuiMode fullscreen".into()));
         let numeric = picker
             .values
             .iter()
