@@ -1075,6 +1075,7 @@ struct App {
     model_selector_open: bool,
     /// Generic selector overlay (thinking level, fork point); Enter runs `command <value>`.
     picker: Option<Picker>,
+    setting_scope: mu_core::settings::Scope,
     /// `(mime type, base64)` images attached to the next prompt (`@file` images).
     pending_images: Vec<(String, String)>,
     keybindings: keybindings::Keybindings,
@@ -1229,6 +1230,7 @@ impl App {
             command_selection: 0,
             model_selector_open: false,
             picker: None,
+            setting_scope: mu_core::settings::Scope::Global,
             pending_images: Vec::new(),
             keybindings: keybindings::Keybindings::default(),
             quiet_startup: false,
@@ -1986,6 +1988,46 @@ fn handle_picker(key: KeyEvent, app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
         KeyCode::Enter => {
             let command = picker.command;
             let value = picker.values[picker.selection].clone();
+            if command == "settings"
+                && matches!(
+                    value.as_str(),
+                    SETTINGS_SCOPE_GLOBAL | SETTINGS_SCOPE_PROJECT
+                )
+            {
+                let next_scope = if value == SETTINGS_SCOPE_PROJECT {
+                    mu_core::settings::Scope::Project
+                } else {
+                    mu_core::settings::Scope::Global
+                };
+                let settings = match agent.try_lock() {
+                    Ok(agent) => agent.settings(),
+                    Err(_) => {
+                        app.show_status("Mu is busy.".to_owned());
+                        app.picker = None;
+                        return;
+                    }
+                };
+                if next_scope == mu_core::settings::Scope::Project && !settings.project_is_trusted()
+                {
+                    app.show_status(
+                        "Trust this project with /trust yes before editing project settings."
+                            .to_owned(),
+                    );
+                    app.picker = None;
+                    return;
+                }
+                app.setting_scope = next_scope;
+                app.picker = Some(settings_picker(&settings, next_scope));
+                app.show_status(format!(
+                    "Settings scope: {}",
+                    if next_scope == mu_core::settings::Scope::Project {
+                        "Project"
+                    } else {
+                        "Global"
+                    }
+                ));
+                return;
+            }
             if let Some((minimum, maximum)) = (command == "settings")
                 .then(|| mu_core::settings::number_setting_range(&value))
                 .flatten()
@@ -2149,7 +2191,13 @@ const NUMBER_SETTINGS: &[(&str, &str)] = &[
     ("retry.maxRetries", "Maximum retries"),
 ];
 
-fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
+const SETTINGS_SCOPE_GLOBAL: &str = "@scope:global";
+const SETTINGS_SCOPE_PROJECT: &str = "@scope:project";
+
+fn settings_picker(
+    settings: &mu_core::settings::Settings,
+    scope: mu_core::settings::Scope,
+) -> Picker {
     let state = |key: &str| settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
     let mut items = TOGGLE_SETTINGS
         .iter()
@@ -2162,6 +2210,31 @@ fn settings_picker(settings: &mu_core::settings::Settings) -> Picker {
         .iter()
         .map(|(key, _)| (*key).to_owned())
         .collect::<Vec<_>>();
+    items.insert(
+        0,
+        chrome::SelectItem {
+            label: format!(
+                "Settings scope: {}",
+                match scope {
+                    mu_core::settings::Scope::Global => "Global",
+                    mu_core::settings::Scope::Project => "Project",
+                }
+            ),
+            description: Some(if settings.project_is_trusted() {
+                "Enter to switch scope".to_owned()
+            } else {
+                "trust the project before using project scope".to_owned()
+            }),
+        },
+    );
+    values.insert(
+        0,
+        if scope == mu_core::settings::Scope::Global {
+            SETTINGS_SCOPE_PROJECT.to_owned()
+        } else {
+            SETTINGS_SCOPE_GLOBAL.to_owned()
+        },
+    );
 
     let current_theme = settings
         .get("theme")
@@ -2712,7 +2785,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                         .transpose();
                     match theme {
                         Err(error) => error,
-                        Ok(theme) => match agent.set_setting_text(key, value) {
+                        Ok(theme) => match agent.set_setting_text_in_scope(app.setting_scope, key, value) {
                             Ok(stored) => {
                                 if let Some(theme) = theme {
                                     app.theme = theme;
@@ -2726,7 +2799,7 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 Ok(agent) if !argument.is_empty() => {
                     match TOGGLE_SETTINGS.iter().find(|(key, _)| *key == argument) {
                         None => format!("Unknown setting \"{argument}\""),
-                        Some((key, label)) => match agent.toggle_setting(key) {
+                        Some((key, label)) => match agent.toggle_setting_in_scope(app.setting_scope, key) {
                             Ok(on) => {
                                 if *key == "hideThinkingBlock" {
                                     app.hide_thinking = on;
@@ -2739,7 +2812,12 @@ fn execute_command(app: &mut App, agent: &Arc<Mutex<MuAgent>>) {
                 }
                 Ok(agent) => {
                     let settings = agent.settings();
-                    app.picker = Some(settings_picker(&settings));
+                    if app.setting_scope == mu_core::settings::Scope::Project
+                        && !settings.project_is_trusted()
+                    {
+                        app.setting_scope = mu_core::settings::Scope::Global;
+                    }
+                    app.picker = Some(settings_picker(&settings, app.setting_scope));
                     "Settings: Enter toggles booleans or applies a value; numeric settings open in the editor.".to_owned()
                 }
             };
@@ -3790,7 +3868,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("settings.json"), r#"{"quietStartup":true}"#).unwrap();
         let settings = mu_core::settings::Settings::load(&dir, &dir, true);
-        let picker = super::settings_picker(&settings);
+        let picker = super::settings_picker(&settings, mu_core::settings::Scope::Global);
+        assert_eq!(picker.values[0], super::SETTINGS_SCOPE_PROJECT);
+        assert!(picker.items[0].label.contains("Global"));
+        let project_picker = super::settings_picker(&settings, mu_core::settings::Scope::Project);
+        assert_eq!(project_picker.values[0], super::SETTINGS_SCOPE_GLOBAL);
+        assert!(project_picker.items[0].label.contains("Project"));
         let state = |key: &str| {
             let at = picker.values.iter().position(|v| v == key).unwrap();
             picker.items[at].description.clone().unwrap()
@@ -3834,7 +3917,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mu-settings-edit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let settings = mu_core::settings::Settings::load(&dir, &dir, true);
-        let mut picker = super::settings_picker(&settings);
+        let mut picker = super::settings_picker(&settings, mu_core::settings::Scope::Global);
         picker.selection = picker
             .values
             .iter()

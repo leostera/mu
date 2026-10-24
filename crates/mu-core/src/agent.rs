@@ -4114,12 +4114,21 @@ impl MuAgent {
         crate::settings::Settings::load_for_project(&self.agent_dir, &self.cwd)
     }
 
-    /// Flip a boolean setting in the global `settings.json`; returns the new value.
+    /// Flip a boolean setting in global `settings.json`; returns the new value.
     pub fn toggle_setting(&self, key: &str) -> Result<bool, AgentError> {
+        self.toggle_setting_in_scope(crate::settings::Scope::Global, key)
+    }
+
+    /// Flip a boolean setting in the requested settings layer.
+    pub fn toggle_setting_in_scope(
+        &self,
+        scope: crate::settings::Scope,
+        key: &str,
+    ) -> Result<bool, AgentError> {
         let mut settings = self.settings();
         let next = !settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
         settings
-            .set(crate::settings::Scope::Global, key, Value::Bool(next))
+            .set(scope, key, Value::Bool(next))
             .map_err(|error| AgentError::Configuration(error.to_string()))?;
         Ok(next)
     }
@@ -4127,10 +4136,20 @@ impl MuAgent {
     /// Set an enum or number setting from text (`/settings <key> <value>`), validated like Pi's
     /// schema for the keys Mu exposes. Returns the stored value.
     pub fn set_setting_text(&self, key: &str, text: &str) -> Result<Value, AgentError> {
+        self.set_setting_text_in_scope(crate::settings::Scope::Global, key, text)
+    }
+
+    /// Set and validate a value in the requested settings layer.
+    pub fn set_setting_text_in_scope(
+        &self,
+        scope: crate::settings::Scope,
+        key: &str,
+        text: &str,
+    ) -> Result<Value, AgentError> {
         let value =
             crate::settings::parse_setting_value(key, text).map_err(AgentError::Configuration)?;
         self.settings()
-            .set(crate::settings::Scope::Global, key, value.clone())
+            .set(scope, key, value.clone())
             .map_err(|error| AgentError::Configuration(error.to_string()))?;
         Ok(value)
     }
@@ -5052,6 +5071,38 @@ mod tests {
             &root.join("missing-agent"),
             &root
         ));
+        std::fs::remove_dir_all(root).unwrap();
+        crate::mcp::set_project_trust_override(None);
+    }
+
+    #[test]
+    fn settings_can_be_written_to_the_trusted_project_scope() {
+        let root =
+            std::env::temp_dir().join(format!("mu-project-setting-write-{}", uuid::Uuid::new_v4()));
+        let agent = scripted_agent(&root, vec![]);
+        crate::mcp::set_project_trust_override(None);
+
+        let denied =
+            agent.set_setting_text_in_scope(crate::settings::Scope::Project, "tuiMode", "regular");
+        assert!(denied.is_err(), "untrusted project writes must be refused");
+
+        crate::mcp::save_project_trust(agent.agent_dir(), agent.cwd(), true).unwrap();
+        assert_eq!(
+            agent
+                .set_setting_text_in_scope(crate::settings::Scope::Project, "tuiMode", "regular",)
+                .unwrap(),
+            serde_json::json!("regular")
+        );
+        assert!(
+            agent
+                .toggle_setting_in_scope(crate::settings::Scope::Project, "quietStartup")
+                .unwrap()
+        );
+        let project_settings = std::fs::read_to_string(root.join(".pi/settings.json")).unwrap();
+        assert!(project_settings.contains("\"tuiMode\": \"regular\""));
+        assert!(project_settings.contains("\"quietStartup\": true"));
+        assert!(!root.join("agent/settings.json").exists());
+
         std::fs::remove_dir_all(root).unwrap();
         crate::mcp::set_project_trust_override(None);
     }

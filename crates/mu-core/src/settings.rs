@@ -327,6 +327,11 @@ impl Settings {
             .or_else(|| lookup(&defaults()))
     }
 
+    /// Whether project values from this settings snapshot were loaded and may be written.
+    pub fn project_is_trusted(&self) -> bool {
+        self.project_trusted
+    }
+
     /// Drain the diagnostics collected while loading.
     pub fn drain_errors(&mut self) -> Vec<SettingsError> {
         std::mem::take(&mut self.errors)
