@@ -57,11 +57,19 @@ impl Theme {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let path = entry.path();
-                (path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-                    .then(|| path.file_stem()?.to_str().map(str::to_owned))
-                    .flatten()
+                if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                    return None;
+                }
+                let file_stem = path.file_stem()?.to_str()?;
+                let document: Value =
+                    serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+                let name = document.get("name")?.as_str()?;
+                (name == file_stem
+                    && !name.contains('/')
+                    && Self::named(name).is_none()
+                    && Self::resolve(name, agent_dir).is_ok())
+                .then(|| name.to_owned())
             })
-            .filter(|name| Self::named(name).is_none() && Self::resolve(name, agent_dir).is_ok())
             .collect::<Vec<_>>();
         names.sort();
         names.dedup();
@@ -185,12 +193,12 @@ mod tests {
         use super::Theme;
         let dir = std::env::temp_dir().join(format!("mu-theme-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("themes")).unwrap();
-        let json = include_str!("../../assets/themes/dark.json");
-        std::fs::write(dir.join("themes/custom.json"), json).unwrap();
+        let json = r##"{"name":"cobalt","colors":{"text":"#112233"}}"##;
+        std::fs::write(dir.join("themes/cobalt.json"), json).unwrap();
         assert!(Theme::resolve("light", &dir).is_ok());
-        assert!(Theme::resolve("custom", &dir).is_ok());
-        assert!(Theme::resolve(dir.join("themes/custom.json").to_str().unwrap(), &dir).is_ok());
-        assert_eq!(Theme::custom_names(&dir), ["custom"]);
+        assert!(Theme::resolve("cobalt", &dir).is_ok());
+        assert!(Theme::resolve(dir.join("themes/cobalt.json").to_str().unwrap(), &dir).is_ok());
+        assert_eq!(Theme::custom_names(&dir), ["cobalt"]);
         std::fs::write(dir.join("themes/bad.json"), "{").unwrap();
         assert!(
             Theme::resolve("bad", &dir)

@@ -3879,7 +3879,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("themes")).unwrap();
         std::fs::write(
             dir.join("themes/cobalt.json"),
-            include_str!("../assets/themes/dark.json"),
+            r##"{"name":"cobalt","colors":{"text":"#112233"}}"##,
         )
         .unwrap();
         std::fs::write(dir.join("themes/broken.json"), "{").unwrap();
