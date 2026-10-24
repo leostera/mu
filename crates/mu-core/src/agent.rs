@@ -6582,6 +6582,9 @@ mod tests {
                 Ok(scripted_reply("processed", vec![])),
             ],
         );
+        agent
+            .prompt_queue
+            .enqueue("keep queued".to_owned(), super::PromptBehavior::Steer);
         assert_eq!(
             agent
                 .continue_session(&mut |_| {})
@@ -6590,6 +6593,37 @@ mod tests {
                 .to_string(),
             "session: No messages to continue from"
         );
+        assert_eq!(
+            agent.prompt_queue.take_next(),
+            Some(("keep queued".to_owned(), super::PromptBehavior::Steer))
+        );
+        agent
+            .transcript
+            .push(crate::agent_loop::AgentMessage::System(
+                crate::agent_loop::SystemMessage {
+                    content: "system only".into(),
+                    sections: None,
+                    tools_added: Vec::new(),
+                    tools_removed: Vec::new(),
+                    timestamp: 0,
+                },
+            ));
+        agent
+            .prompt_queue
+            .enqueue("still queued".to_owned(), super::PromptBehavior::FollowUp);
+        assert_eq!(
+            agent
+                .continue_session(&mut |_| {})
+                .await
+                .unwrap_err()
+                .to_string(),
+            "session: No messages to continue from"
+        );
+        assert_eq!(
+            agent.prompt_queue.take_next(),
+            Some(("still queued".to_owned(), super::PromptBehavior::FollowUp))
+        );
+        agent.transcript.clear();
 
         agent.session.append_user_text("pending prompt");
         agent
