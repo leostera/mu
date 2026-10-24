@@ -1,0 +1,26 @@
+[package]
+name = "mu-bench"
+description = "Criterion benchmarks for Mu's hot paths."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+# The fixtures library has unit tests, not benchmarks.
+bench = false
+
+[dependencies]
+mu-core = { path = "../mu-core", features = ["bench-internals"] }
+mu-cli = { path = "../mu-cli" }
+mu-session = { path = "../mu-session" }
+ratatui = { version = "0.30", default-features = false }
+serde_json.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "hot_paths"
+harness = false

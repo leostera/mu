@@ -716,6 +716,32 @@ impl TerminalResponse {
     }
 }
 
+/// Feeds Anthropic stream events through the decoder; returns text bytes plus delta events.
+#[cfg(feature = "bench-internals")]
+pub fn decode_anthropic_events(events: &[Value]) -> usize {
+    let mut decoder = anthropic::Decoder::default();
+    let mut deltas = 0;
+    for event in events {
+        decoder
+            .feed(event, &mut |_| deltas += 1)
+            .expect("benchmark events decode");
+    }
+    decoder.into_reply().text.len() + deltas
+}
+
+/// Feeds Chat Completions chunks through the decoder; returns text bytes plus delta events.
+#[cfg(feature = "bench-internals")]
+pub fn decode_completions_chunks(chunks: &[Value]) -> usize {
+    let mut decoder = completions::Decoder::default();
+    let mut deltas = 0;
+    for chunk in chunks {
+        decoder
+            .feed(chunk, &mut |_| deltas += 1)
+            .expect("benchmark chunks decode");
+    }
+    decoder.into_reply().text.len() + deltas
+}
+
 struct Reply {
     text: String,
     thinking: String,
@@ -1714,19 +1740,14 @@ impl Provider {
             return Err(http_failure(response).await);
         }
         let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
+        let mut frames = crate::sse::SseFrames::default();
         let mut decoder = google::Decoder::default();
         while let Some(chunk) = stream.next().await {
-            bytes.extend_from_slice(
+            frames.push(
                 &chunk.map_err(|e| AgentError::Provider(format!("model stream failed: {e}")))?,
             );
-            while let Some(pos) = bytes.windows(2).position(|w| w == b"\n\n") {
-                let frame: Vec<_> = bytes.drain(..pos + 2).collect();
-                let frame = String::from_utf8_lossy(&frame);
-                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data:")) else {
-                    continue;
-                };
-                if let Ok(event) = serde_json::from_str::<Value>(data.trim()) {
+            while let Some(data) = frames.next_data() {
+                if let Ok(event) = serde_json::from_str::<Value>(&data) {
                     decoder
                         .feed(&event, on_event)
                         .map_err(AgentError::Provider)?;
@@ -1772,21 +1793,16 @@ impl Provider {
             return Err(http_failure(response).await);
         }
         let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
+        let mut frames = crate::sse::SseFrames::default();
         let mut decoder = completions::Decoder::default();
         while let Some(chunk) = stream.next().await {
-            bytes.extend_from_slice(
+            frames.push(
                 &chunk.map_err(|e| AgentError::Provider(format!("model stream failed: {e}")))?,
             );
-            while let Some(pos) = bytes.windows(2).position(|w| w == b"\n\n") {
-                let frame: Vec<_> = bytes.drain(..pos + 2).collect();
-                let frame = String::from_utf8_lossy(&frame);
-                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data:")) else {
-                    continue;
-                };
-                if data.trim() == "[DONE]" {
+            while let Some(data) = frames.next_data() {
+                if data == "[DONE]" {
                     decoder.feed_done();
-                } else if let Ok(event) = serde_json::from_str::<Value>(data.trim()) {
+                } else if let Ok(event) = serde_json::from_str::<Value>(&data) {
                     decoder
                         .feed(&event, on_event)
                         .map_err(AgentError::Provider)?;
@@ -1954,19 +1970,14 @@ impl Provider {
             return Err(http_failure(response).await);
         }
         let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
+        let mut frames = crate::sse::SseFrames::default();
         let mut decoder = anthropic::Decoder::default();
         while let Some(chunk) = stream.next().await {
-            bytes.extend_from_slice(
+            frames.push(
                 &chunk.map_err(|e| AgentError::Provider(format!("model stream failed: {e}")))?,
             );
-            while let Some(pos) = bytes.windows(2).position(|w| w == b"\n\n") {
-                let frame: Vec<_> = bytes.drain(..pos + 2).collect();
-                let frame = String::from_utf8_lossy(&frame);
-                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data:")) else {
-                    continue;
-                };
-                if let Ok(event) = serde_json::from_str::<Value>(data.trim()) {
+            while let Some(data) = frames.next_data() {
+                if let Ok(event) = serde_json::from_str::<Value>(&data) {
                     decoder
                         .feed(&event, on_event)
                         .map_err(AgentError::Provider)?;
@@ -2121,7 +2132,7 @@ impl Provider {
             return Err(http_failure(response).await);
         }
         let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
+        let mut frames = crate::sse::SseFrames::default();
         let mut text = String::new();
         let mut thinking = String::new();
         let mut thinking_signature = None;
@@ -2131,16 +2142,11 @@ impl Provider {
         let (mut input_tokens, mut output_tokens) = (0, 0);
         let (mut cache_read, mut cache_write, mut reasoning, mut total_tokens) = (0, 0, None, 0);
         while let Some(chunk) = stream.next().await {
-            bytes.extend_from_slice(
+            frames.push(
                 &chunk.map_err(|e| AgentError::Provider(format!("model stream failed: {e}")))?,
             );
-            while let Some(pos) = bytes.windows(2).position(|w| w == b"\n\n") {
-                let frame: Vec<_> = bytes.drain(..pos + 2).collect();
-                let frame = String::from_utf8_lossy(&frame);
-                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data:")) else {
-                    continue;
-                };
-                if let Ok(event) = serde_json::from_str::<Value>(data.trim()) {
+            while let Some(data) = frames.next_data() {
+                if let Ok(event) = serde_json::from_str::<Value>(&data) {
                     match event.get("type").and_then(Value::as_str).unwrap_or("") {
                         "response.output_text.delta" | "response.refusal.delta" => {
                             if let Some(s) = event.get("delta").and_then(Value::as_str) {

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Exposes `mu_core::bench_internals` for the `mu-bench` crate; not a stable API.
+bench-internals = []
+
 [dependencies]
 chrono.workspace = true
 base64 = "0.22"

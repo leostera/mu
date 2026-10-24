@@ -20,6 +20,7 @@ pub mod path_utils;
 pub mod prompt_templates;
 pub mod settings;
 pub mod skills;
+pub mod sse;
 pub mod timings;
 mod tool_search;
 pub mod tools;
@@ -32,3 +33,21 @@ pub use agent::{
     run_prompt_json, run_prompt_with_options, run_prompt_with_session,
 };
 pub use mu_session as session;
+
+/// Entry points into crate-private hot paths, for benchmarks only.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub mod bench_internals {
+    use serde_json::Value;
+
+    pub use crate::agent::{decode_anthropic_events, decode_completions_chunks};
+
+    pub fn rank_tools(query: &str, tools: &[Value], limit: usize) -> Vec<Value> {
+        crate::tool_search::rank(query, tools, limit)
+    }
+
+    /// Pi's MCP output limit, with the full-output save stubbed out.
+    pub fn limit_mcp_text(text: &str) -> String {
+        crate::mcp::limit_mcp_text(text, |_| Ok("/dev/null".into()))
+    }
+}

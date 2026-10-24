@@ -353,7 +353,10 @@ fn truncate_middle(content: &str, max_bytes: usize) -> Option<(String, usize)> {
 }
 
 /// Pi's `limitMcpContent` for text: over 20 KiB, keep head and tail and save the full output.
-fn limit_mcp_text(text: &str, save: impl FnOnce(&str) -> Result<String, String>) -> String {
+pub(crate) fn limit_mcp_text(
+    text: &str,
+    save: impl FnOnce(&str) -> Result<String, String>,
+) -> String {
     let Some((truncated, total_bytes)) = truncate_middle(text, MCP_OUTPUT_MAX_BYTES) else {
         return text.to_owned();
     };

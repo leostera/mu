@@ -2,9 +2,9 @@ mod chrome;
 mod complete;
 pub(crate) mod fuzzy;
 mod keybindings;
-mod markdown;
+pub mod markdown;
 mod terminal;
-mod theme;
+pub mod theme;
 pub use theme::Theme;
 mod tool_view;
 
